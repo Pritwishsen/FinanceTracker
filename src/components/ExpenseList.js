@@ -90,8 +90,23 @@ function ExpenseList({ expenses, categories, onUpdate }) {
         <div className="screen">
             <div className="screen-header">
                 <h2>Expense History</h2>
-                <div className="expense-total">
-                    Total: {ValidationUtils.formatCurrency(totalAmount)}
+                <div className="expense-totals">
+                    {Object.keys(expensesByCurrency).length === 1 ? (
+                        <div className="expense-total">
+                            Total: {ValidationUtils.formatCurrency(
+                                Object.values(expensesByCurrency)[0].total,
+                                Object.keys(expensesByCurrency)[0]
+                            )}
+                        </div>
+                    ) : (
+                        <div className="expense-total-multi">
+                            {Object.entries(expensesByCurrency).map(([currency, data]) => (
+                                <div key={currency} className="expense-total-item">
+                                    {ValidationUtils.formatCurrency(data.total, currency)}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             </div>
 

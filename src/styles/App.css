@@ -228,7 +228,8 @@ body {
 }
 
 .expense-category,
-.expense-date {
+.expense-date,
+.expense-paid-by {
   font-size: 0.875rem;
   color: hsl(var(--text-secondary));
   display: flex;
@@ -261,6 +262,22 @@ body {
   border-radius: var(--radius);
   font-weight: 600;
   font-size: 0.875rem;
+}
+
+.expense-total-multi {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.expense-total-item {
+  background-color: hsl(var(--primary-color));
+  color: white;
+  padding: 0.25rem 0.75rem;
+  border-radius: calc(var(--radius) / 2);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-align: center;
 }
 
 /* Filters */
