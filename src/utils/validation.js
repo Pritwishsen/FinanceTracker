@@ -36,6 +36,11 @@ const ValidationUtils = {
             errors.subcategory = 'Subcategory is required';
         }
 
+        // Who's expense validation (optional)
+        if (expense.paidBy && expense.paidBy.trim().length > 0 && expense.paidBy.trim().length < 2) {
+            errors.paidBy = 'Name must be at least 2 characters if provided';
+        }
+
         return {
             isValid: Object.keys(errors).length === 0,
             errors
@@ -82,11 +87,30 @@ const ValidationUtils = {
         };
     },
 
-    formatCurrency: (amount) => {
-        return new Intl.NumberFormat('en-US', {
+    formatCurrency: (amount, currency = 'USD') => {
+        const currencyMap = {
+            'USD': { locale: 'en-US', currency: 'USD' },
+            'GBP': { locale: 'en-GB', currency: 'GBP' },
+            'EUR': { locale: 'en-EU', currency: 'EUR' },
+            'INR': { locale: 'en-IN', currency: 'INR' }
+        };
+        
+        const config = currencyMap[currency] || currencyMap['USD'];
+        
+        return new Intl.NumberFormat(config.locale, {
             style: 'currency',
-            currency: 'USD'
+            currency: config.currency
         }).format(amount);
+    },
+
+    getCurrencySymbol: (currency = 'USD') => {
+        const symbols = {
+            'USD': '$',
+            'GBP': '£',
+            'EUR': '€',
+            'INR': '₹'
+        };
+        return symbols[currency] || '$';
     },
 
     formatDate: (date) => {

@@ -3,6 +3,9 @@ class DataService {
     static data = {
         expenses: [],
         income: [],
+        settings: {
+            currency: 'USD' // Default currency
+        },
         categories: [
             {
                 id: 1,
@@ -155,6 +158,25 @@ class DataService {
             }
         }
         return false;
+    }
+
+    // Settings methods
+    static getSettings() {
+        return { ...this.data.settings };
+    }
+
+    static updateSettings(updates) {
+        this.data.settings = { ...this.data.settings, ...updates };
+        return this.data.settings;
+    }
+
+    static getCurrency() {
+        return this.data.settings.currency || 'USD';
+    }
+
+    static setCurrency(currency) {
+        this.data.settings.currency = currency;
+        return currency;
     }
 
     // Utility methods

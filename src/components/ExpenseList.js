@@ -59,6 +59,17 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     };
 
     const selectedCategory = categories.find(cat => cat.id === parseInt(filterCategory));
+    // Group expenses by currency and calculate totals
+    const expensesByCurrency = filteredExpenses.reduce((acc, expense) => {
+        const currency = expense.currency || 'USD';
+        if (!acc[currency]) {
+            acc[currency] = { total: 0, count: 0 };
+        }
+        acc[currency].total += expense.amount;
+        acc[currency].count += 1;
+        return acc;
+    }, {});
+
     const totalAmount = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
 
     if (editingExpense) {
@@ -171,13 +182,19 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                                         <i className="fas fa-tag"></i>
                                         {getCategoryName(expense.categoryId)} - {expense.subcategory}
                                     </div>
+                                    {expense.paidBy && (
+                                        <div className="expense-paid-by">
+                                            <i className="fas fa-user"></i>
+                                            Paid by: {expense.paidBy}
+                                        </div>
+                                    )}
                                     <div className="expense-date">
                                         <i className="fas fa-calendar"></i>
                                         {ValidationUtils.formatDate(expense.date)}
                                     </div>
                                 </div>
                                 <div className="expense-amount">
-                                    {ValidationUtils.formatCurrency(expense.amount)}
+                                    {ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}
                                 </div>
                             </div>
                             

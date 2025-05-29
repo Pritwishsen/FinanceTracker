@@ -4,7 +4,9 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         date: editExpense?.date || new Date().toISOString().split('T')[0],
         description: editExpense?.description || '',
         categoryId: editExpense?.categoryId || '',
-        subcategory: editExpense?.subcategory || ''
+        subcategory: editExpense?.subcategory || '',
+        paidBy: editExpense?.paidBy || '',
+        currency: editExpense?.currency || DataService.getCurrency()
     });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -80,7 +82,9 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
             date: new Date().toISOString().split('T')[0],
             description: recentExpense.description,
             categoryId: recentExpense.categoryId,
-            subcategory: recentExpense.subcategory
+            subcategory: recentExpense.subcategory,
+            paidBy: recentExpense.paidBy || '',
+            currency: formData.currency
         });
     };
 
@@ -135,9 +139,24 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                 )}
 
                 <div className="form-group">
+                    <label htmlFor="currency">Currency *</label>
+                    <select
+                        id="currency"
+                        className="form-select"
+                        value={formData.currency}
+                        onChange={(e) => handleInputChange('currency', e.target.value)}
+                    >
+                        <option value="USD">US Dollar ($)</option>
+                        <option value="GBP">British Pound (£)</option>
+                        <option value="EUR">Euro (€)</option>
+                        <option value="INR">Indian Rupee (₹)</option>
+                    </select>
+                </div>
+
+                <div className="form-group">
                     <label htmlFor="amount">Amount *</label>
                     <div className="input-group">
-                        <span className="input-group-text">$</span>
+                        <span className="input-group-text">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
                         <input
                             type="number"
                             id="amount"
@@ -215,6 +234,20 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                         {errors.subcategory && <div className="invalid-feedback">{errors.subcategory}</div>}
                     </div>
                 )}
+
+                <div className="form-group">
+                    <label htmlFor="paidBy">Who's Expense (Optional)</label>
+                    <input
+                        type="text"
+                        id="paidBy"
+                        className={`form-control ${errors.paidBy ? 'is-invalid' : ''}`}
+                        value={formData.paidBy}
+                        onChange={(e) => handleInputChange('paidBy', e.target.value)}
+                        placeholder="e.g., John, Mary, Shared"
+                    />
+                    {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
+                    <div className="form-text">Enter who paid for this expense (leave empty if it's your own)</div>
+                </div>
 
                 <div className="form-actions">
                     <button
