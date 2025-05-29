@@ -5,7 +5,7 @@ class DataService {
         expenses: [],
         income: [],
         settings: {
-            currency: 'USD'
+            currency: 'GBP'
         },
         categories: []
     };
@@ -292,7 +292,7 @@ class DataService {
 
     static async getCurrency() {
         await this.initialize();
-        return this.data.settings.currency || 'USD';
+        return this.data.settings.currency || 'GBP';
     }
 
     static async setCurrency(currency) {
