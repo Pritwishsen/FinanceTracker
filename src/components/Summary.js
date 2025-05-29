@@ -35,14 +35,16 @@ function Summary({ expenses, income, categories }) {
     };
 
     let filteredExpenses = filterByDateRange(expenses);
-    const filteredIncome = filterByDateRange(income);
+    let filteredIncome = filterByDateRange(income);
 
     // Apply "paid by" filter
     if (selectedPaidBy) {
         if (selectedPaidBy === 'self') {
             filteredExpenses = filteredExpenses.filter(expense => !expense.paidBy || expense.paidBy.trim() === '');
+            filteredIncome = filteredIncome.filter(incomeItem => !incomeItem.paidBy || incomeItem.paidBy.trim() === '');
         } else {
             filteredExpenses = filteredExpenses.filter(expense => expense.paidBy && expense.paidBy === selectedPaidBy);
+            filteredIncome = filteredIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy === selectedPaidBy);
         }
     }
 

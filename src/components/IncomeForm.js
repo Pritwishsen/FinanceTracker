@@ -3,7 +3,9 @@ function IncomeForm({ income, onUpdate }) {
         amount: '',
         date: new Date().toISOString().split('T')[0],
         source: '',
-        description: ''
+        description: '',
+        paidBy: '',
+        currency: 'GBP'
     });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -59,7 +61,9 @@ function IncomeForm({ income, onUpdate }) {
                     amount: '',
                     date: new Date().toISOString().split('T')[0],
                     source: '',
-                    description: ''
+                    description: '',
+                    paidBy: '',
+                    currency: 'GBP'
                 });
                 setEditingIncome(null);
                 setShowSuccess(false);
@@ -78,7 +82,9 @@ function IncomeForm({ income, onUpdate }) {
             amount: incomeItem.amount.toString(),
             date: incomeItem.date,
             source: incomeItem.source,
-            description: incomeItem.description || ''
+            description: incomeItem.description || '',
+            paidBy: incomeItem.paidBy || '',
+            currency: incomeItem.currency || 'GBP'
         });
     };
 
@@ -94,7 +100,9 @@ function IncomeForm({ income, onUpdate }) {
             amount: '',
             date: new Date().toISOString().split('T')[0],
             source: '',
-            description: ''
+            description: '',
+            paidBy: '',
+            currency: 'GBP'
         });
         setErrors({});
     };
@@ -130,9 +138,24 @@ function IncomeForm({ income, onUpdate }) {
                     )}
 
                     <div className="form-group">
+                        <label htmlFor="currency">Currency *</label>
+                        <select
+                            id="currency"
+                            className="form-select"
+                            value={formData.currency}
+                            onChange={(e) => handleInputChange('currency', e.target.value)}
+                        >
+                            <option value="USD">US Dollar ($)</option>
+                            <option value="GBP">British Pound (£)</option>
+                            <option value="EUR">Euro (€)</option>
+                            <option value="INR">Indian Rupee (₹)</option>
+                        </select>
+                    </div>
+
+                    <div className="form-group">
                         <label htmlFor="amount">Amount *</label>
                         <div className="input-group">
-                            <span className="input-group-text">$</span>
+                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
                             <input
                                 type="number"
                                 id="amount"
@@ -182,6 +205,19 @@ function IncomeForm({ income, onUpdate }) {
                             onChange={(e) => handleInputChange('description', e.target.value)}
                             placeholder="Additional details"
                         />
+                    </div>
+
+                    <div className="form-group">
+                        <label htmlFor="paidBy">Who's Income (Optional)</label>
+                        <input
+                            type="text"
+                            id="paidBy"
+                            className="form-control"
+                            value={formData.paidBy}
+                            onChange={(e) => handleInputChange('paidBy', e.target.value)}
+                            placeholder="e.g., John, Mary, Shared"
+                        />
+                        <div className="form-text">Enter who received this income (leave empty if it's your own)</div>
                     </div>
 
                     <div className="form-actions">
@@ -239,13 +275,19 @@ function IncomeForm({ income, onUpdate }) {
                                                 {incomeItem.description}
                                             </div>
                                         )}
+                                        {incomeItem.paidBy && (
+                                            <div className="income-paid-by">
+                                                <i className="fas fa-user"></i>
+                                                Received by: {incomeItem.paidBy}
+                                            </div>
+                                        )}
                                         <div className="income-date">
                                             <i className="fas fa-calendar"></i>
                                             {ValidationUtils.formatDate(incomeItem.date)}
                                         </div>
                                     </div>
                                     <div className="income-amount">
-                                        {ValidationUtils.formatCurrency(incomeItem.amount)}
+                                        {ValidationUtils.formatCurrency(incomeItem.amount, incomeItem.currency || 'GBP')}
                                     </div>
                                 </div>
                                 
