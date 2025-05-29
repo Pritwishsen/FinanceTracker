@@ -52,8 +52,15 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         }
 
         try {
+            // Auto-generate description if empty
+            let description = formData.description.trim();
+            if (!description && selectedCategory) {
+                description = `${selectedCategory.name} - ${formData.subcategory}`;
+            }
+
             const expenseData = {
                 ...formData,
+                description: description,
                 amount: parseFloat(formData.amount),
                 categoryId: parseInt(formData.categoryId)
             };
@@ -185,7 +192,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                 </div>
 
                 <div className="form-group">
-                    <label htmlFor="description">Description *</label>
+                    <label htmlFor="description">Description (Optional)</label>
                     <input
                         type="text"
                         id="description"
@@ -195,6 +202,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                         placeholder="Enter expense description"
                     />
                     {errors.description && <div className="invalid-feedback">{errors.description}</div>}
+                    <div className="form-text">Leave empty to auto-generate from category and subcategory</div>
                 </div>
 
                 <div className="form-group">

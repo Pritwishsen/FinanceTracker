@@ -19,11 +19,9 @@ const ValidationUtils = {
             }
         }
 
-        // Description validation
-        if (!expense.description || expense.description.trim().length === 0) {
-            errors.description = 'Description is required';
-        } else if (expense.description.trim().length < 3) {
-            errors.description = 'Description must be at least 3 characters';
+        // Description validation (optional)
+        if (expense.description && expense.description.trim().length > 0 && expense.description.trim().length < 3) {
+            errors.description = 'Description must be at least 3 characters if provided';
         }
 
         // Category validation
