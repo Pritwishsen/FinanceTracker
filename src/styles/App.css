@@ -497,6 +497,18 @@ body {
 }
 
 /* Summary Components */
+.summary-filters {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.summary-filters .form-select {
+  width: auto;
+  min-width: 120px;
+  font-size: 0.875rem;
+}
+
 .summary-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;

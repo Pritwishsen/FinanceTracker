@@ -1,6 +1,7 @@
 function Summary({ expenses, income, categories }) {
     const [timeRange, setTimeRange] = useState('month');
     const [selectedCategory, setSelectedCategory] = useState('');
+    const [selectedPaidBy, setSelectedPaidBy] = useState('');
 
     // Calculate date ranges
     const getDateRange = () => {
@@ -33,8 +34,23 @@ function Summary({ expenses, income, categories }) {
         });
     };
 
-    const filteredExpenses = filterByDateRange(expenses);
+    let filteredExpenses = filterByDateRange(expenses);
     const filteredIncome = filterByDateRange(income);
+
+    // Apply "paid by" filter
+    if (selectedPaidBy) {
+        if (selectedPaidBy === 'self') {
+            filteredExpenses = filteredExpenses.filter(expense => !expense.paidBy || expense.paidBy.trim() === '');
+        } else {
+            filteredExpenses = filteredExpenses.filter(expense => expense.paidBy && expense.paidBy === selectedPaidBy);
+        }
+    }
+
+    // Get unique "paid by" values for filter dropdown
+    const uniquePaidBy = [...new Set(expenses
+        .filter(expense => expense.paidBy && expense.paidBy.trim() !== '')
+        .map(expense => expense.paidBy)
+    )].sort();
 
     // Calculate totals
     const totalExpenses = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
@@ -102,16 +118,31 @@ function Summary({ expenses, income, categories }) {
         <div className="screen">
             <div className="screen-header">
                 <h2>Financial Summary</h2>
-                <select
-                    className="form-select form-select-sm"
-                    value={timeRange}
-                    onChange={(e) => setTimeRange(e.target.value)}
-                    style={{ width: 'auto' }}
-                >
-                    <option value="week">This Week</option>
-                    <option value="month">This Month</option>
-                    <option value="year">This Year</option>
-                </select>
+                <div className="summary-filters">
+                    <select
+                        className="form-select form-select-sm"
+                        value={timeRange}
+                        onChange={(e) => setTimeRange(e.target.value)}
+                    >
+                        <option value="week">This Week</option>
+                        <option value="month">This Month</option>
+                        <option value="year">This Year</option>
+                    </select>
+                    
+                    <select
+                        className="form-select form-select-sm"
+                        value={selectedPaidBy}
+                        onChange={(e) => setSelectedPaidBy(e.target.value)}
+                    >
+                        <option value="">All Expenses</option>
+                        <option value="self">My Expenses</option>
+                        {uniquePaidBy.map(person => (
+                            <option key={person} value={person}>
+                                {person}'s Expenses
+                            </option>
+                        ))}
+                    </select>
+                </div>
             </div>
 
             {/* Financial Overview Cards */}
