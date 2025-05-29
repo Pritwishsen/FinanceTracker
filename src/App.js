@@ -7,16 +7,37 @@ function App() {
     const [categories, setCategories] = useState([]);
 
     useEffect(() => {
-        // Load initial data
-        setExpenses(DataService.getExpenses());
-        setIncome(DataService.getIncome());
-        setCategories(DataService.getCategories());
+        // Load initial data asynchronously
+        const loadData = async () => {
+            try {
+                const [expensesData, incomeData, categoriesData] = await Promise.all([
+                    DataService.getExpenses(),
+                    DataService.getIncome(),
+                    DataService.getCategories()
+                ]);
+                setExpenses(expensesData);
+                setIncome(incomeData);
+                setCategories(categoriesData);
+            } catch (error) {
+                console.error('Error loading data:', error);
+            }
+        };
+        loadData();
     }, []);
 
-    const handleDataUpdate = () => {
-        setExpenses(DataService.getExpenses());
-        setIncome(DataService.getIncome());
-        setCategories(DataService.getCategories());
+    const handleDataUpdate = async () => {
+        try {
+            const [expensesData, incomeData, categoriesData] = await Promise.all([
+                DataService.getExpenses(),
+                DataService.getIncome(),
+                DataService.getCategories()
+            ]);
+            setExpenses(expensesData);
+            setIncome(incomeData);
+            setCategories(categoriesData);
+        } catch (error) {
+            console.error('Error updating data:', error);
+        }
     };
 
     const renderScreen = () => {
