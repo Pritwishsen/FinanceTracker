@@ -48,11 +48,16 @@ function Summary({ expenses, income, categories }) {
         }
     }
 
-    // Get unique "paid by" values for filter dropdown
-    const uniquePaidBy = [...new Set(expenses
+    // Get unique "paid by" values for filter dropdown (combine expenses and income)
+    const expensePaidBy = expenses
         .filter(expense => expense.paidBy && expense.paidBy.trim() !== '')
-        .map(expense => expense.paidBy)
-    )].sort();
+        .map(expense => expense.paidBy);
+    
+    const incomePaidBy = income
+        .filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy.trim() !== '')
+        .map(incomeItem => incomeItem.paidBy);
+    
+    const uniquePaidBy = [...new Set([...expensePaidBy, ...incomePaidBy])].sort();
 
     // Calculate totals
     const totalExpenses = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
