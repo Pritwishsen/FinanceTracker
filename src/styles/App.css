@@ -920,6 +920,18 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  margin-left: auto;
+}
+
+.screen-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.screen-header h2 {
+  margin: 0;
 }
 
 .budget-section {
