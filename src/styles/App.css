@@ -876,3 +876,15 @@ body {
 .edit-category-form .form-control {
   font-weight: 600;
 }
+
+/* Filter Info Styling */
+.card-content .filter-info {
+  font-size: 0.7rem;
+  color: hsl(var(--primary-color));
+  font-weight: 500;
+  margin-top: 0.25rem;
+  padding: 2px 6px;
+  background: hsla(var(--primary-color), 0.1);
+  border-radius: 4px;
+  display: inline-block;
+}

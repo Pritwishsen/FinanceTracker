@@ -141,11 +141,11 @@ function Summary({ expenses, income, categories }) {
                         value={selectedPaidBy}
                         onChange={(e) => setSelectedPaidBy(e.target.value)}
                     >
-                        <option value="">All Expenses</option>
-                        <option value="self">My Expenses</option>
+                        <option value="">All People</option>
+                        <option value="self">My Money (Own Income & Expenses)</option>
                         {uniquePaidBy.map(person => (
                             <option key={person} value={person}>
-                                {person}'s Expenses
+                                {person}'s Money (Income & Expenses)
                             </option>
                         ))}
                     </select>
@@ -161,6 +161,11 @@ function Summary({ expenses, income, categories }) {
                     <div className="card-content">
                         <h6>Total Income</h6>
                         <div className="amount">{ValidationUtils.formatCurrency(totalIncome)}</div>
+                        {selectedPaidBy && (
+                            <div className="filter-info">
+                                {selectedPaidBy === 'self' ? 'Your income only' : `${selectedPaidBy}'s income only`}
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -171,6 +176,11 @@ function Summary({ expenses, income, categories }) {
                     <div className="card-content">
                         <h6>Total Expenses</h6>
                         <div className="amount">{ValidationUtils.formatCurrency(totalExpenses)}</div>
+                        {selectedPaidBy && (
+                            <div className="filter-info">
+                                {selectedPaidBy === 'self' ? 'Your expenses only' : `${selectedPaidBy}'s expenses only`}
+                            </div>
+                        )}
                         {trendData.changePercentage !== 0 && (
                             <div className={`trend ${trendData.change > 0 ? 'negative' : 'positive'}`}>
                                 <i className={`fas fa-arrow-${trendData.change > 0 ? 'up' : 'down'}`}></i>
