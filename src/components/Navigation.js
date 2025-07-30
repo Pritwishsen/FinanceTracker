@@ -1,4 +1,7 @@
 function Navigation({ currentScreen, onScreenChange }) {
+    // Debug logging
+    console.log('Navigation component loaded, current screen:', currentScreen);
+    
     const navItems = [
         { key: 'expenses', icon: 'fas fa-list', label: 'Expenses' },
         { key: 'add-expense', icon: 'fas fa-plus', label: 'Add' },
@@ -7,6 +10,8 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
     ];
+    
+    console.log('Navigation rendering', navItems.length, 'items');
 
     return (
         <nav className="bottom-navigation">
