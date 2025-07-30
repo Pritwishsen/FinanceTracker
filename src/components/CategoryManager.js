@@ -310,7 +310,7 @@ function CategoryManager({ categories, onUpdate }) {
                                                 onChange={() => toggleBudgetMode(category.id)}
                                             />
                                             <label className="form-check-label" htmlFor={`budget-mode-${category.id}`}>
-                                                Use subcategory-level budgets instead of category budget
+                                                Use subcategory-level budgets
                                             </label>
                                         </div>
                                     </div>
