@@ -157,18 +157,20 @@ function CategoryManager({ categories, onUpdate }) {
                 <h2>Category Management</h2>
                 <div className="budget-toggle">
                     <button 
-                        className={`btn btn-sm ${showBudgets ? 'btn-primary' : 'btn-outline-primary'}`}
+                        className="btn btn-sm btn-outline-primary"
                         onClick={() => setShowBudgets(!showBudgets)}
+                        style={{ minWidth: '120px' }}
                     >
-                        <i className={`fas fa-${showBudgets ? 'eye-slash' : 'calculator'}`}></i>
+                        <i className="fas fa-calculator"></i>
                         {showBudgets ? ' Hide Budgets' : ' Manage Budgets'}
                     </button>
                     {hasUnsavedChanges && (
                         <button 
-                            className="btn btn-success btn-sm ms-2"
+                            className="btn btn-success btn-sm"
                             onClick={saveBudgetChanges}
+                            style={{ marginLeft: '0.5rem' }}
                         >
-                            <i className="fas fa-save"></i> Save Budget Changes
+                            <i className="fas fa-save"></i> Save Changes
                         </button>
                     )}
                 </div>
