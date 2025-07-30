@@ -1063,6 +1063,18 @@ body {
   margin-top: 1rem;
 }
 
+.budget-mode-toggle {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid hsl(var(--border-color) / 0.3);
+}
+
+.budget-mode-toggle .form-check-label {
+  font-size: 0.875rem;
+  color: hsl(var(--text-secondary));
+  margin-left: 0.25rem;
+}
+
 .budget-input-row {
   display: flex;
   align-items: center;

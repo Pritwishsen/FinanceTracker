@@ -7,6 +7,7 @@ function CategoryManager({ categories, onUpdate }) {
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [showBudgets, setShowBudgets] = useState(false);
     const [budgetChanges, setBudgetChanges] = useState({});
+    const [categoryBudgetModes, setCategoryBudgetModes] = useState({}); // track which categories use subcategory budgets
 
     const handleAddCategory = (e) => {
         e.preventDefault();
@@ -133,6 +134,23 @@ function CategoryManager({ categories, onUpdate }) {
         }
     };
 
+    const toggleBudgetMode = (categoryId) => {
+        setCategoryBudgetModes(prev => ({
+            ...prev,
+            [categoryId]: !prev[categoryId]
+        }));
+        
+        // Clear budget changes for this category when switching modes
+        const keysToRemove = Object.keys(budgetChanges).filter(key => 
+            key.startsWith(`cat-${categoryId}`) || key.startsWith(`sub-${categoryId}-`)
+        );
+        setBudgetChanges(prev => {
+            const updated = { ...prev };
+            keysToRemove.forEach(key => delete updated[key]);
+            return updated;
+        });
+    };
+
     const getCurrentBudgetValue = (categoryId, type, subcategory) => {
         const key = type === 'category' ? `cat-${categoryId}` : `sub-${categoryId}-${subcategory}`;
         if (budgetChanges[key] !== undefined) {
@@ -153,11 +171,20 @@ function CategoryManager({ categories, onUpdate }) {
 
     // Calculate total budget including category and subcategory budgets
     const totalBudget = categories.reduce((sum, category) => {
-        const categoryBudget = getCurrentBudgetValue(category.id, 'category') || 0;
-        const subcategoryTotal = category.subcategories.reduce((subSum, subcategory) => {
-            return subSum + (getCurrentBudgetValue(category.id, 'subcategory', subcategory) || 0);
-        }, 0);
-        return sum + parseFloat(categoryBudget) + subcategoryTotal;
+        const useSubcategoryBudgets = categoryBudgetModes[category.id];
+        
+        if (useSubcategoryBudgets) {
+            // Only count subcategory budgets if mode is enabled
+            const subcategoryTotal = category.subcategories.reduce((subSum, subcategory) => {
+                const value = getCurrentBudgetValue(category.id, 'subcategory', subcategory);
+                return subSum + (parseFloat(value) || 0);
+            }, 0);
+            return sum + subcategoryTotal;
+        } else {
+            // Only count category budget if subcategory mode is not enabled
+            const categoryBudget = getCurrentBudgetValue(category.id, 'category');
+            return sum + (parseFloat(categoryBudget) || 0);
+        }
     }, 0);
 
     return (
@@ -271,26 +298,47 @@ function CategoryManager({ categories, onUpdate }) {
 
                             {/* Budget Input in Category Card */}
                             <div className="category-budget-inline">
-                                <div className="budget-input-row">
-                                    <label className="budget-label">
-                                        <i className="fas fa-calculator"></i> Category Budget:
-                                    </label>
-                                    <div className="input-group input-group-sm budget-input">
-                                        <span className="input-group-text">£</span>
-                                        <input
-                                            type="number"
-                                            className="form-control"
-                                            value={getCurrentBudgetValue(category.id, 'category')}
-                                            onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)}
-                                            placeholder="0.00"
-                                            step="0.01"
-                                            min="0"
-                                        />
-                                    </div>
-                                </div>
-                                
-                                {/* Subcategory Budget Inputs */}
+                                {/* Budget Mode Toggle */}
                                 {category.subcategories.length > 0 && (
+                                    <div className="budget-mode-toggle">
+                                        <div className="form-check">
+                                            <input
+                                                type="checkbox"
+                                                className="form-check-input"
+                                                id={`budget-mode-${category.id}`}
+                                                checked={categoryBudgetModes[category.id] || false}
+                                                onChange={() => toggleBudgetMode(category.id)}
+                                            />
+                                            <label className="form-check-label" htmlFor={`budget-mode-${category.id}`}>
+                                                Use subcategory-level budgets instead of category budget
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Category Budget Input - only show if not using subcategory budgets */}
+                                {!categoryBudgetModes[category.id] && (
+                                    <div className="budget-input-row">
+                                        <label className="budget-label">
+                                            <i className="fas fa-calculator"></i> Category Budget:
+                                        </label>
+                                        <div className="input-group input-group-sm budget-input">
+                                            <span className="input-group-text">£</span>
+                                            <input
+                                                type="number"
+                                                className="form-control"
+                                                value={getCurrentBudgetValue(category.id, 'category')}
+                                                onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)}
+                                                placeholder="0.00"
+                                                step="0.01"
+                                                min="0"
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Subcategory Budget Inputs - only show if using subcategory budgets */}
+                                {categoryBudgetModes[category.id] && category.subcategories.length > 0 && (
                                     <div className="subcategory-budgets">
                                         <div className="subcategory-budget-header">
                                             <h6>Subcategory Budgets:</h6>
@@ -319,11 +367,18 @@ function CategoryManager({ categories, onUpdate }) {
                                 
                                 {/* Category Total Budget */}
                                 {(() => {
-                                    const categoryBudget = getCurrentBudgetValue(category.id, 'category') || 0;
-                                    const subcategoryTotal = category.subcategories.reduce((sum, subcategory) => {
-                                        return sum + (getCurrentBudgetValue(category.id, 'subcategory', subcategory) || 0);
-                                    }, 0);
-                                    const totalCategoryBudget = parseFloat(categoryBudget) + subcategoryTotal;
+                                    const useSubcategoryBudgets = categoryBudgetModes[category.id];
+                                    let totalCategoryBudget = 0;
+                                    
+                                    if (useSubcategoryBudgets) {
+                                        totalCategoryBudget = category.subcategories.reduce((sum, subcategory) => {
+                                            const value = getCurrentBudgetValue(category.id, 'subcategory', subcategory);
+                                            return sum + (parseFloat(value) || 0);
+                                        }, 0);
+                                    } else {
+                                        const categoryBudget = getCurrentBudgetValue(category.id, 'category');
+                                        totalCategoryBudget = parseFloat(categoryBudget) || 0;
+                                    }
                                     
                                     return totalCategoryBudget > 0 ? (
                                         <div className="category-total-budget">
