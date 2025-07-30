@@ -151,8 +151,13 @@ function CategoryManager({ categories, onUpdate }) {
 
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
 
+    // Calculate total budget including category and subcategory budgets
     const totalBudget = categories.reduce((sum, category) => {
-        return sum + (category.monthlyBudget || 0);
+        const categoryBudget = getCurrentBudgetValue(category.id, 'category') || 0;
+        const subcategoryTotal = category.subcategories.reduce((subSum, subcategory) => {
+            return subSum + (getCurrentBudgetValue(category.id, 'subcategory', subcategory) || 0);
+        }, 0);
+        return sum + parseFloat(categoryBudget) + subcategoryTotal;
     }, 0);
 
     return (
@@ -268,7 +273,7 @@ function CategoryManager({ categories, onUpdate }) {
                             <div className="category-budget-inline">
                                 <div className="budget-input-row">
                                     <label className="budget-label">
-                                        <i className="fas fa-calculator"></i> Monthly Budget:
+                                        <i className="fas fa-calculator"></i> Category Budget:
                                     </label>
                                     <div className="input-group input-group-sm budget-input">
                                         <span className="input-group-text">£</span>
@@ -283,6 +288,51 @@ function CategoryManager({ categories, onUpdate }) {
                                         />
                                     </div>
                                 </div>
+                                
+                                {/* Subcategory Budget Inputs */}
+                                {category.subcategories.length > 0 && (
+                                    <div className="subcategory-budgets">
+                                        <div className="subcategory-budget-header">
+                                            <h6>Subcategory Budgets:</h6>
+                                        </div>
+                                        {category.subcategories.map(subcategory => (
+                                            <div key={subcategory} className="budget-input-row subcategory-budget-row">
+                                                <label className="budget-label subcategory-label">
+                                                    {subcategory}:
+                                                </label>
+                                                <div className="input-group input-group-sm budget-input">
+                                                    <span className="input-group-text">£</span>
+                                                    <input
+                                                        type="number"
+                                                        className="form-control"
+                                                        value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)}
+                                                        onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)}
+                                                        placeholder="0.00"
+                                                        step="0.01"
+                                                        min="0"
+                                                    />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                
+                                {/* Category Total Budget */}
+                                {(() => {
+                                    const categoryBudget = getCurrentBudgetValue(category.id, 'category') || 0;
+                                    const subcategoryTotal = category.subcategories.reduce((sum, subcategory) => {
+                                        return sum + (getCurrentBudgetValue(category.id, 'subcategory', subcategory) || 0);
+                                    }, 0);
+                                    const totalCategoryBudget = parseFloat(categoryBudget) + subcategoryTotal;
+                                    
+                                    return totalCategoryBudget > 0 ? (
+                                        <div className="category-total-budget">
+                                            <div className="total-budget-display">
+                                                <strong>Total for {category.name}: {ValidationUtils.formatCurrency(totalCategoryBudget)}</strong>
+                                            </div>
+                                        </div>
+                                    ) : null;
+                                })()}
                             </div>
 
                             {/* Add Subcategory Form */}

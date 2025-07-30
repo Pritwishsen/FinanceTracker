@@ -1081,6 +1081,47 @@ body {
   max-width: 150px;
 }
 
+/* Subcategory Budget Styling */
+.subcategory-budgets {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid hsl(var(--border-color) / 0.3);
+}
+
+.subcategory-budget-header h6 {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  color: hsl(var(--text-secondary));
+  font-weight: 600;
+}
+
+.subcategory-budget-row {
+  margin-bottom: 0.75rem;
+}
+
+.subcategory-label {
+  min-width: 100px;
+  font-size: 0.85rem;
+  color: hsl(var(--text-secondary));
+  padding-left: 1rem;
+}
+
+/* Category Total Budget */
+.category-total-budget {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid hsl(var(--border-color));
+}
+
+.total-budget-display {
+  padding: 0.75rem;
+  background: linear-gradient(135deg, hsl(var(--success-color) / 0.1) 0%, hsl(var(--primary-color) / 0.1) 100%);
+  border-radius: var(--radius);
+  text-align: center;
+  color: hsl(var(--primary-color));
+  border: 1px solid hsl(var(--primary-color) / 0.2);
+}
+
 /* Total Budget Summary */
 .total-budget-summary {
   margin-top: 2rem;
