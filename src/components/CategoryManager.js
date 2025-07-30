@@ -151,29 +151,22 @@ function CategoryManager({ categories, onUpdate }) {
 
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
 
+    const totalBudget = categories.reduce((sum, category) => {
+        return sum + (category.monthlyBudget || 0);
+    }, 0);
+
     return (
         <div className="screen">
             <div className="screen-header">
-                <h2>Category Management</h2>
-                <div className="budget-toggle">
+                <h2>Category Management & Budgets</h2>
+                {hasUnsavedChanges && (
                     <button 
-                        className="btn btn-sm btn-outline-primary"
-                        onClick={() => setShowBudgets(!showBudgets)}
-                        style={{ minWidth: '120px' }}
+                        className="btn btn-success btn-sm"
+                        onClick={saveBudgetChanges}
                     >
-                        <i className="fas fa-calculator"></i>
-                        {showBudgets ? ' Hide Budgets' : ' Manage Budgets'}
+                        <i className="fas fa-save"></i> Save Budget Changes
                     </button>
-                    {hasUnsavedChanges && (
-                        <button 
-                            className="btn btn-success btn-sm"
-                            onClick={saveBudgetChanges}
-                            style={{ marginLeft: '0.5rem' }}
-                        >
-                            <i className="fas fa-save"></i> Save Changes
-                        </button>
-                    )}
-                </div>
+                )}
             </div>
 
             {errors.delete && (
@@ -271,53 +264,26 @@ function CategoryManager({ categories, onUpdate }) {
                                 </div>
                             </div>
 
-                            {/* Budget Management */}
-                            {showBudgets && (
-                                <div className="budget-section">
-                                    <div className="category-budget">
-                                        <label className="form-label">
-                                            <i className="fas fa-pound-sign"></i> Monthly Budget for {category.name}:
-                                        </label>
-                                        <div className="input-group input-group-sm">
-                                            <span className="input-group-text">£</span>
-                                            <input
-                                                type="number"
-                                                className="form-control"
-                                                value={getCurrentBudgetValue(category.id, 'category')}
-                                                onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)}
-                                                placeholder="0.00"
-                                                step="0.01"
-                                                min="0"
-                                            />
-                                        </div>
+                            {/* Budget Input in Category Card */}
+                            <div className="category-budget-inline">
+                                <div className="budget-input-row">
+                                    <label className="budget-label">
+                                        <i className="fas fa-calculator"></i> Monthly Budget:
+                                    </label>
+                                    <div className="input-group input-group-sm budget-input">
+                                        <span className="input-group-text">£</span>
+                                        <input
+                                            type="number"
+                                            className="form-control"
+                                            value={getCurrentBudgetValue(category.id, 'category')}
+                                            onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)}
+                                            placeholder="0.00"
+                                            step="0.01"
+                                            min="0"
+                                        />
                                     </div>
-                                    
-                                    {category.subcategories.length > 0 && (
-                                        <div className="subcategory-budgets">
-                                            <h6 className="subcategory-budget-title">Subcategory Budgets:</h6>
-                                            <div className="subcategory-budget-grid">
-                                                {category.subcategories.map(subcategory => (
-                                                    <div key={subcategory} className="subcategory-budget-item">
-                                                        <label className="form-label">{subcategory}:</label>
-                                                        <div className="input-group input-group-sm">
-                                                            <span className="input-group-text">£</span>
-                                                            <input
-                                                                type="number"
-                                                                className="form-control"
-                                                                value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)}
-                                                                onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)}
-                                                                placeholder="0.00"
-                                                                step="0.01"
-                                                                min="0"
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
                                 </div>
-                            )}
+                            </div>
 
                             {/* Add Subcategory Form */}
                             {addingSubcategoryTo === category.id && (
@@ -371,6 +337,24 @@ function CategoryManager({ categories, onUpdate }) {
                         </div>
                     ))
                 )}
+            </div>
+
+            {/* Total Budget Summary */}
+            <div className="total-budget-summary">
+                <div className="budget-summary-card">
+                    <div className="summary-content">
+                        <div className="summary-icon">
+                            <i className="fas fa-calculator"></i>
+                        </div>
+                        <div className="summary-info">
+                            <h5>Total Monthly Budget</h5>
+                            <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget)}</div>
+                            <div className="summary-note">
+                                {categories.filter(cat => cat.monthlyBudget > 0).length} of {categories.length} categories have budgets set
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             {/* Delete Confirmation Modal */}
