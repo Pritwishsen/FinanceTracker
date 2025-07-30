@@ -126,29 +126,35 @@ function Summary({ expenses, income, categories }) {
             <div className="screen-header">
                 <h2>Financial Summary</h2>
                 <div className="summary-filters">
-                    <select
-                        className="form-select form-select-sm"
-                        value={timeRange}
-                        onChange={(e) => setTimeRange(e.target.value)}
-                    >
-                        <option value="week">This Week</option>
-                        <option value="month">This Month</option>
-                        <option value="year">This Year</option>
-                    </select>
+                    <div className="filter-group">
+                        <label className="filter-label">Time Period:</label>
+                        <select
+                            className="form-select form-select-sm"
+                            value={timeRange}
+                            onChange={(e) => setTimeRange(e.target.value)}
+                        >
+                            <option value="week">This Week</option>
+                            <option value="month">This Month</option>
+                            <option value="year">This Year</option>
+                        </select>
+                    </div>
                     
-                    <select
-                        className="form-select form-select-sm"
-                        value={selectedPaidBy}
-                        onChange={(e) => setSelectedPaidBy(e.target.value)}
-                    >
-                        <option value="">All People</option>
-                        <option value="self">My Money (Own Income & Expenses)</option>
-                        {uniquePaidBy.map(person => (
-                            <option key={person} value={person}>
-                                {person}'s Money (Income & Expenses)
-                            </option>
-                        ))}
-                    </select>
+                    <div className="filter-group">
+                        <label className="filter-label">Filter by Person:</label>
+                        <select
+                            className="form-select form-select-sm"
+                            value={selectedPaidBy}
+                            onChange={(e) => setSelectedPaidBy(e.target.value)}
+                        >
+                            <option value="">All People</option>
+                            <option value="self">My Money Only</option>
+                            {uniquePaidBy.map(person => (
+                                <option key={person} value={person}>
+                                    {person}'s Money Only
+                                </option>
+                            ))}
+                        </select>
+                    </div>
                 </div>
             </div>
 

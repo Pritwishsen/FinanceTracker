@@ -888,3 +888,29 @@ body {
   border-radius: 4px;
   display: inline-block;
 }
+
+/* Summary Filters */
+.summary-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: end;
+  margin-top: 1rem;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.filter-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: hsl(var(--text-primary));
+  margin: 0;
+}
+
+.filter-group .form-select {
+  min-width: 180px;
+}
