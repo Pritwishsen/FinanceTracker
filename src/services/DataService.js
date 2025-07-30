@@ -37,27 +37,37 @@ class DataService {
                     {
                         id: 1,
                         name: 'Food & Dining',
-                        subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food']
+                        subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food'],
+                        monthlyBudget: 0,
+                        subcategoryBudgets: {}
                     },
                     {
                         id: 2,
                         name: 'Transportation',
-                        subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft']
+                        subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft'],
+                        monthlyBudget: 0,
+                        subcategoryBudgets: {}
                     },
                     {
                         id: 3,
                         name: 'Shopping',
-                        subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care']
+                        subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care'],
+                        monthlyBudget: 0,
+                        subcategoryBudgets: {}
                     },
                     {
                         id: 4,
                         name: 'Entertainment',
-                        subcategories: ['Movies', 'Sports', 'Music', 'Games']
+                        subcategories: ['Movies', 'Sports', 'Music', 'Games'],
+                        monthlyBudget: 0,
+                        subcategoryBudgets: {}
                     },
                     {
                         id: 5,
                         name: 'Bills & Utilities',
-                        subcategories: ['Electric', 'Water', 'Internet', 'Phone']
+                        subcategories: ['Electric', 'Water', 'Internet', 'Phone'],
+                        monthlyBudget: 0,
+                        subcategoryBudgets: {}
                     }
                 ];
                 this.saveCategories();
@@ -223,7 +233,9 @@ class DataService {
         const newCategory = {
             id: Date.now(),
             ...category,
-            subcategories: category.subcategories || []
+            subcategories: category.subcategories || [],
+            monthlyBudget: category.monthlyBudget || 0,
+            subcategoryBudgets: category.subcategoryBudgets || {}
         };
         this.data.categories.push(newCategory);
         this.saveCategories();
@@ -300,6 +312,84 @@ class DataService {
         this.data.settings.currency = currency;
         this.saveSettings();
         return currency;
+    }
+
+    // Budget methods
+    static async setCategoryBudget(categoryId, budget) {
+        await this.initialize();
+        const category = this.data.categories.find(cat => cat.id === categoryId);
+        if (category) {
+            category.monthlyBudget = parseFloat(budget) || 0;
+            this.saveCategories();
+            return true;
+        }
+        return false;
+    }
+
+    static async setSubcategoryBudget(categoryId, subcategoryName, budget) {
+        await this.initialize();
+        const category = this.data.categories.find(cat => cat.id === categoryId);
+        if (category) {
+            if (!category.subcategoryBudgets) {
+                category.subcategoryBudgets = {};
+            }
+            category.subcategoryBudgets[subcategoryName] = parseFloat(budget) || 0;
+            this.saveCategories();
+            return true;
+        }
+        return false;
+    }
+
+    static async getBudgetSummary() {
+        await this.initialize();
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+        const monthlyExpenses = this.data.expenses.filter(expense => {
+            const expenseDate = new Date(expense.date);
+            return expenseDate >= startOfMonth && expenseDate <= endOfMonth;
+        });
+
+        const budgetSummary = [];
+
+        this.data.categories.forEach(category => {
+            const categoryExpenses = monthlyExpenses.filter(expense => expense.categoryId === category.id);
+            const totalSpent = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+
+            const categoryData = {
+                id: category.id,
+                name: category.name,
+                budget: category.monthlyBudget || 0,
+                spent: totalSpent,
+                remaining: (category.monthlyBudget || 0) - totalSpent,
+                percentage: category.monthlyBudget > 0 ? (totalSpent / category.monthlyBudget) * 100 : 0,
+                subcategories: []
+            };
+
+            // Add subcategory breakdown
+            category.subcategories.forEach(subcatName => {
+                const subcatExpenses = categoryExpenses.filter(expense => expense.subcategory === subcatName);
+                const subcatSpent = subcatExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+                const subcatBudget = (category.subcategoryBudgets && category.subcategoryBudgets[subcatName]) || 0;
+
+                if (subcatBudget > 0 || subcatSpent > 0) {
+                    categoryData.subcategories.push({
+                        name: subcatName,
+                        budget: subcatBudget,
+                        spent: subcatSpent,
+                        remaining: subcatBudget - subcatSpent,
+                        percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0
+                    });
+                }
+            });
+
+            if (categoryData.budget > 0 || categoryData.spent > 0) {
+                budgetSummary.push(categoryData);
+            }
+        });
+
+        return budgetSummary;
     }
 
     // Utility methods

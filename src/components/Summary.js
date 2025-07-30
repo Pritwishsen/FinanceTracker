@@ -2,6 +2,16 @@ function Summary({ expenses, income, categories }) {
     const [timeRange, setTimeRange] = useState('month');
     const [selectedCategory, setSelectedCategory] = useState('');
     const [selectedPaidBy, setSelectedPaidBy] = useState('');
+    const [budgetData, setBudgetData] = useState([]);
+
+    // Load budget data when timeRange is month
+    useEffect(() => {
+        if (timeRange === 'month') {
+            DataService.getBudgetSummary().then(setBudgetData);
+        } else {
+            setBudgetData([]);
+        }
+    }, [timeRange, expenses, categories]);
 
     // Calculate date ranges
     const getDateRange = () => {
@@ -220,6 +230,42 @@ function Summary({ expenses, income, categories }) {
                     </div>
                 </div>
             </div>
+
+            {/* Budget Overview */}
+            {timeRange === 'month' && budgetData.length > 0 && (
+                <div className="budget-overview">
+                    <h5>
+                        <i className="fas fa-calculator"></i> Monthly Budget Overview
+                    </h5>
+                    <div className="budget-list">
+                        {budgetData.map(budgetItem => (
+                            <div key={budgetItem.id} className="budget-item">
+                                <div className="budget-info">
+                                    <div className="budget-name">{budgetItem.name}</div>
+                                    <div className="budget-bar">
+                                        <div 
+                                            className={`budget-bar-fill ${
+                                                budgetItem.percentage > 100 ? 'over-budget' :
+                                                budgetItem.percentage > 85 ? 'near-budget' : 'under-budget'
+                                            }`}
+                                            style={{ width: `${Math.min(budgetItem.percentage, 100)}%` }}
+                                        ></div>
+                                    </div>
+                                    <div className="budget-amounts">
+                                        <span className="budget-spent">
+                                            Spent: {ValidationUtils.formatCurrency(budgetItem.spent)}
+                                        </span>
+                                        <span className={`budget-remaining ${budgetItem.remaining >= 0 ? 'positive' : 'negative'}`}>
+                                            {budgetItem.remaining >= 0 ? 'Remaining: ' : 'Over by: '}
+                                            {ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining))}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* Category Breakdown */}
             {expensesByCategory.length > 0 && (

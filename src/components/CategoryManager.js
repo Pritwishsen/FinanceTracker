@@ -5,6 +5,8 @@ function CategoryManager({ categories, onUpdate }) {
     const [addingSubcategoryTo, setAddingSubcategoryTo] = useState(null);
     const [errors, setErrors] = useState({});
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+    const [showBudgets, setShowBudgets] = useState(false);
+    const [budgetChanges, setBudgetChanges] = useState({});
 
     const handleAddCategory = (e) => {
         e.preventDefault();
@@ -103,10 +105,73 @@ function CategoryManager({ categories, onUpdate }) {
         onUpdate();
     };
 
+    const handleBudgetChange = (categoryId, type, subcategory, value) => {
+        const key = type === 'category' ? `cat-${categoryId}` : `sub-${categoryId}-${subcategory}`;
+        setBudgetChanges(prev => ({
+            ...prev,
+            [key]: value
+        }));
+    };
+
+    const saveBudgetChanges = async () => {
+        try {
+            for (const [key, value] of Object.entries(budgetChanges)) {
+                if (key.startsWith('cat-')) {
+                    const categoryId = parseInt(key.replace('cat-', ''));
+                    await DataService.setCategoryBudget(categoryId, value);
+                } else if (key.startsWith('sub-')) {
+                    const parts = key.replace('sub-', '').split('-');
+                    const categoryId = parseInt(parts[0]);
+                    const subcategory = parts.slice(1).join('-');
+                    await DataService.setSubcategoryBudget(categoryId, subcategory, value);
+                }
+            }
+            setBudgetChanges({});
+            onUpdate();
+        } catch (error) {
+            setErrors({ budget: 'Failed to save budget changes' });
+        }
+    };
+
+    const getCurrentBudgetValue = (categoryId, type, subcategory) => {
+        const key = type === 'category' ? `cat-${categoryId}` : `sub-${categoryId}-${subcategory}`;
+        if (budgetChanges[key] !== undefined) {
+            return budgetChanges[key];
+        }
+        
+        const category = categories.find(c => c.id === categoryId);
+        if (!category) return '';
+        
+        if (type === 'category') {
+            return category.monthlyBudget || '';
+        } else {
+            return (category.subcategoryBudgets && category.subcategoryBudgets[subcategory]) || '';
+        }
+    };
+
+    const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
+
     return (
         <div className="screen">
             <div className="screen-header">
                 <h2>Category Management</h2>
+                <div className="budget-toggle">
+                    <button 
+                        className={`btn btn-sm ${showBudgets ? 'btn-primary' : 'btn-outline-primary'}`}
+                        onClick={() => setShowBudgets(!showBudgets)}
+                    >
+                        <i className={`fas fa-${showBudgets ? 'eye-slash' : 'calculator'}`}></i>
+                        {showBudgets ? ' Hide Budgets' : ' Manage Budgets'}
+                    </button>
+                    {hasUnsavedChanges && (
+                        <button 
+                            className="btn btn-success btn-sm ms-2"
+                            onClick={saveBudgetChanges}
+                        >
+                            <i className="fas fa-save"></i> Save Budget Changes
+                        </button>
+                    )}
+                </div>
             </div>
 
             {errors.delete && (
@@ -203,6 +268,54 @@ function CategoryManager({ categories, onUpdate }) {
                                     </button>
                                 </div>
                             </div>
+
+                            {/* Budget Management */}
+                            {showBudgets && (
+                                <div className="budget-section">
+                                    <div className="category-budget">
+                                        <label className="form-label">
+                                            <i className="fas fa-pound-sign"></i> Monthly Budget for {category.name}:
+                                        </label>
+                                        <div className="input-group input-group-sm">
+                                            <span className="input-group-text">£</span>
+                                            <input
+                                                type="number"
+                                                className="form-control"
+                                                value={getCurrentBudgetValue(category.id, 'category')}
+                                                onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)}
+                                                placeholder="0.00"
+                                                step="0.01"
+                                                min="0"
+                                            />
+                                        </div>
+                                    </div>
+                                    
+                                    {category.subcategories.length > 0 && (
+                                        <div className="subcategory-budgets">
+                                            <h6 className="subcategory-budget-title">Subcategory Budgets:</h6>
+                                            <div className="subcategory-budget-grid">
+                                                {category.subcategories.map(subcategory => (
+                                                    <div key={subcategory} className="subcategory-budget-item">
+                                                        <label className="form-label">{subcategory}:</label>
+                                                        <div className="input-group input-group-sm">
+                                                            <span className="input-group-text">£</span>
+                                                            <input
+                                                                type="number"
+                                                                className="form-control"
+                                                                value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)}
+                                                                onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)}
+                                                                placeholder="0.00"
+                                                                step="0.01"
+                                                                min="0"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {/* Add Subcategory Form */}
                             {addingSubcategoryTo === category.id && (

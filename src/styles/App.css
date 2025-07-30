@@ -914,3 +914,130 @@ body {
 .filter-group .form-select {
   min-width: 180px;
 }
+
+/* Budget Management Styles */
+.budget-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.budget-section {
+  background: hsl(var(--card-background));
+  border: 1px solid hsl(var(--border-color));
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.category-budget {
+  margin-bottom: 1rem;
+}
+
+.category-budget .form-label {
+  font-weight: 500;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+  color: hsl(var(--text-primary));
+}
+
+.subcategory-budget-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: hsl(var(--text-primary));
+  margin-bottom: 0.75rem;
+  margin-top: 1rem;
+}
+
+.subcategory-budget-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.subcategory-budget-item .form-label {
+  font-size: 0.8rem;
+  font-weight: 400;
+  margin-bottom: 0.25rem;
+  color: hsl(var(--text-secondary));
+}
+
+/* Budget Overview in Summary */
+.budget-overview {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.budget-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid hsl(var(--border-color));
+}
+
+.budget-item:last-child {
+  border-bottom: none;
+}
+
+.budget-info {
+  flex: 1;
+}
+
+.budget-name {
+  font-weight: 500;
+  color: hsl(var(--text-primary));
+  margin-bottom: 0.25rem;
+}
+
+.budget-bar {
+  width: 100%;
+  height: 8px;
+  background: hsl(var(--border-color));
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 0.5rem 0;
+}
+
+.budget-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.budget-bar-fill.under-budget {
+  background: hsl(var(--success-color));
+}
+
+.budget-bar-fill.over-budget {
+  background: hsl(var(--danger-color));
+}
+
+.budget-bar-fill.near-budget {
+  background: hsl(var(--warning-color));
+}
+
+.budget-amounts {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+}
+
+.budget-spent {
+  color: hsl(var(--text-secondary));
+}
+
+.budget-remaining {
+  font-weight: 500;
+}
+
+.budget-remaining.positive {
+  color: hsl(var(--success-color));
+}
+
+.budget-remaining.negative {
+  color: hsl(var(--danger-color));
+}

@@ -35,9 +35,9 @@ Preferred communication style: Simple, everyday language.
 2. **Navigation.js** - Bottom navigation bar for mobile interface
 3. **ExpenseForm.js** - Form for adding/editing expenses
 4. **ExpenseList.js** - List view with filtering and search capabilities
-5. **IncomeForm.js** - Income tracking and management
-6. **CategoryManager.js** - Category and subcategory management
-7. **Summary.js** - Financial summaries and reporting
+5. **IncomeForm.js** - Income tracking and management with "who's income" field
+6. **CategoryManager.js** - Category, subcategory, and budget management
+7. **Summary.js** - Financial summaries, reporting, and budget tracking
 
 ### Backend Components
 1. **DataService.js** - Client-side data access layer
@@ -47,10 +47,10 @@ Preferred communication style: Simple, everyday language.
 5. **Storage Layer** - Database abstraction with PostgreSQL implementation
 
 ### Database Schema
-- **expenses**: Transaction records with category relationships
-- **income**: Income tracking with source information
-- **categories**: Hierarchical category system with subcategories
-- **settings**: Application configuration storage
+- **expenses**: Transaction records with category relationships and "who paid" attribution
+- **income**: Income tracking with source information and "who's income" attribution
+- **categories**: Hierarchical category system with subcategories and monthly budget tracking
+- **settings**: Application configuration storage including default currency (GBP)
 
 ## Data Flow
 
