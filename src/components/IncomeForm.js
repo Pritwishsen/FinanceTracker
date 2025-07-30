@@ -52,7 +52,7 @@ function IncomeForm({ income, onUpdate }) {
             if (editingIncome) {
                 DataService.updateIncome(editingIncome.id, incomeData);
             } else {
-                DataService.addIncome(incomeData);
+                DataService.addIncomeWithConversion(incomeData);
             }
 
             setShowSuccess(true);

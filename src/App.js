@@ -5,19 +5,22 @@ function App() {
     const [expenses, setExpenses] = useState([]);
     const [income, setIncome] = useState([]);
     const [categories, setCategories] = useState([]);
+    const [defaultCurrency, setDefaultCurrency] = useState('GBP');
 
     useEffect(() => {
         // Load initial data asynchronously
         const loadData = async () => {
             try {
-                const [expensesData, incomeData, categoriesData] = await Promise.all([
+                const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
                     DataService.getExpenses(),
                     DataService.getIncome(),
-                    DataService.getCategories()
+                    DataService.getCategories(),
+                    DataService.getSettings()
                 ]);
                 setExpenses(expensesData);
                 setIncome(incomeData);
                 setCategories(categoriesData);
+                setDefaultCurrency(settings.currency || 'GBP');
             } catch (error) {
                 console.error('Error loading data:', error);
             }
@@ -69,6 +72,11 @@ function App() {
                     expenses={expenses}
                     income={income}
                     categories={categories}
+                    defaultCurrency={defaultCurrency}
+                />;
+            case 'settings':
+                return <CurrencySettings 
+                    onUpdate={handleDataUpdate}
                 />;
             default:
                 return <ExpenseList 

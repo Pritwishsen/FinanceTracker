@@ -68,7 +68,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
             if (editExpense) {
                 DataService.updateExpense(editExpense.id, expenseData);
             } else {
-                DataService.addExpense(expenseData);
+                DataService.addExpenseWithConversion(expenseData);
             }
 
             setShowSuccess(true);

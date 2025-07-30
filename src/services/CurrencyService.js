@@ -1,142 +1,131 @@
-// Currency conversion service
 class CurrencyService {
     static exchangeRates = {};
-    static lastUpdate = null;
-    static baseCurrency = 'GBP';
-    static apiKey = null;
+    static lastUpdateTime = null;
+    static API_KEY = null; // Will be set if user provides one
+    
+    static supportedCurrencies = {
+        'GBP': { name: 'British Pound', symbol: '£' },
+        'EUR': { name: 'Euro', symbol: '€' },
+        'INR': { name: 'Indian Rupee', symbol: '₹' },
+        'USD': { name: 'US Dollar', symbol: '$' }
+    };
 
-    // Initialize API key from environment or user input
-    static setApiKey(key) {
-        this.apiKey = key;
-        localStorage.setItem('financeApp_currencyApiKey', key);
-    }
+    // Fallback rates (approximate, should be replaced with real-time data)
+    static fallbackRates = {
+        'GBP': { 'EUR': 1.17, 'USD': 1.27, 'INR': 106.5, 'GBP': 1 },
+        'EUR': { 'GBP': 0.85, 'USD': 1.08, 'INR': 91.2, 'EUR': 1 },
+        'USD': { 'GBP': 0.79, 'EUR': 0.92, 'INR': 84.1, 'USD': 1 },
+        'INR': { 'GBP': 0.0094, 'EUR': 0.011, 'USD': 0.012, 'INR': 1 }
+    };
 
-    static getApiKey() {
-        if (!this.apiKey) {
-            this.apiKey = localStorage.getItem('financeApp_currencyApiKey');
-        }
-        return this.apiKey;
-    }
-
-    // Fetch exchange rates from external API
-    static async fetchExchangeRates() {
-        const apiKey = this.getApiKey();
-        if (!apiKey) {
-            throw new Error('Currency API key not provided');
+    static async fetchExchangeRates(baseCurrency = 'GBP') {
+        const cacheTime = 30 * 60 * 1000; // 30 minutes
+        const now = Date.now();
+        
+        // Check if we have cached rates that are still valid
+        if (this.lastUpdateTime && (now - this.lastUpdateTime) < cacheTime) {
+            return this.exchangeRates;
         }
 
         try {
-            // Using exchangerate-api.com as the service
-            const response = await fetch(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/${this.baseCurrency}`);
+            // Try to fetch from a free API (exchangerate-api.com)
+            const response = await fetch(`https://api.exchangerate-api.com/v4/latest/${baseCurrency}`);
             
-            if (!response.ok) {
-                throw new Error(`API request failed: ${response.status}`);
+            if (response.ok) {
+                const data = await response.json();
+                this.exchangeRates = data.rates;
+                this.lastUpdateTime = now;
+                
+                // Store in localStorage for offline access
+                localStorage.setItem('exchangeRates', JSON.stringify({
+                    rates: this.exchangeRates,
+                    timestamp: now,
+                    baseCurrency: baseCurrency
+                }));
+                
+                return this.exchangeRates;
             }
-
-            const data = await response.json();
-            
-            if (data.result !== 'success') {
-                throw new Error(`API error: ${data['error-type']}`);
-            }
-
-            this.exchangeRates = data.conversion_rates;
-            this.lastUpdate = new Date().toISOString();
-            
-            // Cache rates for 1 hour
-            localStorage.setItem('financeApp_exchangeRates', JSON.stringify({
-                rates: this.exchangeRates,
-                lastUpdate: this.lastUpdate
-            }));
-
-            return this.exchangeRates;
         } catch (error) {
-            console.error('Error fetching exchange rates:', error);
-            throw error;
+            console.warn('Failed to fetch live exchange rates, using fallback rates:', error);
         }
-    }
 
-    // Get cached rates or fetch new ones if expired
-    static async getExchangeRates() {
-        const cached = localStorage.getItem('financeApp_exchangeRates');
-        
-        if (cached) {
-            const { rates, lastUpdate } = JSON.parse(cached);
-            const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-            
-            if (new Date(lastUpdate) > oneHourAgo) {
-                this.exchangeRates = rates;
-                this.lastUpdate = lastUpdate;
-                return rates;
+        // Try to load from localStorage if API fails
+        try {
+            const cached = localStorage.getItem('exchangeRates');
+            if (cached) {
+                const { rates, timestamp, baseCurrency: cachedBase } = JSON.parse(cached);
+                if (cachedBase === baseCurrency && (now - timestamp) < 24 * 60 * 60 * 1000) { // 24 hours
+                    this.exchangeRates = rates;
+                    return rates;
+                }
             }
+        } catch (error) {
+            console.warn('Failed to load cached exchange rates:', error);
         }
 
-        // Fetch new rates if cache is empty or expired
-        return await this.fetchExchangeRates();
+        // Fall back to hardcoded rates
+        this.exchangeRates = this.fallbackRates[baseCurrency] || this.fallbackRates['GBP'];
+        return this.exchangeRates;
     }
 
-    // Convert amount from one currency to another
     static async convertCurrency(amount, fromCurrency, toCurrency) {
         if (fromCurrency === toCurrency) {
             return amount;
         }
 
         try {
-            const rates = await this.getExchangeRates();
+            // If converting to GBP, fetch rates with GBP as base
+            // If converting from GBP, fetch rates with GBP as base  
+            // Otherwise, convert through GBP
             
-            // Convert to base currency (GBP) first, then to target currency
-            let amountInBase = amount;
-            if (fromCurrency !== this.baseCurrency) {
-                if (!rates[fromCurrency]) {
-                    throw new Error(`Exchange rate not available for ${fromCurrency}`);
-                }
-                amountInBase = amount / rates[fromCurrency];
+            let convertedAmount;
+            
+            if (fromCurrency === 'GBP') {
+                const rates = await this.fetchExchangeRates('GBP');
+                convertedAmount = amount * (rates[toCurrency] || 1);
+            } else if (toCurrency === 'GBP') {
+                const rates = await this.fetchExchangeRates(fromCurrency);
+                convertedAmount = amount * (rates['GBP'] || 1);
+            } else {
+                // Convert through GBP
+                const ratesFrom = await this.fetchExchangeRates(fromCurrency);
+                const amountInGBP = amount * (ratesFrom['GBP'] || 1);
+                const ratesTo = await this.fetchExchangeRates('GBP');
+                convertedAmount = amountInGBP * (ratesTo[toCurrency] || 1);
             }
 
-            // Convert from base to target currency
-            if (toCurrency === this.baseCurrency) {
-                return amountInBase;
-            }
-
-            if (!rates[toCurrency]) {
-                throw new Error(`Exchange rate not available for ${toCurrency}`);
-            }
-
-            return amountInBase * rates[toCurrency];
+            return Math.round(convertedAmount * 100) / 100; // Round to 2 decimal places
         } catch (error) {
-            console.error('Currency conversion error:', error);
+            console.error('Currency conversion failed:', error);
             // Return original amount if conversion fails
             return amount;
         }
     }
 
-    // Get supported currencies
-    static getSupportedCurrencies() {
-        return ['USD', 'GBP', 'EUR', 'INR', 'JPY', 'CAD', 'AUD', 'CHF'];
+    static getCurrencySymbol(currencyCode) {
+        return this.supportedCurrencies[currencyCode]?.symbol || currencyCode;
     }
 
-    // Format amount with proper currency display
-    static formatWithConversion(amount, fromCurrency, displayCurrency = null) {
-        const display = displayCurrency || this.baseCurrency;
+    static getCurrencyName(currencyCode) {
+        return this.supportedCurrencies[currencyCode]?.name || currencyCode;
+    }
+
+    static formatCurrency(amount, currencyCode) {
+        const symbol = this.getCurrencySymbol(currencyCode);
+        return `${symbol}${amount.toFixed(2)}`;
+    }
+
+    static async getConversionRate(fromCurrency, toCurrency) {
+        if (fromCurrency === toCurrency) return 1;
         
-        if (fromCurrency === display) {
-            return ValidationUtils.formatCurrency(amount, fromCurrency);
-        }
-
-        // For now, show original until conversion is performed
-        return ValidationUtils.formatCurrency(amount, fromCurrency);
-    }
-
-    // Check if API key is valid
-    static async validateApiKey(apiKey) {
         try {
-            const response = await fetch(`https://v6.exchangerate-api.com/v6/${apiKey}/latest/GBP`);
-            const data = await response.json();
-            return response.ok && data.result === 'success';
+            const convertedAmount = await this.convertCurrency(1, fromCurrency, toCurrency);
+            return convertedAmount;
         } catch (error) {
-            return false;
+            console.error('Failed to get conversion rate:', error);
+            return 1;
         }
     }
 }
 
-// Make CurrencyService globally available
 window.CurrencyService = CurrencyService;

@@ -4,7 +4,8 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'add-expense', icon: 'fas fa-plus', label: 'Add' },
         { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
         { key: 'income', icon: 'fas fa-piggy-bank', label: 'Income' },
-        { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' }
+        { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
+        { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
     ];
 
     return (
