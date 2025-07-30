@@ -98,3 +98,14 @@ The app follows a typical client-server pattern with the frontend making API cal
 - Optional: Currency API key for exchange rate functionality
 
 The application is designed to work both as a development prototype (with localStorage fallback) and as a production application (with PostgreSQL backend). The modular architecture allows for easy deployment to various platforms including static hosts for the frontend and serverless platforms for the backend.
+
+## Recent Changes: Latest modifications with dates
+
+### January 30, 2025 - Currency System Implementation
+- **Added comprehensive currency support**: Default currency selection with real-time conversion
+- **Settings screen**: New navigation tab for currency management (GBP, EUR, USD, INR)
+- **CurrencyService**: Real-time exchange rates via exchangerate-api.com with fallback data
+- **Dual currency storage**: Expenses store both original and converted amounts
+- **Budget integration**: All budgets and summaries display in user's default currency
+- **Auto-conversion**: ExpenseForm and IncomeForm automatically convert to default currency
+- **Enhanced navigation**: Updated mobile layout to accommodate 6th tab for Settings
