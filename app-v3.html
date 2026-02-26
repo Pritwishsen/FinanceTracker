@@ -401,6 +401,35 @@ class DataService {
         }
         return false;
     }
+    static async resetAllBudgets(newCurrency) {
+        await this.initialize();
+        const today = new Date().toISOString().split('T')[0];
+        this.data.categories.forEach(category => {
+            if (!category.budgetHistory) category.budgetHistory = [];
+            if (category.monthlyBudget > 0) {
+                category.budgetHistory.push({ amount: category.monthlyBudget, currency: category.budgetCurrency || 'GBP', startDate: category.budgetStartDate || null, endDate: today });
+            }
+            category.monthlyBudget = 0;
+            category.budgetCurrency = newCurrency;
+            category.budgetStartDate = today;
+            if (category.subcategoryBudgets) {
+                if (!category.subcategoryBudgetHistory) category.subcategoryBudgetHistory = {};
+                Object.keys(category.subcategoryBudgets).forEach(subName => {
+                    const oldBudget = category.subcategoryBudgets[subName] || 0;
+                    const oldCurrency = (category.subcategoryBudgetCurrencies && category.subcategoryBudgetCurrencies[subName]) || 'GBP';
+                    if (oldBudget > 0) {
+                        if (!category.subcategoryBudgetHistory[subName]) category.subcategoryBudgetHistory[subName] = [];
+                        category.subcategoryBudgetHistory[subName].push({ amount: oldBudget, currency: oldCurrency, endDate: today });
+                    }
+                    category.subcategoryBudgets[subName] = 0;
+                });
+                if (!category.subcategoryBudgetCurrencies) category.subcategoryBudgetCurrencies = {};
+                Object.keys(category.subcategoryBudgetCurrencies).forEach(subName => { category.subcategoryBudgetCurrencies[subName] = newCurrency; });
+            }
+        });
+        this.saveCategories();
+        return true;
+    }
     static async getBudgetSummary() {
         await this.initialize();
         const now = new Date();
@@ -704,7 +733,13 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [showBudgets, setShowBudgets] = useState(false);
     const [budgetChanges, setBudgetChanges] = useState({});
-    const [categoryBudgetModes, setCategoryBudgetModes] = useState({});
+    const [categoryBudgetModes, setCategoryBudgetModes] = useState(() => {
+        const modes = {};
+        categories.forEach(cat => { if (cat.useSubcategoryBudgets) modes[cat.id] = true; });
+        return modes;
+    });
+    const hasBudgetCurrencyMismatch = categories.some(cat => cat.budgetCurrency && cat.budgetCurrency !== defaultCurrency && (cat.monthlyBudget > 0 || (cat.subcategoryBudgets && Object.values(cat.subcategoryBudgets).some(v => v > 0))));
+    const handleResetAllBudgets = async () => { try { await DataService.resetAllBudgets(defaultCurrency); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budgets' }); } };
 
     const handleAddCategory = (e) => { e.preventDefault(); const validation = ValidationUtils.validateCategory({ name: newCategoryName }); if (!validation.isValid) { setErrors(validation.errors); return; } const existingCategory = categories.find(cat => cat.name.toLowerCase() === newCategoryName.trim().toLowerCase()); if (existingCategory) { setErrors({ name: 'Category name already exists' }); return; } DataService.addCategory({ name: newCategoryName.trim() }); setNewCategoryName(''); setErrors({}); onUpdate(); };
     const handleUpdateCategory = (categoryId, newName) => { const validation = ValidationUtils.validateCategory({ name: newName }); if (!validation.isValid) { setErrors({ [categoryId]: validation.errors.name }); return; } const existingCategory = categories.find(cat => cat.id !== categoryId && cat.name.toLowerCase() === newName.trim().toLowerCase()); if (existingCategory) { setErrors({ [categoryId]: 'Category name already exists' }); return; } DataService.updateCategory(categoryId, { name: newName.trim() }); setEditingCategory(null); setErrors({}); onUpdate(); };
@@ -713,12 +748,11 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     const handleDeleteSubcategory = (categoryId, subcategoryName) => { const expensesUsingSubcategory = DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: 'Cannot delete subcategory. It\'s being used by ' + expensesUsingSubcategory.length + ' expense(s).' }); return; } DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
     const handleBudgetChange = (categoryId, type, subcategory, value) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; setBudgetChanges(prev => ({ ...prev, [key]: value })); };
     const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency); } } setBudgetChanges({}); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
-    const handleResetBudget = async (categoryId, type, subcategory) => { try { if (type === 'category') { await DataService.resetCategoryBudget(categoryId, defaultCurrency); } else { await DataService.resetSubcategoryBudget(categoryId, subcategory, defaultCurrency); } onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budget' }); } };
-    const isBudgetCurrencyMismatch = (category, type, subcategory) => { if (type === 'category') { return category.budgetCurrency && category.budgetCurrency !== defaultCurrency && category.monthlyBudget > 0; } else { const subCurrency = category.subcategoryBudgetCurrencies && category.subcategoryBudgetCurrencies[subcategory]; const subBudget = category.subcategoryBudgets && category.subcategoryBudgets[subcategory]; return subCurrency && subCurrency !== defaultCurrency && subBudget > 0; } };
-    const toggleBudgetMode = (categoryId) => { setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: !prev[categoryId] })); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); };
+    const toggleBudgetMode = async (categoryId) => { const newMode = !categoryBudgetModes[categoryId]; setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: newMode })); await DataService.updateCategory(categoryId, { useSubcategoryBudgets: newMode }); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); onUpdate(); };
     const getCurrentBudgetValue = (categoryId, type, subcategory) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); if (!category) return ''; if (type === 'category') return category.monthlyBudget || ''; else return (category.subcategoryBudgets && category.subcategoryBudgets[subcategory]) || ''; };
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
-    const totalBudget = categories.reduce((sum, category) => { const useSubcategoryBudgets = categoryBudgetModes[category.id]; if (useSubcategoryBudgets) { return sum + category.subcategories.reduce((subSum, subcategory) => subSum + (parseFloat(getCurrentBudgetValue(category.id, 'subcategory', subcategory)) || 0), 0); } else { return sum + (parseFloat(getCurrentBudgetValue(category.id, 'category')) || 0); } }, 0);
+    const getCategoryTotalBudget = (category) => { if (categoryBudgetModes[category.id]) { return category.subcategories.reduce((sum, sub) => sum + (parseFloat(getCurrentBudgetValue(category.id, 'subcategory', sub)) || 0), 0); } return parseFloat(getCurrentBudgetValue(category.id, 'category')) || 0; };
+    const totalBudget = categories.reduce((sum, category) => sum + getCategoryTotalBudget(category), 0);
 
     return (
         <div className="screen">
@@ -727,6 +761,12 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                 {hasUnsavedChanges && (<button className="btn btn-success btn-sm" onClick={saveBudgetChanges}><i className="fas fa-save"></i> Save Budget Changes</button>)}
             </div>
             {errors.delete && (<div className="alert alert-danger">{errors.delete}</div>)}
+            {hasBudgetCurrencyMismatch && (
+                <div className="alert alert-warning d-flex align-items-center justify-content-between" style={{marginBottom: '1rem'}}>
+                    <div><i className="fas fa-exclamation-triangle me-2"></i>Budgets were set in a different currency. Reset all to {defaultCurrency}?</div>
+                    <button className="btn btn-warning btn-sm ms-2" onClick={handleResetAllBudgets}><i className="fas fa-sync-alt me-1"></i>Reset All Budgets</button>
+                </div>
+            )}
             <div className="add-category-section">
                 <h5>Add New Category</h5>
                 <form onSubmit={handleAddCategory} className="add-form">
@@ -770,19 +810,10 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                                 {!categoryBudgetModes[category.id] && (
                                     <div className="budget-input-row">
                                         <label className="budget-label"><i className="fas fa-calculator"></i> Category Budget:</label>
-                                        {isBudgetCurrencyMismatch(category, 'category') ? (
-                                            <div className="budget-currency-mismatch">
-                                                <div className="mismatch-info">
-                                                    <span className="badge bg-warning text-dark">Budget set in {CurrencyService.getCurrencySymbol(category.budgetCurrency)}{category.monthlyBudget.toFixed(2)} ({category.budgetCurrency})</span>
-                                                    <button className="btn btn-outline-primary btn-sm ms-2" onClick={() => handleResetBudget(category.id, 'category')}>Reset to {defaultCurrency}</button>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div className="input-group input-group-sm budget-input">
-                                                <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
-                                                <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'category')} onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)} placeholder="0.00" step="0.01" min="0" />
-                                            </div>
-                                        )}
+                                        <div className="input-group input-group-sm budget-input">
+                                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
+                                            <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'category')} onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)} placeholder="0.00" step="0.01" min="0" disabled={hasBudgetCurrencyMismatch} />
+                                        </div>
                                     </div>
                                 )}
                                 {categoryBudgetModes[category.id] && category.subcategories.length > 0 && (
@@ -791,19 +822,10 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                                         {category.subcategories.map(subcategory => (
                                             <div key={subcategory} className="budget-input-row subcategory-budget-row">
                                                 <label className="budget-label subcategory-label">{subcategory}:</label>
-                                                {isBudgetCurrencyMismatch(category, 'subcategory', subcategory) ? (
-                                                    <div className="budget-currency-mismatch">
-                                                        <div className="mismatch-info">
-                                                            <span className="badge bg-warning text-dark">{CurrencyService.getCurrencySymbol(category.subcategoryBudgetCurrencies[subcategory])}{category.subcategoryBudgets[subcategory].toFixed(2)} ({category.subcategoryBudgetCurrencies[subcategory]})</span>
-                                                            <button className="btn btn-outline-primary btn-sm ms-2" onClick={() => handleResetBudget(category.id, 'subcategory', subcategory)}>Reset to {defaultCurrency}</button>
-                                                        </div>
-                                                    </div>
-                                                ) : (
-                                                    <div className="input-group input-group-sm budget-input">
-                                                        <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
-                                                        <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)} onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)} placeholder="0.00" step="0.01" min="0" />
-                                                    </div>
-                                                )}
+                                                <div className="input-group input-group-sm budget-input">
+                                                    <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
+                                                    <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)} onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)} placeholder="0.00" step="0.01" min="0" disabled={hasBudgetCurrencyMismatch} />
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
@@ -845,7 +867,7 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                         <div className="summary-info">
                             <h5>Total Monthly Budget</h5>
                             <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget, defaultCurrency)}</div>
-                            <div className="summary-note">{categories.filter(cat => cat.monthlyBudget > 0).length} of {categories.length} categories have budgets set</div>
+                            <div className="summary-note">{categories.filter(cat => getCategoryTotalBudget(cat) > 0).length} of {categories.length} categories have budgets set</div>
                         </div>
                     </div>
                 </div>
@@ -1046,6 +1068,11 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                 return { amount: midMonthReset.amount, currency: midMonthReset.currency };
             }
         }
+        if (category.useSubcategoryBudgets && category.subcategoryBudgets) {
+            const total = Object.values(category.subcategoryBudgets).reduce((sum, v) => sum + (v || 0), 0);
+            const currency = category.budgetCurrency || (category.subcategoryBudgetCurrencies ? Object.values(category.subcategoryBudgetCurrencies)[0] : null) || defaultCurrency;
+            return { amount: total, currency: currency };
+        }
         return { amount: category.monthlyBudget || 0, currency: category.budgetCurrency || defaultCurrency };
     };
     const getEffectiveSubcategoryBudget = (category, subcatName, now) => {
@@ -1065,8 +1092,14 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
         return { amount, currency };
     };
 
+    const convertBudgetAmount = async (amount, fromCurrency) => {
+        if (!fromCurrency || fromCurrency === defaultCurrency || amount <= 0) return amount;
+        try { return await CurrencyService.convertCurrency(amount, fromCurrency, defaultCurrency); }
+        catch (e) { return convertAmountSync(amount, fromCurrency, defaultCurrency); }
+    };
+
     useEffect(() => {
-        if (timeRange === 'month' && convertedExpenses.length >= 0) {
+        if (timeRange === 'month') {
             const now = new Date();
             const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
             const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -1080,21 +1113,15 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                     const catExpenses = monthlyExpenses.filter(exp => exp.categoryId === category.id);
                     const totalSpent = catExpenses.reduce((sum, exp) => sum + exp.amount, 0);
                     const effectiveBudget = getEffectiveBudget(category, now);
-                    let budget = effectiveBudget.amount;
-                    if (effectiveBudget.currency !== defaultCurrency && budget > 0) {
-                        try { budget = await CurrencyService.convertCurrency(budget, effectiveBudget.currency, defaultCurrency); }
-                        catch (e) { budget = convertAmountSync(budget, effectiveBudget.currency, defaultCurrency); }
-                    }
+                    let budget = await convertBudgetAmount(effectiveBudget.amount, effectiveBudget.currency);
                     const subcats = [];
-                    for (const subcatName of (category.subcategories || [])) {
-                        const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
-                        const effectiveSubBudget = getEffectiveSubcategoryBudget(category, subcatName, now);
-                        let subcatBudget = effectiveSubBudget.amount;
-                        if (effectiveSubBudget.currency !== defaultCurrency && subcatBudget > 0) {
-                            try { subcatBudget = await CurrencyService.convertCurrency(subcatBudget, effectiveSubBudget.currency, defaultCurrency); }
-                            catch (e) { subcatBudget = convertAmountSync(subcatBudget, effectiveSubBudget.currency, defaultCurrency); }
+                    if (category.useSubcategoryBudgets) {
+                        for (const subcatName of (category.subcategories || [])) {
+                            const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
+                            const effectiveSubBudget = getEffectiveSubcategoryBudget(category, subcatName, now);
+                            let subcatBudget = await convertBudgetAmount(effectiveSubBudget.amount, effectiveSubBudget.currency);
+                            if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0 }); }
                         }
-                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0 }); }
                     }
                     return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, subcategories: subcats };
                 });

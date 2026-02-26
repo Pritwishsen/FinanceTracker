@@ -103,12 +103,14 @@ The application is designed to work both as a development prototype (with localS
 
 ### February 26, 2026 - Budget Currency System Enhancement
 - **Budget currency tracking**: Each budget stores `budgetCurrency` and `budgetStartDate` alongside the amount
-- **Budget history with archiving**: When resetting a budget to a new currency, the old budget is archived with `endDate` in `budgetHistory` array
-- **Currency mismatch detection**: CategoryManager shows a warning badge when budget currency differs from default currency, with a "Reset" button
-- **Editable only when currencies match**: Budget inputs are active when `budgetCurrency === defaultCurrency`, otherwise read-only with reset option
-- **Month-boundary logic in Summary**: If a budget is reset mid-month, the old archived budget is used for the current month's overview; new budget takes effect from the next month
+- **Budget history with archiving**: When resetting budgets to a new currency, old budgets are archived with `endDate` in `budgetHistory` array
+- **Global budget reset**: When default currency differs from budget currency, a global "Reset All Budgets" banner appears in CategoryManager; all budgets reset at once (not per-category)
+- **Budget inputs disabled on mismatch**: When currencies don't match, budget inputs are disabled until the global reset is performed
+- **Subcategory budget mode persistence**: `useSubcategoryBudgets` flag is saved on the category object and restored on reload
+- **Subcategory budget totals**: When subcategory-level budgets are active, the category total is computed as sum of subcategory budgets (read-only at category level); Summary uses this sum for budget overview
+- **Month-boundary logic in Summary**: If budgets were reset mid-month, the old archived budget is used for the current month's overview; new budget takes effect from the next month
 - **Budget conversion in Summary**: Budget amounts are converted from their stored currency to the current default currency for display
-- **Subcategory budget support**: Same currency tracking, archiving, and reset logic applies to subcategory-level budgets
+- **Spent amounts in Summary**: Expenses are always converted to the default currency for consistent display in budget overview
 
 ### January 30, 2025 - Currency System Implementation
 - **Added comprehensive currency support**: Default currency selection with real-time conversion
