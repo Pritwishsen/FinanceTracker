@@ -943,6 +943,43 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     const [selectedCategory, setSelectedCategory] = useState('');
     const [selectedPaidBy, setSelectedPaidBy] = useState('');
     const [budgetData, setBudgetData] = useState([]);
+    const [convertedExpenses, setConvertedExpenses] = useState([]);
+    const [convertedIncome, setConvertedIncome] = useState([]);
+
+    const convertAmountSync = (amount, fromCurrency, toCurrency) => {
+        if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
+        const rates = CurrencyService.fallbackRates[fromCurrency];
+        if (rates && rates[toCurrency]) return Math.round(amount * rates[toCurrency] * 100) / 100;
+        return amount;
+    };
+
+    useEffect(() => {
+        const convertAll = async () => {
+            const newExpenses = await Promise.all(expenses.map(async (exp) => {
+                const expCurrency = exp.currency || 'GBP';
+                if (expCurrency === defaultCurrency) return exp;
+                try {
+                    const converted = await CurrencyService.convertCurrency(exp.amount, expCurrency, defaultCurrency);
+                    return { ...exp, amount: converted, currency: defaultCurrency, originalDisplayAmount: exp.amount, originalDisplayCurrency: expCurrency };
+                } catch (e) {
+                    return { ...exp, amount: convertAmountSync(exp.amount, expCurrency, defaultCurrency), currency: defaultCurrency };
+                }
+            }));
+            const newIncome = await Promise.all(income.map(async (inc) => {
+                const incCurrency = inc.currency || 'GBP';
+                if (incCurrency === defaultCurrency) return inc;
+                try {
+                    const converted = await CurrencyService.convertCurrency(inc.amount, incCurrency, defaultCurrency);
+                    return { ...inc, amount: converted, currency: defaultCurrency };
+                } catch (e) {
+                    return { ...inc, amount: convertAmountSync(inc.amount, incCurrency, defaultCurrency), currency: defaultCurrency };
+                }
+            }));
+            setConvertedExpenses(newExpenses);
+            setConvertedIncome(newIncome);
+        };
+        convertAll();
+    }, [expenses, income, defaultCurrency]);
 
     useEffect(() => { if (timeRange === 'month') { DataService.getBudgetSummary().then(setBudgetData); } else { setBudgetData([]); } }, [timeRange, expenses, categories]);
 
@@ -953,20 +990,20 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     };
     const filterByDateRange = (data) => { const { startDate, endDate } = getDateRange(); return data.filter(item => { const itemDate = new Date(item.date); return itemDate >= startDate && itemDate <= endDate; }); };
 
-    let filteredExpenses = filterByDateRange(expenses);
-    let filteredIncome = filterByDateRange(income);
+    let filteredExpenses = filterByDateRange(convertedExpenses);
+    let filteredIncome = filterByDateRange(convertedIncome);
     if (selectedPaidBy) {
         if (selectedPaidBy === 'self') { filteredExpenses = filteredExpenses.filter(expense => !expense.paidBy || expense.paidBy.trim() === ''); filteredIncome = filteredIncome.filter(incomeItem => !incomeItem.paidBy || incomeItem.paidBy.trim() === ''); }
         else { filteredExpenses = filteredExpenses.filter(expense => expense.paidBy && expense.paidBy === selectedPaidBy); filteredIncome = filteredIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy === selectedPaidBy); }
     }
-    const expensePaidBy = expenses.filter(expense => expense.paidBy && expense.paidBy.trim() !== '').map(expense => expense.paidBy);
-    const incomePaidBy = income.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy.trim() !== '').map(incomeItem => incomeItem.paidBy);
+    const expensePaidBy = convertedExpenses.filter(expense => expense.paidBy && expense.paidBy.trim() !== '').map(expense => expense.paidBy);
+    const incomePaidBy = convertedIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy.trim() !== '').map(incomeItem => incomeItem.paidBy);
     const uniquePaidBy = [...new Set([...expensePaidBy, ...incomePaidBy])].sort();
     const totalExpenses = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
-    const totalIncome = filteredIncome.reduce((sum, income) => sum + income.amount, 0);
+    const totalIncome = filteredIncome.reduce((sum, inc) => sum + inc.amount, 0);
     const netAmount = totalIncome - totalExpenses;
     const expensesByCategory = categories.map(category => { const categoryExpenses = filteredExpenses.filter(expense => expense.categoryId === category.id); const total = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0); const percentage = totalExpenses > 0 ? (total / totalExpenses) * 100 : 0; return { ...category, total, percentage, count: categoryExpenses.length }; }).filter(category => category.total > 0).sort((a, b) => b.total - a.total);
-    const getPreviousPeriodComparison = () => { const { startDate } = getDateRange(); const periodLength = new Date() - startDate; const previousEndDate = new Date(startDate.getTime() - 1); const previousStartDate = new Date(previousEndDate.getTime() - periodLength); const previousExpenses = expenses.filter(expense => { const expenseDate = new Date(expense.date); return expenseDate >= previousStartDate && expenseDate <= previousEndDate; }); const previousTotal = previousExpenses.reduce((sum, expense) => sum + expense.amount, 0); const change = totalExpenses - previousTotal; const changePercentage = previousTotal > 0 ? (change / previousTotal) * 100 : 0; return { change, changePercentage, previousTotal }; };
+    const getPreviousPeriodComparison = () => { const { startDate } = getDateRange(); const periodLength = new Date() - startDate; const previousEndDate = new Date(startDate.getTime() - 1); const previousStartDate = new Date(previousEndDate.getTime() - periodLength); const previousExpenses = convertedExpenses.filter(expense => { const expenseDate = new Date(expense.date); return expenseDate >= previousStartDate && expenseDate <= previousEndDate; }); const previousTotal = previousExpenses.reduce((sum, expense) => sum + expense.amount, 0); const change = totalExpenses - previousTotal; const changePercentage = previousTotal > 0 ? (change / previousTotal) * 100 : 0; return { change, changePercentage, previousTotal }; };
     const trendData = getPreviousPeriodComparison();
     const getTopSpendingDays = () => { const dailySpending = {}; filteredExpenses.forEach(expense => { const date = expense.date; dailySpending[date] = (dailySpending[date] || 0) + expense.amount; }); return Object.entries(dailySpending).sort(([,a], [,b]) => b - a).slice(0, 5).map(([date, amount]) => ({ date, amount })); };
     const topSpendingDays = getTopSpendingDays();
