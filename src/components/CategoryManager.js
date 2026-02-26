@@ -1,4 +1,4 @@
-function CategoryManager({ categories, onUpdate }) {
+function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     const [editingCategory, setEditingCategory] = useState(null);
     const [newCategoryName, setNewCategoryName] = useState('');
     const [newSubcategoryName, setNewSubcategoryName] = useState('');
@@ -323,7 +323,7 @@ function CategoryManager({ categories, onUpdate }) {
                                             <i className="fas fa-calculator"></i> Category Budget:
                                         </label>
                                         <div className="input-group input-group-sm budget-input">
-                                            <span className="input-group-text">£</span>
+                                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
                                             <input
                                                 type="number"
                                                 className="form-control"
@@ -349,7 +349,7 @@ function CategoryManager({ categories, onUpdate }) {
                                                     {subcategory}:
                                                 </label>
                                                 <div className="input-group input-group-sm budget-input">
-                                                    <span className="input-group-text">£</span>
+                                                    <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
                                                     <input
                                                         type="number"
                                                         className="form-control"
@@ -383,7 +383,7 @@ function CategoryManager({ categories, onUpdate }) {
                                     return totalCategoryBudget > 0 ? (
                                         <div className="category-total-budget">
                                             <div className="total-budget-display">
-                                                <strong>Total for {category.name}: {ValidationUtils.formatCurrency(totalCategoryBudget)}</strong>
+                                                <strong>Total for {category.name}: {ValidationUtils.formatCurrency(totalCategoryBudget, defaultCurrency)}</strong>
                                             </div>
                                         </div>
                                     ) : null;
@@ -453,7 +453,7 @@ function CategoryManager({ categories, onUpdate }) {
                         </div>
                         <div className="summary-info">
                             <h5>Total Monthly Budget</h5>
-                            <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget)}</div>
+                            <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget, defaultCurrency)}</div>
                             <div className="summary-note">
                                 {categories.filter(cat => cat.monthlyBudget > 0).length} of {categories.length} categories have budgets set
                             </div>

@@ -1,4 +1,4 @@
-function Summary({ expenses, income, categories }) {
+function Summary({ expenses, income, categories, defaultCurrency }) {
     const [timeRange, setTimeRange] = useState('month');
     const [selectedCategory, setSelectedCategory] = useState('');
     const [selectedPaidBy, setSelectedPaidBy] = useState('');
@@ -176,7 +176,7 @@ function Summary({ expenses, income, categories }) {
                     </div>
                     <div className="card-content">
                         <h6>Total Income</h6>
-                        <div className="amount">{ValidationUtils.formatCurrency(totalIncome)}</div>
+                        <div className="amount">{ValidationUtils.formatCurrency(totalIncome, defaultCurrency)}</div>
                         {selectedPaidBy && (
                             <div className="filter-info">
                                 {selectedPaidBy === 'self' ? 'Your income only' : `${selectedPaidBy}'s income only`}
@@ -191,7 +191,7 @@ function Summary({ expenses, income, categories }) {
                     </div>
                     <div className="card-content">
                         <h6>Total Expenses</h6>
-                        <div className="amount">{ValidationUtils.formatCurrency(totalExpenses)}</div>
+                        <div className="amount">{ValidationUtils.formatCurrency(totalExpenses, defaultCurrency)}</div>
                         {selectedPaidBy && (
                             <div className="filter-info">
                                 {selectedPaidBy === 'self' ? 'Your expenses only' : `${selectedPaidBy}'s expenses only`}
@@ -212,7 +212,7 @@ function Summary({ expenses, income, categories }) {
                     </div>
                     <div className="card-content">
                         <h6>Net Amount</h6>
-                        <div className="amount">{ValidationUtils.formatCurrency(Math.abs(netAmount))}</div>
+                        <div className="amount">{ValidationUtils.formatCurrency(Math.abs(netAmount), defaultCurrency)}</div>
                         <div className="trend">
                             {netAmount >= 0 ? 'Surplus' : 'Deficit'}
                         </div>
@@ -225,7 +225,7 @@ function Summary({ expenses, income, categories }) {
                     </div>
                     <div className="card-content">
                         <h6>Daily Average</h6>
-                        <div className="amount">{ValidationUtils.formatCurrency(avgDailySpending)}</div>
+                        <div className="amount">{ValidationUtils.formatCurrency(avgDailySpending, defaultCurrency)}</div>
                         <div className="trend">{daysDiff} days</div>
                     </div>
                 </div>
@@ -253,11 +253,11 @@ function Summary({ expenses, income, categories }) {
                                     </div>
                                     <div className="budget-amounts">
                                         <span className="budget-spent">
-                                            Spent: {ValidationUtils.formatCurrency(budgetItem.spent)}
+                                            Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}
                                         </span>
                                         <span className={`budget-remaining ${budgetItem.remaining >= 0 ? 'positive' : 'negative'}`}>
                                             {budgetItem.remaining >= 0 ? 'Remaining: ' : 'Over by: '}
-                                            {ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining))}
+                                            {ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining), defaultCurrency)}
                                         </span>
                                     </div>
                                 </div>
@@ -281,7 +281,7 @@ function Summary({ expenses, income, categories }) {
                                     </div>
                                 </div>
                                 <div className="category-amount">
-                                    <div className="amount">{ValidationUtils.formatCurrency(category.total)}</div>
+                                    <div className="amount">{ValidationUtils.formatCurrency(category.total, defaultCurrency)}</div>
                                     <div className="percentage">{category.percentage.toFixed(1)}%</div>
                                 </div>
                                 <div className="category-bar">
@@ -308,7 +308,7 @@ function Summary({ expenses, income, categories }) {
                                     <div className="day-date">{ValidationUtils.formatDate(day.date)}</div>
                                 </div>
                                 <div className="day-amount">
-                                    {ValidationUtils.formatCurrency(day.amount)}
+                                    {ValidationUtils.formatCurrency(day.amount, defaultCurrency)}
                                 </div>
                             </div>
                         ))}
@@ -328,8 +328,8 @@ function Summary({ expenses, income, categories }) {
                         <div className="stat-label">Largest Expense</div>
                         <div className="stat-value">
                             {filteredExpenses.length > 0 
-                                ? ValidationUtils.formatCurrency(Math.max(...filteredExpenses.map(e => e.amount)))
-                                : '$0.00'
+                                ? ValidationUtils.formatCurrency(Math.max(...filteredExpenses.map(e => e.amount)), defaultCurrency)
+                                : ValidationUtils.formatCurrency(0, defaultCurrency)
                             }
                         </div>
                     </div>

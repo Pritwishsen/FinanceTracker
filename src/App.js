@@ -61,6 +61,7 @@ function App() {
                 return <CategoryManager 
                     categories={categories}
                     onUpdate={handleDataUpdate}
+                    defaultCurrency={defaultCurrency}
                 />;
             case 'income':
                 return <IncomeForm 
