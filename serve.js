@@ -4,6 +4,7 @@ const path = require('path');
 
 const PORT = 5000;
 const ROOT = __dirname;
+const CACHE_BUST = Date.now().toString();
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -22,8 +23,17 @@ const MIME_TYPES = {
 
 const server = http.createServer((req, res) => {
   console.log('REQUEST:', req.url);
-  let urlPath = req.url.split('?')[0];
-  if (urlPath === '/') urlPath = '/index.html';
+  const parsedUrl = new URL(req.url, 'http://localhost');
+  let urlPath = parsedUrl.pathname;
+
+  if (urlPath === '/') {
+    res.writeHead(302, {
+      'Location': '/app-v3.html',
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
+    });
+    res.end();
+    return;
+  }
 
   const filePath = path.join(ROOT, urlPath);
 
@@ -39,14 +49,15 @@ const server = http.createServer((req, res) => {
       'Content-Type': contentType,
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
-      'Expires': '0'
+      'Expires': '0',
+      'ETag': CACHE_BUST
     });
     res.end(data);
   });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log('Server running on port ' + PORT + ' (cache bust: ' + CACHE_BUST + ')');
 });
 
 process.on('uncaughtException', (err) => {
