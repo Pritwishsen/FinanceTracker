@@ -19,12 +19,17 @@ function CurrencySettings({ onUpdate }) {
     }, []);
 
     const handleCurrencyChange = async (currencyCode) => {
+        console.log('Currency change clicked:', currencyCode);
         try {
             await DataService.updateSettings({ currency: currencyCode });
+            console.log('Settings saved, verifying...');
+            const verifySettings = await DataService.getSettings();
+            console.log('Verified settings:', JSON.stringify(verifySettings));
             setDefaultCurrency(currencyCode);
             setErrors({});
-            onUpdate();
+            if (onUpdate) onUpdate();
         } catch (error) {
+            console.error('Currency change error:', error);
             setErrors({ currency: 'Failed to update default currency' });
         }
     };

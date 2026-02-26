@@ -73,7 +73,13 @@ class DataService {
                 this.saveCategories();
             }
             if (savedSettings) {
-                this.data.settings = { ...this.data.settings, ...JSON.parse(savedSettings) };
+                const parsed = JSON.parse(savedSettings);
+                if (parsed.defaultCurrency && !parsed.currency) {
+                    parsed.currency = parsed.defaultCurrency;
+                    delete parsed.defaultCurrency;
+                }
+                this.data.settings = { ...this.data.settings, ...parsed };
+                this.saveSettings();
             }
 
             this.isInitialized = true;
@@ -364,12 +370,24 @@ class DataService {
     // Settings methods
     static async getSettings() {
         await this.initialize();
-        return { ...this.data.settings };
+        const settings = { ...this.data.settings };
+        if (settings.defaultCurrency && !settings.currency) {
+            settings.currency = settings.defaultCurrency;
+        }
+        return settings;
     }
 
     static async updateSettings(updates) {
         await this.initialize();
+        if (updates.defaultCurrency) {
+            updates.currency = updates.defaultCurrency;
+            delete updates.defaultCurrency;
+        }
         this.data.settings = { ...this.data.settings, ...updates };
+        if (this.data.settings.defaultCurrency) {
+            this.data.settings.currency = this.data.settings.defaultCurrency;
+            delete this.data.settings.defaultCurrency;
+        }
         this.saveSettings();
         return this.data.settings;
     }
