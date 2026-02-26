@@ -234,18 +234,7 @@ class DataService {
     }
     static async addExpenseWithConversion(expense) {
         await this.initialize();
-        const settings = await this.getSettings();
-        const defaultCurrency = settings.currency || 'GBP';
-        const expenseData = { ...expense, originalAmount: expense.amount, originalCurrency: expense.currency, id: Date.now(), createdAt: new Date().toISOString() };
-        if (expense.currency !== defaultCurrency) {
-            try {
-                const convertedAmount = await CurrencyService.convertCurrency(expense.amount, expense.currency, defaultCurrency);
-                expenseData.amount = convertedAmount;
-                expenseData.currency = defaultCurrency;
-                expenseData.conversionRate = convertedAmount / expense.amount;
-                expenseData.convertedAt = new Date().toISOString();
-            } catch (error) { console.error('Currency conversion failed:', error); }
-        }
+        const expenseData = { ...expense, id: Date.now(), createdAt: new Date().toISOString() };
         this.data.expenses.push(expenseData);
         this.saveExpenses();
         return expenseData;
@@ -280,18 +269,7 @@ class DataService {
     }
     static async addIncomeWithConversion(income) {
         await this.initialize();
-        const settings = await this.getSettings();
-        const defaultCurrency = settings.currency || 'GBP';
-        const incomeData = { ...income, originalAmount: income.amount, originalCurrency: income.currency, id: Date.now(), createdAt: new Date().toISOString() };
-        if (income.currency !== defaultCurrency) {
-            try {
-                const convertedAmount = await CurrencyService.convertCurrency(income.amount, income.currency, defaultCurrency);
-                incomeData.amount = convertedAmount;
-                incomeData.currency = defaultCurrency;
-                incomeData.conversionRate = convertedAmount / income.amount;
-                incomeData.convertedAt = new Date().toISOString();
-            } catch (error) { console.error('Currency conversion failed:', error); }
-        }
+        const incomeData = { ...income, id: Date.now(), createdAt: new Date().toISOString() };
         this.data.income.push(incomeData);
         this.saveIncome();
         return incomeData;
