@@ -21,7 +21,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 server.py"
+args = "npx serve -l 5000 --no-clipboard -c serve.json"
 waitForPort = 5000
 
 [workflows.workflow.metadata]

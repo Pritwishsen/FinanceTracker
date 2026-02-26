@@ -1,0 +1,15 @@
+{
+  "public": ".",
+  "rewrites": [
+    { "source": "/", "destination": "/app-v3.html" },
+    { "source": "/index.html", "destination": "/app-v3.html" }
+  ],
+  "headers": [
+    {
+      "source": "**/*",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    }
+  ]
+}
