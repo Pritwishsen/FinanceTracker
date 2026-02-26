@@ -29,6 +29,8 @@ outputType = "webview"
 
 [deployment]
 run = ["sh", "-c", "python3 -m http.server 5000"]
+deploymentTarget = "static"
+publicDir = "."
 
 [[ports]]
 localPort = 5000
