@@ -1291,3 +1291,24 @@ body {
   border-radius: 8px;
   border: 1px solid hsl(var(--border-color));
 }
+
+.budget-currency-mismatch {
+  flex: 1;
+}
+
+.mismatch-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.mismatch-info .badge {
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.mismatch-info .btn {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}

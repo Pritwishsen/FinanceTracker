@@ -101,6 +101,15 @@ The application is designed to work both as a development prototype (with localS
 
 ## Recent Changes: Latest modifications with dates
 
+### February 26, 2026 - Budget Currency System Enhancement
+- **Budget currency tracking**: Each budget stores `budgetCurrency` and `budgetStartDate` alongside the amount
+- **Budget history with archiving**: When resetting a budget to a new currency, the old budget is archived with `endDate` in `budgetHistory` array
+- **Currency mismatch detection**: CategoryManager shows a warning badge when budget currency differs from default currency, with a "Reset" button
+- **Editable only when currencies match**: Budget inputs are active when `budgetCurrency === defaultCurrency`, otherwise read-only with reset option
+- **Month-boundary logic in Summary**: If a budget is reset mid-month, the old archived budget is used for the current month's overview; new budget takes effect from the next month
+- **Budget conversion in Summary**: Budget amounts are converted from their stored currency to the current default currency for display
+- **Subcategory budget support**: Same currency tracking, archiving, and reset logic applies to subcategory-level budgets
+
 ### January 30, 2025 - Currency System Implementation
 - **Added comprehensive currency support**: Default currency selection with real-time conversion
 - **Settings screen**: New navigation tab for currency management (GBP, EUR, USD, INR)

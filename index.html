@@ -332,16 +332,73 @@ class DataService {
     }
     static async getCurrency() { await this.initialize(); return this.data.settings.currency || 'GBP'; }
     static async setCurrency(currency) { await this.initialize(); this.data.settings.currency = currency; this.saveSettings(); return currency; }
-    static async setCategoryBudget(categoryId, budget) {
+    static async setCategoryBudget(categoryId, budget, currency) {
         await this.initialize();
         const category = this.data.categories.find(cat => cat.id === categoryId);
-        if (category) { category.monthlyBudget = parseFloat(budget) || 0; this.saveCategories(); return true; }
+        if (category) {
+            category.monthlyBudget = parseFloat(budget) || 0;
+            if (currency) { category.budgetCurrency = currency; }
+            if (!category.budgetStartDate) { category.budgetStartDate = new Date().toISOString().split('T')[0]; }
+            if (!category.budgetHistory) { category.budgetHistory = []; }
+            this.saveCategories();
+            return true;
+        }
         return false;
     }
-    static async setSubcategoryBudget(categoryId, subcategoryName, budget) {
+    static async setSubcategoryBudget(categoryId, subcategoryName, budget, currency) {
         await this.initialize();
         const category = this.data.categories.find(cat => cat.id === categoryId);
-        if (category) { if (!category.subcategoryBudgets) category.subcategoryBudgets = {}; category.subcategoryBudgets[subcategoryName] = parseFloat(budget) || 0; this.saveCategories(); return true; }
+        if (category) {
+            if (!category.subcategoryBudgets) category.subcategoryBudgets = {};
+            if (!category.subcategoryBudgetCurrencies) category.subcategoryBudgetCurrencies = {};
+            category.subcategoryBudgets[subcategoryName] = parseFloat(budget) || 0;
+            if (currency) { category.subcategoryBudgetCurrencies[subcategoryName] = currency; }
+            this.saveCategories();
+            return true;
+        }
+        return false;
+    }
+    static async resetCategoryBudget(categoryId, newCurrency) {
+        await this.initialize();
+        const category = this.data.categories.find(cat => cat.id === categoryId);
+        if (category) {
+            if (!category.budgetHistory) category.budgetHistory = [];
+            if (category.monthlyBudget > 0) {
+                category.budgetHistory.push({
+                    amount: category.monthlyBudget,
+                    currency: category.budgetCurrency || 'GBP',
+                    startDate: category.budgetStartDate || null,
+                    endDate: new Date().toISOString().split('T')[0]
+                });
+            }
+            category.monthlyBudget = 0;
+            category.budgetCurrency = newCurrency;
+            category.budgetStartDate = new Date().toISOString().split('T')[0];
+            this.saveCategories();
+            return true;
+        }
+        return false;
+    }
+    static async resetSubcategoryBudget(categoryId, subcategoryName, newCurrency) {
+        await this.initialize();
+        const category = this.data.categories.find(cat => cat.id === categoryId);
+        if (category) {
+            if (!category.subcategoryBudgetHistory) category.subcategoryBudgetHistory = {};
+            if (!category.subcategoryBudgetHistory[subcategoryName]) category.subcategoryBudgetHistory[subcategoryName] = [];
+            const oldBudget = (category.subcategoryBudgets && category.subcategoryBudgets[subcategoryName]) || 0;
+            const oldCurrency = (category.subcategoryBudgetCurrencies && category.subcategoryBudgetCurrencies[subcategoryName]) || 'GBP';
+            if (oldBudget > 0) {
+                category.subcategoryBudgetHistory[subcategoryName].push({
+                    amount: oldBudget, currency: oldCurrency, endDate: new Date().toISOString().split('T')[0]
+                });
+            }
+            if (!category.subcategoryBudgets) category.subcategoryBudgets = {};
+            if (!category.subcategoryBudgetCurrencies) category.subcategoryBudgetCurrencies = {};
+            category.subcategoryBudgets[subcategoryName] = 0;
+            category.subcategoryBudgetCurrencies[subcategoryName] = newCurrency;
+            this.saveCategories();
+            return true;
+        }
         return false;
     }
     static async getBudgetSummary() {
@@ -655,7 +712,9 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     const handleAddSubcategory = (categoryId) => { if (!newSubcategoryName.trim()) { setErrors({ subcategory: 'Subcategory name is required' }); return; } const category = categories.find(cat => cat.id === categoryId); if (category.subcategories.includes(newSubcategoryName.trim())) { setErrors({ subcategory: 'Subcategory already exists' }); return; } DataService.addSubcategory(categoryId, newSubcategoryName.trim()); setNewSubcategoryName(''); setAddingSubcategoryTo(null); setErrors({}); onUpdate(); };
     const handleDeleteSubcategory = (categoryId, subcategoryName) => { const expensesUsingSubcategory = DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: 'Cannot delete subcategory. It\'s being used by ' + expensesUsingSubcategory.length + ' expense(s).' }); return; } DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
     const handleBudgetChange = (categoryId, type, subcategory, value) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; setBudgetChanges(prev => ({ ...prev, [key]: value })); };
-    const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value); } } setBudgetChanges({}); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
+    const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency); } } setBudgetChanges({}); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
+    const handleResetBudget = async (categoryId, type, subcategory) => { try { if (type === 'category') { await DataService.resetCategoryBudget(categoryId, defaultCurrency); } else { await DataService.resetSubcategoryBudget(categoryId, subcategory, defaultCurrency); } onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budget' }); } };
+    const isBudgetCurrencyMismatch = (category, type, subcategory) => { if (type === 'category') { return category.budgetCurrency && category.budgetCurrency !== defaultCurrency && category.monthlyBudget > 0; } else { const subCurrency = category.subcategoryBudgetCurrencies && category.subcategoryBudgetCurrencies[subcategory]; const subBudget = category.subcategoryBudgets && category.subcategoryBudgets[subcategory]; return subCurrency && subCurrency !== defaultCurrency && subBudget > 0; } };
     const toggleBudgetMode = (categoryId) => { setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: !prev[categoryId] })); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); };
     const getCurrentBudgetValue = (categoryId, type, subcategory) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); if (!category) return ''; if (type === 'category') return category.monthlyBudget || ''; else return (category.subcategoryBudgets && category.subcategoryBudgets[subcategory]) || ''; };
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
@@ -711,10 +770,19 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                                 {!categoryBudgetModes[category.id] && (
                                     <div className="budget-input-row">
                                         <label className="budget-label"><i className="fas fa-calculator"></i> Category Budget:</label>
-                                        <div className="input-group input-group-sm budget-input">
-                                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
-                                            <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'category')} onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)} placeholder="0.00" step="0.01" min="0" />
-                                        </div>
+                                        {isBudgetCurrencyMismatch(category, 'category') ? (
+                                            <div className="budget-currency-mismatch">
+                                                <div className="mismatch-info">
+                                                    <span className="badge bg-warning text-dark">Budget set in {CurrencyService.getCurrencySymbol(category.budgetCurrency)}{category.monthlyBudget.toFixed(2)} ({category.budgetCurrency})</span>
+                                                    <button className="btn btn-outline-primary btn-sm ms-2" onClick={() => handleResetBudget(category.id, 'category')}>Reset to {defaultCurrency}</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="input-group input-group-sm budget-input">
+                                                <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
+                                                <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'category')} onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)} placeholder="0.00" step="0.01" min="0" />
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                                 {categoryBudgetModes[category.id] && category.subcategories.length > 0 && (
@@ -723,10 +791,19 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                                         {category.subcategories.map(subcategory => (
                                             <div key={subcategory} className="budget-input-row subcategory-budget-row">
                                                 <label className="budget-label subcategory-label">{subcategory}:</label>
-                                                <div className="input-group input-group-sm budget-input">
-                                                    <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
-                                                    <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)} onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)} placeholder="0.00" step="0.01" min="0" />
-                                                </div>
+                                                {isBudgetCurrencyMismatch(category, 'subcategory', subcategory) ? (
+                                                    <div className="budget-currency-mismatch">
+                                                        <div className="mismatch-info">
+                                                            <span className="badge bg-warning text-dark">{CurrencyService.getCurrencySymbol(category.subcategoryBudgetCurrencies[subcategory])}{category.subcategoryBudgets[subcategory].toFixed(2)} ({category.subcategoryBudgetCurrencies[subcategory]})</span>
+                                                            <button className="btn btn-outline-primary btn-sm ms-2" onClick={() => handleResetBudget(category.id, 'subcategory', subcategory)}>Reset to {defaultCurrency}</button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="input-group input-group-sm budget-input">
+                                                        <span className="input-group-text">{ValidationUtils.getCurrencySymbol(defaultCurrency)}</span>
+                                                        <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)} onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)} placeholder="0.00" step="0.01" min="0" />
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </div>
@@ -957,6 +1034,37 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
         convertAll();
     }, [expenses, income, defaultCurrency]);
 
+    const getEffectiveBudget = (category, now) => {
+        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        if (category.budgetHistory && category.budgetHistory.length > 0) {
+            const midMonthReset = category.budgetHistory.find(h => {
+                const endDate = new Date(h.endDate);
+                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
+            });
+            if (midMonthReset) {
+                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
+            }
+        }
+        return { amount: category.monthlyBudget || 0, currency: category.budgetCurrency || defaultCurrency };
+    };
+    const getEffectiveSubcategoryBudget = (category, subcatName, now) => {
+        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        if (category.subcategoryBudgetHistory && category.subcategoryBudgetHistory[subcatName]) {
+            const midMonthReset = category.subcategoryBudgetHistory[subcatName].find(h => {
+                const endDate = new Date(h.endDate);
+                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
+            });
+            if (midMonthReset) {
+                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
+            }
+        }
+        const amount = (category.subcategoryBudgets && category.subcategoryBudgets[subcatName]) || 0;
+        const currency = (category.subcategoryBudgetCurrencies && category.subcategoryBudgetCurrencies[subcatName]) || defaultCurrency;
+        return { amount, currency };
+    };
+
     useEffect(() => {
         if (timeRange === 'month' && convertedExpenses.length >= 0) {
             const now = new Date();
@@ -967,21 +1075,35 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                 if (selectedPaidBy === 'self') { monthlyExpenses = monthlyExpenses.filter(exp => !exp.paidBy || exp.paidBy.trim() === ''); }
                 else { monthlyExpenses = monthlyExpenses.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy); }
             }
-            const summary = categories.map(category => {
-                const catExpenses = monthlyExpenses.filter(exp => exp.categoryId === category.id);
-                const totalSpent = catExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-                const budget = category.monthlyBudget || 0;
-                const subcats = [];
-                (category.subcategories || []).forEach(subcatName => {
-                    const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
-                    const subcatBudget = (category.subcategoryBudgets && category.subcategoryBudgets[subcatName]) || 0;
-                    if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0 }); }
+            const buildSummary = async () => {
+                const summaryPromises = categories.map(async (category) => {
+                    const catExpenses = monthlyExpenses.filter(exp => exp.categoryId === category.id);
+                    const totalSpent = catExpenses.reduce((sum, exp) => sum + exp.amount, 0);
+                    const effectiveBudget = getEffectiveBudget(category, now);
+                    let budget = effectiveBudget.amount;
+                    if (effectiveBudget.currency !== defaultCurrency && budget > 0) {
+                        try { budget = await CurrencyService.convertCurrency(budget, effectiveBudget.currency, defaultCurrency); }
+                        catch (e) { budget = convertAmountSync(budget, effectiveBudget.currency, defaultCurrency); }
+                    }
+                    const subcats = [];
+                    for (const subcatName of (category.subcategories || [])) {
+                        const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
+                        const effectiveSubBudget = getEffectiveSubcategoryBudget(category, subcatName, now);
+                        let subcatBudget = effectiveSubBudget.amount;
+                        if (effectiveSubBudget.currency !== defaultCurrency && subcatBudget > 0) {
+                            try { subcatBudget = await CurrencyService.convertCurrency(subcatBudget, effectiveSubBudget.currency, defaultCurrency); }
+                            catch (e) { subcatBudget = convertAmountSync(subcatBudget, effectiveSubBudget.currency, defaultCurrency); }
+                        }
+                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0 }); }
+                    }
+                    return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, subcategories: subcats };
                 });
-                return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, subcategories: subcats };
-            }).filter(item => item.budget > 0 || item.spent > 0);
-            setBudgetData(summary);
+                const summary = (await Promise.all(summaryPromises)).filter(item => item.budget > 0 || item.spent > 0);
+                setBudgetData(summary);
+            };
+            buildSummary();
         } else { setBudgetData([]); }
-    }, [timeRange, convertedExpenses, categories, selectedPaidBy]);
+    }, [timeRange, convertedExpenses, categories, selectedPaidBy, defaultCurrency]);
 
     const getDateRange = () => {
         const now = new Date(); let startDate, endDate = now;
