@@ -962,7 +962,11 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
             const now = new Date();
             const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
             const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-            const monthlyExpenses = convertedExpenses.filter(exp => { const d = new Date(exp.date); return d >= startOfMonth && d <= endOfMonth; });
+            let monthlyExpenses = convertedExpenses.filter(exp => { const d = new Date(exp.date); return d >= startOfMonth && d <= endOfMonth; });
+            if (selectedPaidBy) {
+                if (selectedPaidBy === 'self') { monthlyExpenses = monthlyExpenses.filter(exp => !exp.paidBy || exp.paidBy.trim() === ''); }
+                else { monthlyExpenses = monthlyExpenses.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy); }
+            }
             const summary = categories.map(category => {
                 const catExpenses = monthlyExpenses.filter(exp => exp.categoryId === category.id);
                 const totalSpent = catExpenses.reduce((sum, exp) => sum + exp.amount, 0);
@@ -977,7 +981,7 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
             }).filter(item => item.budget > 0 || item.spent > 0);
             setBudgetData(summary);
         } else { setBudgetData([]); }
-    }, [timeRange, convertedExpenses, categories]);
+    }, [timeRange, convertedExpenses, categories, selectedPaidBy]);
 
     const getDateRange = () => {
         const now = new Date(); let startDate, endDate = now;
