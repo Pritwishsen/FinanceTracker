@@ -9,15 +9,18 @@ function CurrencySettings({ onUpdate }) {
     const [errors, setErrors] = useState({});
 
     useEffect(() => {
-        const settings = DataService.getSettings();
-        if (settings.defaultCurrency) {
-            setDefaultCurrency(settings.defaultCurrency);
-        }
+        const loadSettings = async () => {
+            const settings = await DataService.getSettings();
+            if (settings.currency) {
+                setDefaultCurrency(settings.currency);
+            }
+        };
+        loadSettings();
     }, []);
 
     const handleCurrencyChange = async (currencyCode) => {
         try {
-            await DataService.updateSettings({ defaultCurrency: currencyCode });
+            await DataService.updateSettings({ currency: currencyCode });
             setDefaultCurrency(currencyCode);
             setErrors({});
             onUpdate();

@@ -30,14 +30,16 @@ function App() {
 
     const handleDataUpdate = async () => {
         try {
-            const [expensesData, incomeData, categoriesData] = await Promise.all([
+            const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
                 DataService.getExpenses(),
                 DataService.getIncome(),
-                DataService.getCategories()
+                DataService.getCategories(),
+                DataService.getSettings()
             ]);
             setExpenses(expensesData);
             setIncome(incomeData);
             setCategories(categoriesData);
+            setDefaultCurrency(settings.currency || 'GBP');
         } catch (error) {
             console.error('Error updating data:', error);
         }
