@@ -4,86 +4,80 @@ const path = require('path');
 
 const PORT = 5000;
 const ROOT = __dirname;
-const CACHE_BUST = Date.now().toString();
 
 const MIME_TYPES = {
-  '.html': 'text/html',
-  '.js': 'application/javascript',
-  '.css': 'text/css',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.gif': 'image/gif',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
 };
 
-const server = http.createServer((req, res) => {
-  try {
-    console.log('REQUEST:', req.url);
-    const parsedUrl = new URL(req.url, 'http://localhost');
-    let urlPath = parsedUrl.pathname;
-
-    if (urlPath === '/') {
-      res.writeHead(302, {
-        'Location': '/app-v3.html',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      res.end();
+function serveFile(filePath, res) {
+  fs.readFile(filePath, function(err, data) {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
       return;
     }
-
-    const safePath = path.normalize(urlPath).replace(/^(\.\.(\/|\\|$))+/, '');
-    const filePath = path.join(ROOT, safePath);
-
-    if (!filePath.startsWith(ROOT)) {
-      res.writeHead(403);
-      res.end('Forbidden');
-      return;
-    }
-
-    fs.readFile(filePath, (err, data) => {
-      if (err) {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
-      }
-      const ext = path.extname(filePath);
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      res.end(data);
+    var ext = path.extname(filePath);
+    var contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
     });
-  } catch (err) {
-    console.error('Request error:', err);
-    try { res.writeHead(500); res.end('Internal Server Error'); } catch (e) {}
+    res.end(data);
+  });
+}
+
+var server = http.createServer(function(req, res) {
+  var urlPath = req.url.split('?')[0];
+
+  if (urlPath === '/' || urlPath === '/index.html') {
+    urlPath = '/app-v3.html';
   }
+
+  if (urlPath === '/__health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+    return;
+  }
+
+  var safePath = path.normalize(urlPath).replace(/^(\.\.[\/\\])+/, '');
+  var filePath = path.join(ROOT, safePath);
+
+  if (!filePath.startsWith(ROOT)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden');
+    return;
+  }
+
+  serveFile(filePath, res);
 });
 
-server.on('error', (err) => {
-  console.error('Server error:', err);
+server.on('error', function(err) {
+  console.error('Server error:', err.message);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('Server running on port ' + PORT);
+server.listen(PORT, '0.0.0.0', function() {
+  console.log('Server listening on port ' + PORT);
 });
 
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 120000;
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
+process.on('SIGTERM', function() {
+  console.log('SIGTERM received');
+  server.close();
 });
 
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled rejection:', err);
+process.on('uncaughtException', function(err) {
+  console.error('Uncaught:', err.message);
 });
 
-setInterval(() => {}, 30000);
+process.on('unhandledRejection', function(err) {
+  console.error('Unhandled:', err);
+});
