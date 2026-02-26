@@ -22,44 +22,68 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
-  console.log('REQUEST:', req.url);
-  const parsedUrl = new URL(req.url, 'http://localhost');
-  let urlPath = parsedUrl.pathname;
+  try {
+    console.log('REQUEST:', req.url);
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    let urlPath = parsedUrl.pathname;
 
-  if (urlPath === '/') {
-    res.writeHead(302, {
-      'Location': '/app-v3.html',
-      'Cache-Control': 'no-cache, no-store, must-revalidate'
-    });
-    res.end();
-    return;
-  }
-
-  const filePath = path.join(ROOT, urlPath);
-
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404);
-      res.end('Not found');
+    if (urlPath === '/') {
+      res.writeHead(302, {
+        'Location': '/app-v3.html',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      res.end();
       return;
     }
-    const ext = path.extname(filePath);
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0',
-      'ETag': CACHE_BUST
+
+    const safePath = path.normalize(urlPath).replace(/^(\.\.(\/|\\|$))+/, '');
+    const filePath = path.join(ROOT, safePath);
+
+    if (!filePath.startsWith(ROOT)) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+      const ext = path.extname(filePath);
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      });
+      res.end(data);
     });
-    res.end(data);
-  });
+  } catch (err) {
+    console.error('Request error:', err);
+    try { res.writeHead(500); res.end('Internal Server Error'); } catch (e) {}
+  }
+});
+
+server.on('error', (err) => {
+  console.error('Server error:', err);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('Server running on port ' + PORT + ' (cache bust: ' + CACHE_BUST + ')');
+  console.log('Server running on port ' + PORT);
 });
+
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 120000;
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
 });
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
+});
+
+setInterval(() => {}, 30000);
