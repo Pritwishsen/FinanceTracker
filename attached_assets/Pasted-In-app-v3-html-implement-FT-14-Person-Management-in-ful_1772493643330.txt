@@ -1,0 +1,49 @@
+In app-v3.html, implement FT-14 Person Management in full. Make these changes:
+
+1. DATASERVICE — add these methods to the DataService class:
+   getPeople(): return this.data.settings.people || []
+   addPerson({ name, relationship, isDefault }):
+     - validate name >= 2 chars, unique case-insensitive
+     - if isDefault, clear isDefault on all others first
+     - push { id: Date.now(), name, relationship: relationship||''  , isDefault: !!isDefault } to settings.people
+     - saveSettings(); return new person
+   updatePerson(id, updates):
+     - find person by id, merge updates
+     - if name changed, call migratePersonName(oldName, newName)
+     - if isDefault set true, clear others first
+     - saveSettings(); return updated person
+   deletePerson(id):
+     - splice from settings.people, saveSettings()
+     - if deleted person was isDefault, no replacement needed
+   migratePersonName(oldName, newName):
+     - update paidBy field on all expenses and income records where paidBy === oldName
+     - saveExpenses(); saveIncome()
+   setDefaultPerson(id):
+     - clear isDefault on all, set it on person with matching id, saveSettings()
+
+2. SETTINGS SCREEN — add People section below Currency section:
+   - Section heading "People" with a divider
+   - Add Person form: Name (required), Relationship (optional), "Set as Default" checkbox, Add button
+   - People list: each row shows name, optional relationship, star badge if isDefault
+     Each row has Edit (pencil) and Delete (trash) buttons
+   - Edit mode: clicking Edit fills the form; a Cancel button appears
+   - Delete: show confirmation modal "Remove [Name] from people list? Existing records will not be affected."
+   - Empty state: "No people added yet."
+   - Validation: name required, >= 2 chars, unique (case-insensitive)
+
+3. EXPENSE FORM (ExpenseForm) — upgrade paidBy field:
+   - On mount, load people list: DataService.getPeople()
+   - If people list is empty: keep free-text input (backward compat)
+   - If people list has entries: replace text input with <select>
+     First option: value="" label="— Me / My Own —"
+     Then all people sorted A–Z by name
+   - If a default person exists: pre-select them (set formData.paidBy = defaultPerson.name)
+
+4. INCOME FORM (IncomeForm) — same upgrade as ExpenseForm for the "Who's Income" paidBy field
+
+5. EXPENSE LIST — update person filter dropdown to use people list:
+   In ExpenseList, load people with DataService.getPeople() on mount via useEffect
+   Replace uniquePaidBy derivation with the people list for dropdown options
+   (Keep "All People" and "My Expenses Only" options at top)
+
+Preserve all existing validation. Do not change any other components.

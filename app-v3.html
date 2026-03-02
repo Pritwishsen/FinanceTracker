@@ -222,6 +222,62 @@ class DataService {
     static saveCategories() { localStorage.setItem('financeApp_categories', JSON.stringify(this.data.categories)); }
     static saveSettings() { localStorage.setItem('financeApp_settings', JSON.stringify(this.data.settings)); }
 
+    static getPeople() { return (this.data.settings.people || []).slice().sort((a, b) => a.name.localeCompare(b.name)); }
+    static addPerson({ name, relationship, isDefault }) {
+        if (!name || name.trim().length < 2) throw new Error('Person name must be at least 2 characters');
+        if (!this.data.settings.people) this.data.settings.people = [];
+        const trimmed = name.trim();
+        const duplicate = this.data.settings.people.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
+        if (duplicate) throw new Error('A person with this name already exists');
+        if (isDefault) this.data.settings.people.forEach(p => { p.isDefault = false; });
+        const person = { id: Date.now(), name: trimmed, relationship: (relationship || '').trim(), isDefault: !!isDefault };
+        this.data.settings.people.push(person);
+        this.saveSettings();
+        return person;
+    }
+    static updatePerson(id, updates) {
+        if (!this.data.settings.people) return null;
+        const person = this.data.settings.people.find(p => p.id === id);
+        if (!person) return null;
+        const oldName = person.name;
+        if (updates.name !== undefined) {
+            const trimmed = updates.name.trim();
+            if (trimmed.length < 2) throw new Error('Person name must be at least 2 characters');
+            const duplicate = this.data.settings.people.find(p => p.id !== id && p.name.toLowerCase() === trimmed.toLowerCase());
+            if (duplicate) throw new Error('A person with this name already exists');
+            person.name = trimmed;
+            if (oldName !== trimmed) this.migratePersonName(oldName, trimmed);
+        }
+        if (updates.relationship !== undefined) person.relationship = updates.relationship.trim();
+        if (updates.isDefault) {
+            this.data.settings.people.forEach(p => { p.isDefault = false; });
+            person.isDefault = true;
+        } else if (updates.isDefault === false) {
+            person.isDefault = false;
+        }
+        this.saveSettings();
+        return person;
+    }
+    static deletePerson(id) {
+        if (!this.data.settings.people) return null;
+        const index = this.data.settings.people.findIndex(p => p.id === id);
+        if (index === -1) return null;
+        const deleted = this.data.settings.people.splice(index, 1)[0];
+        this.saveSettings();
+        return deleted;
+    }
+    static migratePersonName(oldName, newName) {
+        this.data.expenses.forEach(exp => { if (exp.paidBy === oldName) exp.paidBy = newName; });
+        this.data.income.forEach(inc => { if (inc.paidBy === oldName) inc.paidBy = newName; });
+        this.saveExpenses();
+        this.saveIncome();
+    }
+    static setDefaultPerson(id) {
+        if (!this.data.settings.people) return;
+        this.data.settings.people.forEach(p => { p.isDefault = (p.id === id); });
+        this.saveSettings();
+    }
+
     static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date)); }
     static async addExpense(expense) {
         await this.initialize();
@@ -483,18 +539,25 @@ function Navigation({ currentScreen, onScreenChange }) {
 }
 
 function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
-    const [formData, setFormData] = useState({
-        amount: editExpense ? editExpense.amount : '',
-        date: editExpense ? editExpense.date : new Date().toISOString().split('T')[0],
-        description: editExpense ? editExpense.description : '',
-        categoryId: editExpense ? editExpense.categoryId : '',
-        subcategory: editExpense ? editExpense.subcategory : '',
-        paidBy: editExpense ? (editExpense.paidBy || '') : '',
-        currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP'
+    const [people, setPeople] = useState([]);
+    const [formData, setFormData] = useState(() => {
+        const peopleList = DataService.getPeople();
+        const defaultPerson = peopleList.find(p => p.isDefault);
+        return {
+            amount: editExpense ? editExpense.amount : '',
+            date: editExpense ? editExpense.date : new Date().toISOString().split('T')[0],
+            description: editExpense ? editExpense.description : '',
+            categoryId: editExpense ? editExpense.categoryId : '',
+            subcategory: editExpense ? editExpense.subcategory : '',
+            paidBy: editExpense ? (editExpense.paidBy || '') : (defaultPerson ? defaultPerson.name : ''),
+            currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP'
+        };
     });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+
+    useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -597,9 +660,16 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                 )}
                 <div className="form-group">
                     <label htmlFor="paidBy">Who's Expense (Optional)</label>
-                    <input type="text" id="paidBy" className={'form-control ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
+                    {people.length > 0 ? (
+                        <select id="paidBy" className={'form-select ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
+                            <option value="">— Me / My Own —</option>
+                            {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
+                        </select>
+                    ) : (
+                        <input type="text" id="paidBy" className={'form-control ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
+                    )}
                     {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
-                    <div className="form-text">Enter who paid for this expense (leave empty if it's your own)</div>
+                    <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
                 </div>
                 <div className="form-actions">
                     <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={isSubmitting}>Cancel</button>
@@ -616,17 +686,23 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     const [filteredExpenses, setFilteredExpenses] = useState(expenses);
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
+    const [filterPerson, setFilterPerson] = useState('');
     const [editingExpense, setEditingExpense] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [people, setPeople] = useState([]);
+
+    useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
     useEffect(() => {
         let filtered = expenses;
         if (filterCategory) filtered = filtered.filter(expense => expense.categoryId === parseInt(filterCategory));
         if (filterSubcategory) filtered = filtered.filter(expense => expense.subcategory === filterSubcategory);
+        if (filterPerson === '__mine__') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
+        else if (filterPerson) filtered = filtered.filter(expense => expense.paidBy === filterPerson);
         if (searchTerm) filtered = filtered.filter(expense => expense.description.toLowerCase().includes(searchTerm.toLowerCase()));
         setFilteredExpenses(filtered);
-    }, [expenses, filterCategory, filterSubcategory, searchTerm]);
+    }, [expenses, filterCategory, filterSubcategory, filterPerson, searchTerm]);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
@@ -675,9 +751,16 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                             {selectedCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
                         </select>
                     )}
+                    {people.length > 0 && (
+                        <select className="form-select" value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)}>
+                            <option value="">All People</option>
+                            <option value="__mine__">My Expenses Only</option>
+                            {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
+                        </select>
+                    )}
                 </div>
-                {(filterCategory || filterSubcategory || searchTerm) && (
-                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setSearchTerm(''); }}>
+                {(filterCategory || filterSubcategory || filterPerson || searchTerm) && (
+                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setSearchTerm(''); }}>
                         <i className="fas fa-times me-1"></i>Clear Filters
                     </button>
                 )}
@@ -895,12 +978,19 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
 }
 
 function IncomeForm({ income, onUpdate }) {
-    const [formData, setFormData] = useState({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP' });
+    const [people, setPeople] = useState([]);
+    const [formData, setFormData] = useState(() => {
+        const peopleList = DataService.getPeople();
+        const defaultPerson = peopleList.find(p => p.isDefault);
+        return { amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: defaultPerson ? defaultPerson.name : '', currency: 'GBP' };
+    });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
     const [editingIncome, setEditingIncome] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+
+    useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
     const handleInputChange = (field, value) => { setFormData(prev => ({ ...prev, [field]: value })); if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' })); };
     const handleSubmit = (e) => {
@@ -962,8 +1052,15 @@ function IncomeForm({ income, onUpdate }) {
                     </div>
                     <div className="form-group">
                         <label htmlFor="paidBy">Who's Income (Optional)</label>
-                        <input type="text" id="paidBy" className="form-control" value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
-                        <div className="form-text">Enter who received this income (leave empty if it's your own)</div>
+                        {people.length > 0 ? (
+                            <select id="paidBy" className="form-select" value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
+                                <option value="">— Me / My Own —</option>
+                                {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
+                            </select>
+                        ) : (
+                            <input type="text" id="paidBy" className="form-control" value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
+                        )}
+                        <div className="form-text">{people.length > 0 ? 'Select who received this income' : 'Enter who received this income (leave empty if it\'s your own)'}</div>
                     </div>
                     <div className="form-actions">
                         {editingIncome && (<button type="button" className="btn btn-secondary" onClick={handleCancelEdit} disabled={isSubmitting}>Cancel</button>)}
@@ -1251,6 +1348,45 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
 
 function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     const [saveMessage, setSaveMessage] = useState('');
+    const [people, setPeople] = useState([]);
+    const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
+    const [editingPerson, setEditingPerson] = useState(null);
+    const [personErrors, setPersonErrors] = useState({});
+    const [showDeletePersonConfirm, setShowDeletePersonConfirm] = useState(null);
+
+    useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); }); }, []);
+
+    const handleAddPerson = (e) => {
+        e.preventDefault();
+        setPersonErrors({});
+        try {
+            if (editingPerson) {
+                DataService.updatePerson(editingPerson.id, { name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
+            } else {
+                DataService.addPerson({ name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
+            }
+            setPeople(DataService.getPeople());
+            setPersonForm({ name: '', relationship: '', isDefault: false });
+            setEditingPerson(null);
+        } catch (error) {
+            setPersonErrors({ name: error.message });
+        }
+    };
+    const handleEditPerson = (person) => {
+        setEditingPerson(person);
+        setPersonForm({ name: person.name, relationship: person.relationship || '', isDefault: person.isDefault || false });
+        setPersonErrors({});
+    };
+    const handleCancelEditPerson = () => {
+        setEditingPerson(null);
+        setPersonForm({ name: '', relationship: '', isDefault: false });
+        setPersonErrors({});
+    };
+    const handleDeletePerson = (id) => {
+        DataService.deletePerson(id);
+        setPeople(DataService.getPeople());
+        setShowDeletePersonConfirm(null);
+    };
 
     const supportedCurrencies = [
         { code: 'GBP', name: 'British Pound', symbol: '£' },
@@ -1329,6 +1465,83 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
                     {supportedCurrencies.find(c => c.code === currentCurrency) ? supportedCurrencies.find(c => c.code === currentCurrency).name : ''}
                 </div>
             </div>
+
+            <hr style={{margin: '1.5rem 0'}} />
+
+            <div style={{marginBottom: '1.5rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
+                    <i className="fas fa-users"></i> People
+                </h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
+                    Manage people for expense and income tracking
+                </p>
+            </div>
+
+            <form onSubmit={handleAddPerson} style={{marginBottom: '1rem'}}>
+                <div className="row g-2 align-items-end">
+                    <div className="col">
+                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Name *</label>
+                        <input type="text" className={'form-control ' + (personErrors.name ? 'is-invalid' : '')} value={personForm.name} onChange={(e) => { setPersonForm(prev => ({ ...prev, name: e.target.value })); if (personErrors.name) setPersonErrors({}); }} placeholder="Person name" />
+                        {personErrors.name && <div className="invalid-feedback">{personErrors.name}</div>}
+                    </div>
+                    <div className="col">
+                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Relationship</label>
+                        <input type="text" className="form-control" value={personForm.relationship} onChange={(e) => setPersonForm(prev => ({ ...prev, relationship: e.target.value }))} placeholder="e.g., Spouse" />
+                    </div>
+                    <div className="col-auto d-flex align-items-center" style={{paddingBottom: personErrors.name ? '1.5rem' : '0'}}>
+                        <div className="form-check">
+                            <input className="form-check-input" type="checkbox" id="isDefault" checked={personForm.isDefault} onChange={(e) => setPersonForm(prev => ({ ...prev, isDefault: e.target.checked }))} />
+                            <label className="form-check-label" htmlFor="isDefault" style={{fontSize: '0.85rem'}}>Default</label>
+                        </div>
+                    </div>
+                </div>
+                <div style={{marginTop: '0.5rem', display: 'flex', gap: '0.5rem'}}>
+                    <button type="submit" className="btn btn-primary btn-sm">
+                        <i className={'fas fa-' + (editingPerson ? 'save' : 'plus') + ' me-1'}></i>{editingPerson ? 'Save' : 'Add'}
+                    </button>
+                    {editingPerson && (
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelEditPerson}>Cancel</button>
+                    )}
+                </div>
+            </form>
+
+            <div>
+                {people.length === 0 ? (
+                    <div className="text-muted text-center" style={{padding: '1rem', background: '#f8f9fa', borderRadius: '8px'}}>
+                        <i className="fas fa-user-plus fa-2x" style={{marginBottom: '0.5rem', display: 'block', opacity: 0.5}}></i>
+                        No people added yet. Add people to quickly assign expenses and income.
+                    </div>
+                ) : (
+                    people.map(person => (
+                        <div key={person.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: person.isDefault ? '#fff3cd' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (person.isDefault ? '#ffc107' : '#e9ecef')}}>
+                            <div>
+                                <span style={{fontWeight: '600'}}>{person.name}</span>
+                                {person.isDefault && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Default">★</span>}
+                                {person.relationship && <span style={{marginLeft: '0.5rem', color: '#6c757d', fontSize: '0.85rem'}}>({person.relationship})</span>}
+                            </div>
+                            <div style={{display: 'flex', gap: '0.25rem'}}>
+                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditPerson(person)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
+                                <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeletePersonConfirm(person)} title="Delete"><i className="fas fa-trash"></i></button>
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+
+            {showDeletePersonConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Remove Person</h5></div>
+                            <div className="modal-body"><p>Remove <strong>{showDeletePersonConfirm.name}</strong> from the people list? Existing records will not be affected.</p></div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeletePersonConfirm(null)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={() => handleDeletePerson(showDeletePersonConfirm.id)}>Remove</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

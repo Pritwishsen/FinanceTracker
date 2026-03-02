@@ -101,6 +101,15 @@ The application is designed to work both as a development prototype (with localS
 
 ## Recent Changes: Latest modifications with dates
 
+### March 2, 2026 - Person Management (FT-14)
+- **DataService methods**: Added `getPeople()`, `addPerson()`, `updatePerson()`, `deletePerson()`, `migratePersonName()`, `setDefaultPerson()` to DataService
+- **Settings → People section**: Full CRUD UI for managing people with name, optional relationship, isDefault flag, edit/delete with confirmation modal
+- **ExpenseForm paidBy upgrade**: When people exist, paidBy is a dropdown (`<select>`) with "Me / My Own" + all people A–Z; falls back to free-text input if no people configured; default person pre-selected
+- **IncomeForm paidBy upgrade**: Same dropdown behavior as ExpenseForm for "Who's Income" field
+- **ExpenseList person filter**: Added person filter dropdown (All People, My Expenses Only, individual people) sourced from people list
+- **Name migration**: Editing a person's name migrates all historical paidBy values across expenses and income records
+- **Data structure**: `settings.people[]` array with `{ id, name, relationship, isDefault }` objects stored in localStorage
+
 ### February 26, 2026 - Budget Currency System Enhancement
 - **Budget currency tracking**: Each budget stores `budgetCurrency` and `budgetStartDate` alongside the amount
 - **Budget history with archiving**: When resetting budgets to a new currency, old budgets are archived with `endDate` in `budgetHistory` array
