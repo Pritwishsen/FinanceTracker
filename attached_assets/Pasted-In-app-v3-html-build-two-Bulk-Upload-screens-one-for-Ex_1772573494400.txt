@@ -1,0 +1,47 @@
+In app-v3.html, build two Bulk Upload screens — one for Expenses and one for Income.
+Both are accessible from a new "Upload" nav item.
+
+1. NAVIGATION — add a new nav item to the navItems array in Navigation component:
+   { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' }
+
+2. APP COMPONENT — add case 'bulk-upload' to renderScreen():
+   return <BulkUpload categories={categories} people={people} onUpdate={handleDataUpdate} />
+   (Add people state loaded from DataService.getPeople() in App loadData)
+
+3. BUILD BulkUpload COMPONENT with two tabs: "Expenses" and "Income"
+
+   EXPENSE UPLOAD TAB:
+   - File input accepting .csv only
+   - Required CSV columns (in any order, case-insensitive headers):
+     Date, Amount, Currency, Description, Category, Sub Category, Paid By
+   - Parse CSV manually (split by newline and comma; handle quoted fields)
+   - Date: must be valid date, not future. Accept formats: YYYY-MM-DD, DD/MM/YYYY
+   - Amount: must be positive number
+   - Currency: must be one of GBP, EUR, USD, INR (case-insensitive); default GBP if empty
+   - Category: match case-insensitively to existing category names; error if not found
+   - Sub Category: match to subcategories of matched category; error if not found
+   - Paid By: optional, leave blank to treat as own expense
+   - Description: optional, auto-generate "Category - Subcategory" if blank
+
+   INCOME UPLOAD TAB:
+   - File input accepting .csv only
+   - Required CSV columns: Date, Source of Income, Currency, Amount, Who's Income
+   - Date: valid date, not in future
+   - Amount: positive number
+   - Source of Income: required, non-empty
+   - Currency: GBP/EUR/USD/INR, default GBP
+   - Who's Income: optional, blank = own
+
+   PREVIEW & VALIDATION:
+   - After file selected, parse and show a preview table of all rows
+   - Rows with errors shown in red with an error message column
+   - Valid rows shown in green
+   - "Import X valid rows" button at bottom (disabled if 0 valid rows)
+   - Rows with errors are skipped on import; valid rows are saved
+   - After import: show summary "Imported X rows. Y rows had errors and were skipped."
+   - Clear file input and preview after successful import
+
+4. Use DataService.addExpense() for each valid expense row
+   Use DataService.addIncome() for each valid income row
+
+Use Bootstrap table classes for the preview. No external CSV parsing libraries.

@@ -523,6 +523,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'add-expense', icon: 'fas fa-plus', label: 'Add' },
         { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
         { key: 'income', icon: 'fas fa-piggy-bank', label: 'Income' },
+        { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
     ];
@@ -826,9 +827,9 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
 
     const handleAddCategory = (e) => { e.preventDefault(); const validation = ValidationUtils.validateCategory({ name: newCategoryName }); if (!validation.isValid) { setErrors(validation.errors); return; } const existingCategory = categories.find(cat => cat.name.toLowerCase() === newCategoryName.trim().toLowerCase()); if (existingCategory) { setErrors({ name: 'Category name already exists' }); return; } DataService.addCategory({ name: newCategoryName.trim() }); setNewCategoryName(''); setErrors({}); onUpdate(); };
     const handleUpdateCategory = (categoryId, newName) => { const validation = ValidationUtils.validateCategory({ name: newName }); if (!validation.isValid) { setErrors({ [categoryId]: validation.errors.name }); return; } const existingCategory = categories.find(cat => cat.id !== categoryId && cat.name.toLowerCase() === newName.trim().toLowerCase()); if (existingCategory) { setErrors({ [categoryId]: 'Category name already exists' }); return; } DataService.updateCategory(categoryId, { name: newName.trim() }); setEditingCategory(null); setErrors({}); onUpdate(); };
-    const handleDeleteCategory = (categoryId) => { const expensesUsingCategory = DataService.getExpensesByCategory(categoryId); if (expensesUsingCategory.length > 0) { setErrors({ delete: 'Cannot delete category. It\'s being used by ' + expensesUsingCategory.length + ' expense(s).' }); setShowDeleteConfirm(null); return; } DataService.deleteCategory(categoryId); setShowDeleteConfirm(null); setErrors({}); onUpdate(); };
+    const handleDeleteCategory = async (categoryId) => { const expensesUsingCategory = await DataService.getExpensesByCategory(categoryId); if (expensesUsingCategory.length > 0) { setErrors({ delete: `Cannot delete category. It's being used by ${expensesUsingCategory.length} expense(s).` }); setShowDeleteConfirm(null); return; } await DataService.deleteCategory(categoryId); setShowDeleteConfirm(null); setErrors({}); onUpdate(); };
     const handleAddSubcategory = (categoryId) => { if (!newSubcategoryName.trim()) { setErrors({ subcategory: 'Subcategory name is required' }); return; } const category = categories.find(cat => cat.id === categoryId); if (category.subcategories.includes(newSubcategoryName.trim())) { setErrors({ subcategory: 'Subcategory already exists' }); return; } DataService.addSubcategory(categoryId, newSubcategoryName.trim()); setNewSubcategoryName(''); setAddingSubcategoryTo(null); setErrors({}); onUpdate(); };
-    const handleDeleteSubcategory = (categoryId, subcategoryName) => { const expensesUsingSubcategory = DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: 'Cannot delete subcategory. It\'s being used by ' + expensesUsingSubcategory.length + ' expense(s).' }); return; } DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
+    const handleDeleteSubcategory = async (categoryId, subcategoryName) => { const expensesUsingSubcategory = await DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: `Cannot delete subcategory. It's being used by ${expensesUsingSubcategory.length} expense(s).` }); return; } await DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
     const handleBudgetChange = (categoryId, type, subcategory, value) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; setBudgetChanges(prev => ({ ...prev, [key]: value })); };
     const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency); } } setBudgetChanges({}); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
     const toggleBudgetMode = async (categoryId) => { const newMode = !categoryBudgetModes[categoryId]; setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: newMode })); await DataService.updateCategory(categoryId, { useSubcategoryBudgets: newMode }); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); onUpdate(); };
@@ -1546,12 +1547,318 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     );
 }
 
+function BulkUpload({ categories, onUpdate }) {
+    const [activeTab, setActiveTab] = useState('expenses');
+    const [parsedRows, setParsedRows] = useState([]);
+    const [importResult, setImportResult] = useState(null);
+    const fileInputRef = React.useRef(null);
+
+    const validCurrencies = ['GBP', 'EUR', 'USD', 'INR'];
+
+    const parseCSVLine = (line) => {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (inQuotes) {
+                if (ch === '"' && i + 1 < line.length && line[i + 1] === '"') { current += '"'; i++; }
+                else if (ch === '"') { inQuotes = false; }
+                else { current += ch; }
+            } else {
+                if (ch === '"') { inQuotes = true; }
+                else if (ch === ',') { result.push(current.trim()); current = ''; }
+                else { current += ch; }
+            }
+        }
+        result.push(current.trim());
+        return result;
+    };
+
+    const parseDate = (val) => {
+        if (!val) return null;
+        let d;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+            d = new Date(val + 'T00:00:00');
+        } else if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(val)) {
+            const parts = val.split(/[\/\-]/);
+            d = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
+        } else {
+            return null;
+        }
+        if (isNaN(d.getTime())) return null;
+        return d.toISOString().split('T')[0];
+    };
+
+    const handleFileSelect = (e) => {
+        setImportResult(null);
+        const file = e.target.files[0];
+        if (!file) { setParsedRows([]); return; }
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            const text = evt.target.result;
+            const lines = text.split(/\r?\n/).filter(l => l.trim());
+            if (lines.length < 2) { setParsedRows([]); return; }
+            const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().trim());
+
+            if (activeTab === 'expenses') {
+                const colMap = {};
+                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by'];
+                expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
+                if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
+                    setParsedRows([{ error: 'Missing required columns: Date, Amount, Category, Sub Category', raw: lines[0] }]);
+                    return;
+                }
+                const rows = [];
+                const today = new Date().toISOString().split('T')[0];
+                for (let i = 1; i < lines.length; i++) {
+                    const vals = parseCSVLine(lines[i]);
+                    const errors = [];
+                    const dateVal = vals[colMap['date']] || '';
+                    const amountVal = vals[colMap['amount']] || '';
+                    const currencyVal = colMap['currency'] !== undefined ? (vals[colMap['currency']] || '').toUpperCase() : '';
+                    const descVal = colMap['description'] !== undefined ? (vals[colMap['description']] || '') : '';
+                    const catVal = vals[colMap['category']] || '';
+                    const subVal = vals[colMap['sub category']] || '';
+                    const paidByVal = colMap['paid by'] !== undefined ? (vals[colMap['paid by']] || '') : '';
+
+                    const parsedDate = parseDate(dateVal);
+                    if (!parsedDate) errors.push('Invalid date');
+                    else if (parsedDate > today) errors.push('Future date not allowed');
+
+                    const amount = parseFloat(amountVal.replace(/[£$€₹,]/g, ''));
+                    if (isNaN(amount) || amount <= 0) errors.push('Invalid amount');
+
+                    const currency = currencyVal || 'GBP';
+                    if (!validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
+
+                    const matchedCat = categories.find(c => c.name.toLowerCase() === catVal.toLowerCase());
+                    if (!matchedCat) errors.push('Category not found: ' + catVal);
+                    let matchedSub = null;
+                    if (matchedCat) {
+                        matchedSub = matchedCat.subcategories.find(s => s.toLowerCase() === subVal.toLowerCase());
+                        if (!matchedSub) errors.push('Subcategory not found: ' + subVal);
+                    }
+
+                    const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '');
+
+                    rows.push({
+                        rowNum: i,
+                        date: parsedDate,
+                        amount: amount,
+                        currency: currency,
+                        description: description,
+                        categoryId: matchedCat ? matchedCat.id : null,
+                        categoryName: matchedCat ? matchedCat.name : catVal,
+                        subcategory: matchedSub || subVal,
+                        paidBy: paidByVal,
+                        error: errors.length > 0 ? errors.join('; ') : null,
+                        raw: lines[i]
+                    });
+                }
+                setParsedRows(rows);
+            } else {
+                const colMap = {};
+                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income"];
+                incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
+                if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['source of income'] === undefined) {
+                    setParsedRows([{ error: 'Missing required columns: Date, Amount, Source of Income', raw: lines[0] }]);
+                    return;
+                }
+                const rows = [];
+                const today = new Date().toISOString().split('T')[0];
+                for (let i = 1; i < lines.length; i++) {
+                    const vals = parseCSVLine(lines[i]);
+                    const errors = [];
+                    const dateVal = vals[colMap['date']] || '';
+                    const sourceVal = vals[colMap['source of income']] || '';
+                    const currencyVal = colMap['currency'] !== undefined ? (vals[colMap['currency']] || '').toUpperCase() : '';
+                    const amountVal = vals[colMap['amount']] || '';
+                    const descVal = colMap['description'] !== undefined ? (vals[colMap['description']] || '') : '';
+                    const whosVal = colMap["who's income"] !== undefined ? (vals[colMap["who's income"]] || '') : '';
+
+                    const parsedDate = parseDate(dateVal);
+                    if (!parsedDate) errors.push('Invalid date');
+                    else if (parsedDate > today) errors.push('Future date not allowed');
+
+                    const amount = parseFloat(amountVal.replace(/[£$€₹,]/g, ''));
+                    if (isNaN(amount) || amount <= 0) errors.push('Invalid amount');
+
+                    if (!sourceVal.trim()) errors.push('Source of Income is required');
+
+                    const currency = currencyVal || 'GBP';
+                    if (currencyVal && !validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
+
+                    rows.push({
+                        rowNum: i,
+                        date: parsedDate,
+                        amount: amount,
+                        currency: currency,
+                        source: sourceVal.trim(),
+                        description: descVal,
+                        paidBy: whosVal,
+                        error: errors.length > 0 ? errors.join('; ') : null,
+                        raw: lines[i]
+                    });
+                }
+                setParsedRows(rows);
+            }
+        };
+        reader.readAsText(file);
+    };
+
+    const handleImport = async () => {
+        const validRows = parsedRows.filter(r => !r.error);
+        let imported = 0;
+        for (const row of validRows) {
+            if (activeTab === 'expenses') {
+                await DataService.addExpense({
+                    amount: row.amount,
+                    currency: row.currency,
+                    date: row.date,
+                    description: row.description,
+                    categoryId: row.categoryId,
+                    subcategory: row.subcategory,
+                    paidBy: row.paidBy
+                });
+            } else {
+                await DataService.addIncome({
+                    amount: row.amount,
+                    currency: row.currency,
+                    date: row.date,
+                    source: row.source,
+                    description: row.description,
+                    paidBy: row.paidBy
+                });
+            }
+            imported++;
+        }
+        const errorCount = parsedRows.filter(r => r.error).length;
+        setImportResult({ imported, errors: errorCount });
+        setParsedRows([]);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        onUpdate();
+    };
+
+    const validCount = parsedRows.filter(r => !r.error).length;
+    const errorCount = parsedRows.filter(r => r.error).length;
+
+    const resetOnTabChange = (tab) => {
+        setActiveTab(tab);
+        setParsedRows([]);
+        setImportResult(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    return (
+        <div className="screen">
+            <div className="screen-header">
+                <h2>Bulk Upload</h2>
+            </div>
+            <ul className="nav nav-tabs" style={{marginBottom: '1rem'}}>
+                <li className="nav-item">
+                    <button className={'nav-link ' + (activeTab === 'expenses' ? 'active' : '')} onClick={() => resetOnTabChange('expenses')}>Expenses</button>
+                </li>
+                <li className="nav-item">
+                    <button className={'nav-link ' + (activeTab === 'income' ? 'active' : '')} onClick={() => resetOnTabChange('income')}>Income</button>
+                </li>
+            </ul>
+
+            {importResult && (
+                <div className="alert alert-info">
+                    <i className="fas fa-check-circle me-2"></i>
+                    Imported {importResult.imported} rows.
+                    {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were skipped.`}
+                </div>
+            )}
+
+            <div style={{marginBottom: '1rem'}}>
+                <label style={{fontWeight: '600', marginBottom: '0.5rem', display: 'block'}}>
+                    Select CSV File
+                </label>
+                <input ref={fileInputRef} type="file" className="form-control" accept=".csv" onChange={handleFileSelect} />
+                <div className="form-text">
+                    {activeTab === 'expenses'
+                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By'
+                        : "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income"}
+                </div>
+            </div>
+
+            {parsedRows.length > 0 && !parsedRows[0]?.raw?.includes(',') && parsedRows[0]?.error && (
+                <div className="alert alert-danger">{parsedRows[0].error}</div>
+            )}
+
+            {parsedRows.length > 0 && !(parsedRows.length === 1 && parsedRows[0].categoryId === undefined && parsedRows[0].source === undefined && parsedRows[0].error) && (
+                <div>
+                    <div style={{marginBottom: '0.5rem', display: 'flex', gap: '1rem', alignItems: 'center'}}>
+                        <span className="badge bg-success">{validCount} valid</span>
+                        {errorCount > 0 && <span className="badge bg-danger">{errorCount} errors</span>}
+                    </div>
+                    <div style={{overflowX: 'auto', marginBottom: '1rem'}}>
+                        <table className="table table-sm table-bordered" style={{fontSize: '0.85rem'}}>
+                            <thead className="table-light">
+                                <tr>
+                                    <th>#</th>
+                                    {activeTab === 'expenses' ? (
+                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                    ) : (
+                                        <>{['Date', 'Source', 'Amount', 'Currency', 'Description', "Who's Income", 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                    )}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {parsedRows.map((row, idx) => (
+                                    <tr key={idx} className={row.error ? 'table-danger' : 'table-success'}>
+                                        <td>{row.rowNum}</td>
+                                        {activeTab === 'expenses' ? (
+                                            <>
+                                                <td>{row.date || '-'}</td>
+                                                <td>{isNaN(row.amount) ? '-' : row.amount}</td>
+                                                <td>{row.currency}</td>
+                                                <td>{row.description || '-'}</td>
+                                                <td>{row.categoryName || '-'}</td>
+                                                <td>{row.subcategory || '-'}</td>
+                                                <td>{row.paidBy || '-'}</td>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <td>{row.date || '-'}</td>
+                                                <td>{row.source || '-'}</td>
+                                                <td>{isNaN(row.amount) ? '-' : row.amount}</td>
+                                                <td>{row.currency}</td>
+                                                <td>{row.description || '-'}</td>
+                                                <td>{row.paidBy || '-'}</td>
+                                            </>
+                                        )}
+                                        <td>{row.error ? <span className="text-danger" style={{fontSize: '0.8rem'}}>{row.error}</span> : <i className="fas fa-check text-success"></i>}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    <button className="btn btn-primary" onClick={handleImport} disabled={validCount === 0}>
+                        <i className="fas fa-file-import me-2"></i>Import {validCount} valid row{validCount !== 1 ? 's' : ''}
+                    </button>
+                </div>
+            )}
+
+            {parsedRows.length === 0 && !importResult && (
+                <div className="text-muted text-center" style={{padding: '2rem', background: '#f8f9fa', borderRadius: '8px'}}>
+                    <i className="fas fa-file-csv fa-3x" style={{marginBottom: '0.75rem', display: 'block', opacity: 0.4}}></i>
+                    <p>Select a CSV file to preview and import {activeTab === 'expenses' ? 'expenses' : 'income'}</p>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
     const [income, setIncome] = useState([]);
     const [categories, setCategories] = useState([]);
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
+    const [people, setPeople] = useState([]);
 
     useEffect(() => {
         const loadData = async () => {
@@ -1560,6 +1867,7 @@ function App() {
                     DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
                 ]);
                 setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
+                setPeople(DataService.getPeople());
             } catch (error) { console.error('Error loading data:', error); }
         };
         loadData();
@@ -1571,6 +1879,7 @@ function App() {
                 DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
             ]);
             setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
+            setPeople(DataService.getPeople());
         } catch (error) { console.error('Error updating data:', error); }
     };
 
@@ -1583,6 +1892,7 @@ function App() {
             case 'categories': return <CategoryManager categories={categories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} />;
+            case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
         }

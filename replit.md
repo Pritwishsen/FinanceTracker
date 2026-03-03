@@ -101,6 +101,14 @@ The application is designed to work both as a development prototype (with localS
 
 ## Recent Changes: Latest modifications with dates
 
+### March 3, 2026 - Bulk Upload (FT-15/FT-16) & Async Bug Fixes
+- **BulkUpload component**: New screen with two tabs (Expenses / Income) accessible via "Upload" nav item
+- **Expense CSV upload**: Parses CSV with columns Date, Amount, Currency, Description, Category, Sub Category, Paid By; validates dates (YYYY-MM-DD or DD/MM/YYYY), amounts, currencies, category/subcategory matching; handles quoted fields
+- **Income CSV upload**: Parses CSV with columns Date, Source of Income, Currency, Amount, Description, Who's Income
+- **Preview & validation**: Shows all rows in a color-coded table (green=valid, red=error); Import button only imports valid rows; summary shown after import
+- **Async bug fixes**: `handleDeleteCategory` and `handleDeleteSubcategory` in CategoryManager changed to async to properly await `DataService.getExpensesByCategory()`
+- **App state**: Added `people` state to App component, loaded from `DataService.getPeople()` on init and data updates
+
 ### March 2, 2026 - Person Management (FT-14)
 - **DataService methods**: Added `getPeople()`, `addPerson()`, `updatePerson()`, `deletePerson()`, `migratePersonName()`, `setDefaultPerson()` to DataService
 - **Settings → People section**: Full CRUD UI for managing people with name, optional relationship, isDefault flag, edit/delete with confirmation modal
