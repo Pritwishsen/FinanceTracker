@@ -557,8 +557,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+    const [recentlyUsed, setRecentlyUsed] = useState([]);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
+    useEffect(() => { if (!editExpense) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
 
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -587,7 +589,6 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     };
 
     const selectedCategory = categories.find(cat => cat.id === parseInt(formData.categoryId));
-    const recentlyUsed = DataService.getRecentlyUsedCategories(3);
 
     if (showSuccess) {
         return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Expense {editExpense ? 'Updated' : 'Added'} Successfully!</h3></div></div>);
