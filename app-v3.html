@@ -1010,6 +1010,7 @@ function IncomeForm({ income, onUpdate }) {
     };
     const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP' }); };
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
+    const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: new Date().toISOString().split('T')[0] }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
     const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP' }); setErrors({}); };
     const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
 
@@ -1019,7 +1020,7 @@ function IncomeForm({ income, onUpdate }) {
         <div className="screen">
             <div className="screen-header">
                 <h2>Income Management</h2>
-                <div className="income-total">Total Income: {ValidationUtils.formatCurrency(totalIncome)}</div>
+                <div className="income-total">Total Income: {ValidationUtils.formatCurrency(totalIncome, income[0]?.currency || 'GBP')}</div>
             </div>
             <div className="income-form-section">
                 <h5>{editingIncome ? 'Edit Income' : 'Add New Income'}</h5>
@@ -1092,6 +1093,7 @@ function IncomeForm({ income, onUpdate }) {
                                 </div>
                                 <div className="income-actions">
                                     <button className="btn btn-sm btn-outline-primary" onClick={() => handleEdit(incomeItem)} title="Edit"><i className="fas fa-edit"></i></button>
+                                    <button className="btn btn-sm btn-outline-success" onClick={() => handleDuplicateIncome(incomeItem)} title="Duplicate"><i className="fas fa-copy"></i></button>
                                     <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(incomeItem.id)} title="Delete"><i className="fas fa-trash"></i></button>
                                 </div>
                             </div>
