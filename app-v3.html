@@ -711,11 +711,11 @@ function ExpenseList({ expenses, categories, onUpdate }) {
         if (filterSubcategory) filtered = filtered.filter(expense => expense.subcategory === filterSubcategory);
         if (filterPerson === '__mine__') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
         else if (filterPerson) filtered = filtered.filter(expense => expense.paidBy === filterPerson);
-        if (filterDateFrom) filtered = filtered.filter(expense => expense.date >= filterDateFrom);
-        if (filterDateTo) filtered = filtered.filter(expense => expense.date <= filterDateTo);
+        if (filterDateFrom) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) >= filterDateFrom);
+        if (filterDateTo) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) <= filterDateTo);
         if (filterPaidBy === 'self') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
         else if (filterPaidBy) filtered = filtered.filter(expense => expense.paidBy === filterPaidBy);
-        if (searchTerm) filtered = filtered.filter(expense => expense.description.toLowerCase().includes(searchTerm.toLowerCase()));
+        if (searchTerm) filtered = filtered.filter(expense => (expense.description || '').toLowerCase().includes(searchTerm.toLowerCase()));
         setFilteredExpenses(filtered);
     }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, filterPaidBy, searchTerm]);
 
