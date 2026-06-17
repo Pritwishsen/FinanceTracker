@@ -697,6 +697,10 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [people, setPeople] = useState([]);
+    const [duplicatingExpense, setDuplicatingExpense] = useState(null);
+    const [duplicateDate, setDuplicateDate] = useState('today');
+    const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
+    const [duplicateDateError, setDuplicateDateError] = useState('');
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
@@ -716,10 +720,16 @@ function ExpenseList({ expenses, categories, onUpdate }) {
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
-    const handleDuplicateExpense = (expense) => {
-        const duplicatedExpense = { ...expense, date: new Date().toISOString().split('T')[0], description: expense.description + ' (Copy)' };
-        delete duplicatedExpense.id; delete duplicatedExpense.createdAt;
-        DataService.addExpense(duplicatedExpense); onUpdate();
+    const handleDuplicateExpense = (expense) => { setDuplicatingExpense(expense); setDuplicateDate('today'); setDuplicateCustomDate(''); setDuplicateDateError(''); };
+    const handleConfirmDuplicate = () => {
+        const today = new Date().toISOString().split('T')[0];
+        let chosenDate;
+        if (duplicateDate === 'original') chosenDate = duplicatingExpense.date;
+        else if (duplicateDate === 'today') chosenDate = today;
+        else { if (!duplicateCustomDate) { setDuplicateDateError('Please pick a date.'); return; } chosenDate = duplicateCustomDate; }
+        if (chosenDate > today) { setDuplicateDateError('Duplicate date cannot be in the future.'); return; }
+        const newRecord = { ...duplicatingExpense, id: Date.now(), createdAt: new Date().toISOString(), date: chosenDate, description: duplicatingExpense.description + ' (Copy)' };
+        DataService.addExpense(newRecord); onUpdate(); setDuplicatingExpense(null);
     };
     const getCategoryName = (categoryId) => { const category = categories.find(cat => cat.id === categoryId); return category ? category.name : 'Unknown Category'; };
     const selectedCategory = categories.find(cat => cat.id === parseInt(filterCategory));
@@ -810,6 +820,39 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                     ))
                 )}
             </div>
+            {duplicatingExpense && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title"><i className="fas fa-copy me-2"></i>Duplicate Expense</h5></div>
+                            <div className="modal-body">
+                                <p className="text-muted mb-3"><strong>{duplicatingExpense.description}</strong></p>
+                                <p className="mb-2">Choose a date for the duplicate:</p>
+                                <div className="form-check mb-2">
+                                    <input className="form-check-input" type="radio" name="dupDate" id="dupToday" checked={duplicateDate === 'today'} onChange={() => { setDuplicateDate('today'); setDuplicateDateError(''); }} />
+                                    <label className="form-check-label" htmlFor="dupToday">Use today</label>
+                                </div>
+                                <div className="form-check mb-2">
+                                    <input className="form-check-input" type="radio" name="dupDate" id="dupOriginal" checked={duplicateDate === 'original'} onChange={() => { setDuplicateDate('original'); setDuplicateDateError(''); }} />
+                                    <label className="form-check-label" htmlFor="dupOriginal">Keep original date ({ValidationUtils.formatDate(duplicatingExpense.date)})</label>
+                                </div>
+                                <div className="form-check mb-2">
+                                    <input className="form-check-input" type="radio" name="dupDate" id="dupCustom" checked={duplicateDate === 'custom'} onChange={() => { setDuplicateDate('custom'); setDuplicateDateError(''); }} />
+                                    <label className="form-check-label" htmlFor="dupCustom">Pick a date</label>
+                                </div>
+                                {duplicateDate === 'custom' && (
+                                    <input type="date" className="form-control mt-2" value={duplicateCustomDate} max={new Date().toISOString().split('T')[0]} onChange={(e) => { setDuplicateCustomDate(e.target.value); setDuplicateDateError(''); }} />
+                                )}
+                                {duplicateDateError && <div className="text-danger mt-2 small">{duplicateDateError}</div>}
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setDuplicatingExpense(null)}>Cancel</button>
+                                <button type="button" className="btn btn-success" onClick={handleConfirmDuplicate}><i className="fas fa-copy me-1"></i>Duplicate</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
             {showDeleteConfirm && (
                 <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
                     <div className="modal-dialog modal-dialog-centered">
