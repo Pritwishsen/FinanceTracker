@@ -1,0 +1,1 @@
+- [CDN version pinning](cdn-version-pinning.md) — single-file CDN React app; pin every CDN dep (esp. @babel/standalone) or auto-upgrades break it with misleading errors.
