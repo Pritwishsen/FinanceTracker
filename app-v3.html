@@ -690,6 +690,9 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
     const [filterPerson, setFilterPerson] = useState('');
+    const [filterDateFrom, setFilterDateFrom] = useState('');
+    const [filterDateTo, setFilterDateTo] = useState('');
+    const [filterPaidBy, setFilterPaidBy] = useState('');
     const [editingExpense, setEditingExpense] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -703,9 +706,13 @@ function ExpenseList({ expenses, categories, onUpdate }) {
         if (filterSubcategory) filtered = filtered.filter(expense => expense.subcategory === filterSubcategory);
         if (filterPerson === '__mine__') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
         else if (filterPerson) filtered = filtered.filter(expense => expense.paidBy === filterPerson);
+        if (filterDateFrom) filtered = filtered.filter(expense => expense.date >= filterDateFrom);
+        if (filterDateTo) filtered = filtered.filter(expense => expense.date <= filterDateTo);
+        if (filterPaidBy === 'self') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
+        else if (filterPaidBy) filtered = filtered.filter(expense => expense.paidBy === filterPaidBy);
         if (searchTerm) filtered = filtered.filter(expense => expense.description.toLowerCase().includes(searchTerm.toLowerCase()));
         setFilteredExpenses(filtered);
-    }, [expenses, filterCategory, filterSubcategory, filterPerson, searchTerm]);
+    }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, filterPaidBy, searchTerm]);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
@@ -762,8 +769,19 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                         </select>
                     )}
                 </div>
-                {(filterCategory || filterSubcategory || filterPerson || searchTerm) && (
-                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setSearchTerm(''); }}>
+                <div className="filter-row">
+                    <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
+                    <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                </div>
+                <div className="filter-row">
+                    <select className="form-select" value={filterPaidBy} onChange={(e) => setFilterPaidBy(e.target.value)}>
+                        <option value="">All People</option>
+                        <option value="self">My Expenses Only</option>
+                        {[...new Set(expenses.map(e => e.paidBy).filter(Boolean))].sort().map(name => (<option key={name} value={name}>{name}</option>))}
+                    </select>
+                </div>
+                {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || filterPaidBy || searchTerm) && (
+                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterPaidBy(''); setSearchTerm(''); }}>
                         <i className="fas fa-times me-1"></i>Clear Filters
                     </button>
                 )}
