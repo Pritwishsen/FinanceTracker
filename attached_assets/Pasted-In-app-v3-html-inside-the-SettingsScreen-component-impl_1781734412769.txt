@@ -1,0 +1,41 @@
+In app-v3.html, inside the SettingsScreen component, implement the Display Name section:
+
+1. STORAGE — ensure financeApp_settings has a displayName field:
+   DataService.getSettings() should return { currency, displayName: '', ...rest }
+   If displayName is missing from stored settings, default to empty string.
+
+2. UI — add a "Your Name" section at the TOP of SettingsScreen (above Currency):
+   <div className="settings-section">
+     <h5>Your Name</h5>
+     <input type="text" className="form-control"
+       placeholder="Enter your display name (2–50 characters)"
+       value={displayName} onChange={e => setDisplayName(e.target.value)} />
+     <button className="btn btn-primary mt-2" onClick={handleSaveDisplayName}>
+       Save Name
+     </button>
+     {nameError && <div className="text-danger mt-1">{nameError}</div>}
+     {nameSaved && <div className="text-success mt-1">Name saved!</div>}
+   </div>
+   State: displayName (string), nameError (string), nameSaved (bool)
+   On mount: load displayName from DataService.getSettings().displayName
+
+3. VALIDATION in handleSaveDisplayName:
+   - Must be >= 2 characters: show "Name must be at least 2 characters"
+   - Must be <= 50 characters: show "Name must be 50 characters or fewer"
+   - Must not be blank
+   - Allowed characters: letters, spaces, hyphens, apostrophes only
+
+4. ON SAVE — handleSaveDisplayName:
+   a. Get old displayName = (await DataService.getSettings()).displayName
+   b. Save new name: await DataService.saveSettings({ ...settings, displayName: newName })
+   c. If old name exists and differs, call DataService.migratePersonName(oldName, newName)
+      migratePersonName updates paidBy on ALL expenses and income where paidBy === oldName
+   d. Upsert the user self-entry in People list:
+      - Find existing person where systemManaged === true
+      - If found: DataService.updatePerson(entry.id, { name: newName })
+      - If not found: DataService.addPerson({ name: newName, isDefault: true, systemManaged: true })
+   e. Show nameSaved = true for 2 seconds, then clear
+
+5. CANCEL button: reset displayName to last saved value from settings
+
+Do not change the Currency section or any other Settings functionality.
