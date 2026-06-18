@@ -10,6 +10,13 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="src/styles/App.css">
+    <style>
+        @media print {
+            nav, .app-header, .summary-filters, .print-hide { display: none !important; }
+            .mobile-app { max-width: 100%; box-shadow: none; }
+            .screen { padding: 0.5rem; }
+        }
+    </style>
 </head>
 <body>
     <div id="root"></div>
@@ -1312,6 +1319,9 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
         if (selectedPaidBy === 'self') { filteredExpenses = filteredExpenses.filter(expense => !expense.paidBy || expense.paidBy.trim() === ''); filteredIncome = filteredIncome.filter(incomeItem => !incomeItem.paidBy || incomeItem.paidBy.trim() === ''); }
         else { filteredExpenses = filteredExpenses.filter(expense => expense.paidBy && expense.paidBy === selectedPaidBy); filteredIncome = filteredIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy === selectedPaidBy); }
     }
+    if (selectedCategory) {
+        filteredExpenses = filteredExpenses.filter(exp => exp.categoryId === parseInt(selectedCategory));
+    }
     const expensePaidBy = convertedExpenses.filter(expense => expense.paidBy && expense.paidBy.trim() !== '').map(expense => expense.paidBy);
     const incomePaidBy = convertedIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy.trim() !== '').map(incomeItem => incomeItem.paidBy);
     const uniquePaidBy = [...new Set([...expensePaidBy, ...incomePaidBy])].sort();
@@ -1345,6 +1355,18 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                             {uniquePaidBy.map(person => (<option key={person} value={person}>{person}'s Money Only</option>))}
                         </select>
                     </div>
+                    <div className="filter-group">
+                        <label className="filter-label">Category:</label>
+                        <select className="form-select form-select-sm" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
+                            <option value="">All Categories</option>
+                            {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                        </select>
+                    </div>
+                </div>
+                <div className="print-hide" style={{textAlign: 'right', marginTop: '0.5rem'}}>
+                    <button className="btn btn-sm btn-outline-secondary" onClick={() => window.print()}>
+                        <i className="fas fa-file-pdf me-1"></i> Download as PDF
+                    </button>
                 </div>
             </div>
             <div className="summary-cards">
@@ -1353,6 +1375,24 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                 <div className={'summary-card ' + (netAmount >= 0 ? 'positive' : 'negative')}><div className="card-icon"><i className={'fas fa-' + (netAmount >= 0 ? 'plus' : 'minus')}></i></div><div className="card-content"><h6>Net Amount</h6><div className="amount">{ValidationUtils.formatCurrency(Math.abs(netAmount), defaultCurrency)}</div><div className="trend">{netAmount >= 0 ? 'Surplus' : 'Deficit'}</div></div></div>
                 <div className="summary-card info"><div className="card-icon"><i className="fas fa-calendar-day"></i></div><div className="card-content"><h6>Daily Average</h6><div className="amount">{ValidationUtils.formatCurrency(avgDailySpending, defaultCurrency)}</div><div className="trend">{daysDiff} days</div></div></div>
             </div>
+            {filteredExpenses.length > 0 && expensesByCategory.length > 0 && (
+                <div className="category-breakdown" style={{marginBottom: '1.5rem'}}>
+                    <h5><i className="fas fa-chart-bar me-2"></i>Spending by Category</h5>
+                    <div className="category-list">
+                        {expensesByCategory.map(cat => (
+                            <div key={cat.id} style={{marginBottom: '0.85rem'}}>
+                                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem', fontSize: '0.9rem'}}>
+                                    <span style={{fontWeight: '500'}}>{cat.name}</span>
+                                    <span>{ValidationUtils.formatCurrency(cat.total, defaultCurrency)} <span className="text-muted">({cat.percentage.toFixed(1)}%)</span></span>
+                                </div>
+                                <div className="progress" style={{height: '8px'}}>
+                                    <div className="progress-bar" role="progressbar" style={{width: Math.min(cat.percentage, 100) + '%'}} aria-valuenow={Math.round(cat.percentage)} aria-valuemin="0" aria-valuemax="100"></div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
             {timeRange === 'month' && budgetData.length > 0 && (
                 <div className="budget-overview">
                     <h5><i className="fas fa-calculator"></i> Monthly Budget Overview</h5>
