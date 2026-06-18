@@ -286,16 +286,18 @@ class DataService {
     }
 
     static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date)); }
+    static _idSeq = 0;
+    static _uniqueId() { return Date.now() * 10000 + (++DataService._idSeq % 10000); }
     static async addExpense(expense) {
         await this.initialize();
-        const newExpense = { id: Date.now(), ...expense, createdAt: new Date().toISOString() };
+        const newExpense = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
         this.data.expenses.push(newExpense);
         this.saveExpenses();
         return newExpense;
     }
     static async addExpenseWithConversion(expense) {
         await this.initialize();
-        const expenseData = { ...expense, id: Date.now(), createdAt: new Date().toISOString() };
+        const expenseData = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
         this.data.expenses.push(expenseData);
         this.saveExpenses();
         return expenseData;
@@ -759,14 +761,14 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
     const [duplicateDateError, setDuplicateDateError] = useState('');
 
-    useEffect(() => { setPeople(DataService.getPeople()); }, []);
+    useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
 
     const filteredExpenses = useMemo(() => {
         let filtered = expenses;
         if (filterCategory) filtered = filtered.filter(expense => expense.categoryId === parseInt(filterCategory));
         if (filterSubcategory) filtered = filtered.filter(expense => expense.subcategory === filterSubcategory);
-        if (filterPerson === '__mine__') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
-        else if (filterPerson) filtered = filtered.filter(expense => expense.paidBy === filterPerson);
+        if (filterPerson === '__mine__') filtered = filtered.filter(expense => !(expense.paidBy || '').trim());
+        else if (filterPerson) filtered = filtered.filter(expense => (expense.paidBy || '').trim() === filterPerson.trim());
         if (filterDateFrom) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) >= filterDateFrom);
         if (filterDateTo) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) <= filterDateTo);
         if (searchTerm) filtered = filtered.filter(expense => (expense.description || '').toLowerCase().includes(searchTerm.toLowerCase()));
