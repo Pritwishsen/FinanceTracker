@@ -1,0 +1,47 @@
+In app-v3.html, implement budget threshold spending alerts and notification banners.
+
+1. ADD checkBudgetAlerts() TO DataService:
+   static async checkBudgetAlerts(defaultCurrency) {
+     const budgetSummary = await this.getBudgetSummary();
+     const alerts = [];
+     budgetSummary.forEach(item => {
+       if (item.budget > 0) {
+         if (item.percentage >= 100) alerts.push({ type: 'over', name: item.name,
+           pct: item.percentage, spent: item.spent, budget: item.budget });
+         else if (item.percentage >= 80) alerts.push({ type: 'near', name: item.name,
+           pct: item.percentage, spent: item.spent, budget: item.budget });
+       }
+     });
+     return alerts;
+   }
+   Note: threshold is 80% (spec default). In FT-11 this becomes per-category configurable.
+
+2. IN App COMPONENT — add budget alert banner state:
+   const [budgetAlerts, setBudgetAlerts] = useState([])
+
+3. IN handleDataUpdate — after loading data, run:
+   const alerts = await DataService.checkBudgetAlerts(defaultCurrency);
+   setBudgetAlerts(alerts);
+
+4. IN App JSX — render alert banners above the screen content, below app-header:
+   {budgetAlerts.map((alert, i) => (
+     <div key={i} className={'alert ' + (alert.type==='over'
+       ? 'alert-danger' : 'alert-warning')}
+       style={{margin:'0.5rem 1rem',fontSize:'0.85rem'}}>
+       <i className={'fas fa-' + (alert.type==='over'
+         ? 'exclamation-circle' : 'exclamation-triangle') + ' me-2'}></i>
+       {alert.type==="over"
+         ? `${alert.name}: OVER BUDGET (${alert.pct.toFixed(0)}% spent)`
+         : `${alert.name}: ${alert.pct.toFixed(0)}% of budget used`}
+       <button className="btn-close btn-close-sm float-end"
+         onClick={() => setBudgetAlerts(prev => prev.filter((_,j)=>j!==i))}></button>
+     </div>
+   ))}
+
+5. Alerts are dismissible (X button). They reload on every data update.
+6. Alerts only show for current month (getBudgetSummary already scopes to current month).
+7. SETTINGS: add "Budget Alerts" toggle in Settings under a new "Notifications" section.
+   Store as financeApp_notifSettings.budgetAlertsEnabled (default true).
+   Wrap checkBudgetAlerts call: skip if budgetAlertsEnabled === false.
+
+Do not change any existing component.

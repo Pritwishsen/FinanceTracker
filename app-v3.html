@@ -515,6 +515,17 @@ class DataService {
         });
         return budgetSummary;
     }
+    static async checkBudgetAlerts() {
+        const budgetSummary = await this.getBudgetSummary();
+        const alerts = [];
+        budgetSummary.forEach(item => {
+            if (item.budget > 0) {
+                if (item.percentage >= 100) alerts.push({ type: 'over', name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
+                else if (item.percentage >= 80) alerts.push({ type: 'near', name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
+            }
+        });
+        return alerts;
+    }
     static async getRecentlyUsedCategories(limit = 5) {
         await this.initialize();
         const recentExpenses = (await this.getExpenses()).slice(0, 20);
@@ -1463,8 +1474,20 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     const [nameError, setNameError] = useState('');
     const [nameSaved, setNameSaved] = useState(false);
     const [savedDisplayName, setSavedDisplayName] = useState('');
+    const [budgetAlertsEnabled, setBudgetAlertsEnabled] = useState(true);
 
     useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); }); }, []);
+    useEffect(() => {
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
+    }, []);
+
+    const handleToggleBudgetAlerts = (enabled) => {
+        setBudgetAlertsEnabled(enabled);
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        notifSettings.budgetAlertsEnabled = enabled;
+        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
+    };
 
     useEffect(() => {
         DataService.getSettings().then(s => {
@@ -1704,6 +1727,25 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
                     </div>
                 </div>
             )}
+
+            <hr style={{margin: '1.5rem 0'}} />
+            <div style={{marginBottom: '1rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
+                    <i className="fas fa-bell"></i> Notifications
+                </h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
+                    Control spending alerts and notifications
+                </p>
+                <div className="d-flex justify-content-between align-items-center" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
+                    <div>
+                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Budget Alerts</div>
+                        <div className="text-muted" style={{fontSize: '0.82rem'}}>Warn when spending reaches 80% or over budget</div>
+                    </div>
+                    <div className="form-check form-switch mb-0">
+                        <input className="form-check-input" type="checkbox" id="budgetAlertsToggle" checked={budgetAlertsEnabled} onChange={e => handleToggleBudgetAlerts(e.target.checked)} style={{cursor: 'pointer'}} />
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }
@@ -2020,6 +2062,7 @@ function App() {
     const [categories, setCategories] = useState([]);
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
     const [people, setPeople] = useState([]);
+    const [budgetAlerts, setBudgetAlerts] = useState([]);
 
     useEffect(() => {
         const loadData = async () => {
@@ -2029,6 +2072,11 @@ function App() {
                 ]);
                 setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
                 setPeople(DataService.getPeople());
+                const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+                if (notifSettings.budgetAlertsEnabled !== false) {
+                    const alerts = await DataService.checkBudgetAlerts();
+                    setBudgetAlerts(alerts);
+                } else { setBudgetAlerts([]); }
             } catch (error) { console.error('Error loading data:', error); }
         };
         loadData();
@@ -2041,6 +2089,11 @@ function App() {
             ]);
             setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
             setPeople(DataService.getPeople());
+            const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+            if (notifSettings.budgetAlertsEnabled !== false) {
+                const alerts = await DataService.checkBudgetAlerts();
+                setBudgetAlerts(alerts);
+            } else { setBudgetAlerts([]); }
         } catch (error) { console.error('Error updating data:', error); }
     };
 
@@ -2062,6 +2115,15 @@ function App() {
     return (
         <div className="mobile-app">
             <div className="app-header"><h1><i className="fas fa-wallet"></i> Personal Finance</h1></div>
+            {budgetAlerts.map((alert, i) => (
+                <div key={i} className={'alert ' + (alert.type === 'over' ? 'alert-danger' : 'alert-warning')} style={{margin: '0.5rem 1rem', fontSize: '0.85rem'}}>
+                    <i className={'fas fa-' + (alert.type === 'over' ? 'exclamation-circle' : 'exclamation-triangle') + ' me-2'}></i>
+                    {alert.type === 'over'
+                        ? `${alert.name}: OVER BUDGET (${alert.pct.toFixed(0)}% spent)`
+                        : `${alert.name}: ${alert.pct.toFixed(0)}% of budget used`}
+                    <button className="btn-close btn-close-sm float-end" onClick={() => setBudgetAlerts(prev => prev.filter((_,j) => j !== i))}></button>
+                </div>
+            ))}
             <div className="app-content">{renderScreen()}</div>
             <Navigation currentScreen={currentScreen} onScreenChange={setCurrentScreen} />
         </div>
