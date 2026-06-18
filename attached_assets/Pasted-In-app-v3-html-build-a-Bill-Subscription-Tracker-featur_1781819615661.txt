@@ -1,0 +1,58 @@
+In app-v3.html, build a Bill & Subscription Tracker feature.
+
+1. DATASERVICE — add sync methods:
+   getBills(): return JSON.parse(localStorage.getItem('financeApp_bills') || '[]')
+   saveBills(b): localStorage.setItem('financeApp_bills', JSON.stringify(b))
+   addBill({ name, amount, currency, frequency, nextDueDate, categoryId, reminderDaysBefore, notes }):
+   - Validate name >= 2 chars
+   - Validate amount > 0
+   - nextDueDate must be today or in the future
+   const bill = { id: Date.now(), name, amount: parseFloat(amount), currency,
+     frequency, nextDueDate, categoryId: parseInt(categoryId)||null,
+     reminderDaysBefore: parseInt(reminderDaysBefore)||3,
+     notes: notes||"", isActive: true, isPaid: false };
+   push, saveBills(), return bill
+   updateBill(id, updates): find, merge, saveBills()
+   deleteBill(id): splice, saveBills()
+   markBillPaid(id): find bill, set isPaid=true, advance nextDueDate by frequency,
+     reset isPaid=false for the new period, saveBills()
+
+2. BUILD BillTracker COMPONENT:
+
+   SUMMARY CARD (top):
+   - "Monthly Commitment: £X.XX" = sum of active bills normalised to monthly:
+     Weekly × 4.33 | Monthly × 1 | Quarterly / 3 | Yearly / 12
+   - Only include isActive=true bills
+
+   ADD BILL FORM:
+   - Fields: Bill Name (required), Amount (required), Currency,
+     Frequency (Weekly/Monthly/Quarterly/Yearly),
+     Next Due Date (required, today or future),
+     Category (optional), Reminder Days Before (default 3, range 1-14), Notes
+
+   BILLS LIST:
+   - Each row: name, amount+currency, frequency, "Due: [nextDueDate]"
+   - Badge: "DUE TODAY" (red) if nextDueDate === today
+   - Badge: "DUE SOON" (amber) if nextDueDate is within reminderDaysBefore days
+   - Badge: "OVERDUE" (dark red) if nextDueDate < today and isPaid=false
+   - "Mark as Paid" button → calls DataService.markBillPaid(id), advances to next due date
+   - "Log as Expense" button → creates expense with bill's category + amount + today's date,
+     then calls onUpdate()
+   - Edit and Delete buttons per row
+   - Inactive bills shown greyed at bottom with "Reactivate" button
+
+   SORTED ORDER: Overdue first, then Due Today, then by nextDueDate ascending
+
+3. DUE SOON BANNER in App component:
+   - Call DataService.getBills() in loadData; find bills due within reminderDaysBefore days
+   - If any due soon, show banner below app-header:
+     "⏰ [N] bill(s) due soon — [name1], [name2]..."
+   - Tapping banner navigates to "bills" screen
+
+4. NAVIGATION — add nav item:
+   { key: 'bills', icon: 'fas fa-file-invoice-dollar', label: 'Bills' }
+
+5. APP COMPONENT — add to renderScreen():
+   case "bills": return <BillTracker categories={categories} onUpdate={handleDataUpdate} />
+
+No external libraries. Bootstrap only.

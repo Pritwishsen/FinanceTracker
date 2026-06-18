@@ -549,6 +549,28 @@ class DataService {
     static updateGoal(id, updates) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals[i] = { ...goals[i], ...updates }; this.saveGoals(goals); } }
     static deleteGoal(id) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals.splice(i, 1); this.saveGoals(goals); } }
     static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
+    static getBills() { return JSON.parse(localStorage.getItem('financeApp_bills') || '[]'); }
+    static saveBills(b) { localStorage.setItem('financeApp_bills', JSON.stringify(b)); }
+    static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, reminderDaysBefore, notes }) {
+        if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
+        if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
+        const today = new Date().toISOString().split('T')[0];
+        if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
+        const bill = { id: Date.now(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
+        const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
+    }
+    static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates }; this.saveBills(bills); } }
+    static deleteBill(id) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills.splice(i, 1); this.saveBills(bills); } }
+    static markBillPaid(id) {
+        const bills = this.getBills(); const bill = bills.find(b => b.id === id); if (!bill) return;
+        const d = new Date(bill.nextDueDate);
+        if (bill.frequency === 'Weekly') d.setDate(d.getDate() + 7);
+        else if (bill.frequency === 'Monthly') d.setMonth(d.getMonth() + 1);
+        else if (bill.frequency === 'Quarterly') d.setMonth(d.getMonth() + 3);
+        else if (bill.frequency === 'Yearly') d.setFullYear(d.getFullYear() + 1);
+        bill.nextDueDate = d.toISOString().split('T')[0]; bill.isPaid = false;
+        this.saveBills(bills);
+    }
 }
 window.DataService = DataService;
 
@@ -559,6 +581,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
         { key: 'income', icon: 'fas fa-wallet', label: 'Income' },
         { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' },
+        { key: 'bills', icon: 'fas fa-file-invoice-dollar', label: 'Bills' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
@@ -2304,6 +2327,249 @@ function SavingsGoals({ defaultCurrency }) {
     );
 }
 
+function BillTracker({ categories, onUpdate }) {
+    const [bills, setBills] = useState([]);
+    const [showForm, setShowForm] = useState(false);
+    const [editingBill, setEditingBill] = useState(null);
+    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', reminderDaysBefore: '3', notes: '' });
+    const [formErrors, setFormErrors] = useState({});
+    const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [logMsg, setLogMsg] = useState('');
+
+    const loadBills = () => setBills(DataService.getBills());
+    useEffect(() => { loadBills(); }, []);
+
+    const today = new Date().toISOString().split('T')[0];
+
+    const getDaysDiff = (dateStr) => Math.ceil((new Date(dateStr) - new Date(today)) / 86400000);
+
+    const getBadge = (bill) => {
+        if (!bill.isActive) return null;
+        const diff = getDaysDiff(bill.nextDueDate);
+        if (diff < 0 && !bill.isPaid) return { label: 'OVERDUE', cls: 'bg-danger' };
+        if (diff === 0) return { label: 'DUE TODAY', cls: 'bg-danger' };
+        if (diff <= bill.reminderDaysBefore) return { label: 'DUE SOON', cls: 'bg-warning text-dark' };
+        return null;
+    };
+
+    const getMonthlyAmount = (bill) => {
+        if (!bill.isActive) return 0;
+        const map = { Weekly: 4.33, Monthly: 1, Quarterly: 1/3, Yearly: 1/12 };
+        return bill.amount * (map[bill.frequency] || 1);
+    };
+
+    const monthlyCommitment = bills.reduce((s, b) => s + getMonthlyAmount(b), 0);
+
+    const sortedBills = [...bills].sort((a, b) => {
+        const aOverdue = getDaysDiff(a.nextDueDate) < 0 && !a.isPaid;
+        const bOverdue = getDaysDiff(b.nextDueDate) < 0 && !b.isPaid;
+        const aToday = a.nextDueDate === today;
+        const bToday = b.nextDueDate === today;
+        if (aOverdue && !bOverdue) return -1;
+        if (!aOverdue && bOverdue) return 1;
+        if (aToday && !bToday) return -1;
+        if (!aToday && bToday) return 1;
+        return a.nextDueDate.localeCompare(b.nextDueDate);
+    });
+
+    const activeBills = sortedBills.filter(b => b.isActive);
+    const inactiveBills = sortedBills.filter(b => !b.isActive);
+
+    const resetForm = () => {
+        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', reminderDaysBefore: '3', notes: '' });
+        setFormErrors({}); setEditingBill(null);
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        const errors = {};
+        if (!formData.name || formData.name.trim().length < 2) errors.name = 'Name must be at least 2 characters';
+        if (!formData.amount || parseFloat(formData.amount) <= 0) errors.amount = 'Amount must be greater than 0';
+        if (!formData.nextDueDate || formData.nextDueDate < today) errors.nextDueDate = 'Due date must be today or in the future';
+        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
+        try {
+            if (editingBill) {
+                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes });
+            } else {
+                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes });
+            }
+            resetForm(); setShowForm(false); loadBills(); onUpdate();
+        } catch (err) { setFormErrors({ name: err.message }); }
+    };
+
+    const handleEdit = (bill) => {
+        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '' });
+        setEditingBill(bill); setShowForm(true);
+    };
+
+    const handleMarkPaid = (id) => { DataService.markBillPaid(id); loadBills(); onUpdate(); };
+    const handleDelete = (id) => { DataService.deleteBill(id); setDeleteConfirm(null); loadBills(); onUpdate(); };
+
+    const handleLogExpense = async (bill) => {
+        try {
+            await DataService.addExpense({ amount: bill.amount, date: today, description: bill.name, categoryId: bill.categoryId, subcategory: '', currency: bill.currency || 'GBP', paidBy: '' });
+            setLogMsg(bill.name + ' logged as expense');
+            setTimeout(() => setLogMsg(''), 3000);
+            onUpdate();
+        } catch (e) { setLogMsg('Failed to log expense'); setTimeout(() => setLogMsg(''), 3000); }
+    };
+
+    const currencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const frequencies = ['Weekly', 'Monthly', 'Quarterly', 'Yearly'];
+    const fmtCurrency = (amt, cur) => ValidationUtils.formatCurrency(amt, cur || 'GBP');
+
+    const BillRow = ({ bill }) => {
+        const badge = getBadge(bill);
+        const cat = categories.find(c => c.id === bill.categoryId);
+        return (
+            <div className="card mb-2" style={{borderRadius:'10px', border:'1px solid ' + (badge && badge.cls.includes('danger') ? '#dc3545' : badge ? '#ffc107' : '#e9ecef'), opacity: bill.isActive ? 1 : 0.6}}>
+                <div className="card-body py-2 px-3">
+                    <div className="d-flex justify-content-between align-items-start">
+                        <div style={{flex:1}}>
+                            <div className="d-flex align-items-center gap-2 flex-wrap">
+                                <strong style={{fontSize:'0.95rem'}}>{bill.name}</strong>
+                                {badge && <span className={'badge ' + badge.cls} style={{fontSize:'0.72rem'}}>{badge.label}</span>}
+                            </div>
+                            <div style={{fontSize:'0.83rem', color:'#6c757d', marginTop:'0.15rem'}}>
+                                <strong>{fmtCurrency(bill.amount, bill.currency)}</strong> · {bill.frequency}
+                                {cat && <span> · {cat.name}</span>}
+                            </div>
+                            <div style={{fontSize:'0.8rem', color:'#6c757d'}}>Due: {ValidationUtils.formatDate(bill.nextDueDate)}</div>
+                            {bill.notes && <div style={{fontSize:'0.78rem', color:'#aaa', fontStyle:'italic'}}>{bill.notes}</div>}
+                        </div>
+                        <div className="d-flex gap-1">
+                            <button className="btn btn-outline-primary btn-sm" style={{padding:'2px 7px'}} onClick={() => handleEdit(bill)}><i className="fas fa-edit"></i></button>
+                            <button className="btn btn-outline-danger btn-sm" style={{padding:'2px 7px'}} onClick={() => setDeleteConfirm(bill)}><i className="fas fa-trash"></i></button>
+                        </div>
+                    </div>
+                    {bill.isActive ? (
+                        <div className="d-flex gap-2 mt-2 flex-wrap">
+                            <button className="btn btn-success btn-sm" onClick={() => handleMarkPaid(bill.id)}><i className="fas fa-check me-1"></i>Mark Paid</button>
+                            <button className="btn btn-outline-secondary btn-sm" onClick={() => handleLogExpense(bill)}><i className="fas fa-receipt me-1"></i>Log as Expense</button>
+                            <button className="btn btn-outline-secondary btn-sm" onClick={() => { DataService.updateBill(bill.id, { isActive: false }); loadBills(); }}><i className="fas fa-pause me-1"></i>Deactivate</button>
+                        </div>
+                    ) : (
+                        <button className="btn btn-outline-primary btn-sm mt-2" onClick={() => { DataService.updateBill(bill.id, { isActive: true }); loadBills(); }}><i className="fas fa-play me-1"></i>Reactivate</button>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    return (
+        <div className="screen">
+            <div className="screen-header" style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                <h2><i className="fas fa-file-invoice-dollar me-2"></i>Bills</h2>
+                <button className="btn btn-primary btn-sm" onClick={() => { if (showForm && !editingBill) { resetForm(); setShowForm(false); } else { resetForm(); setShowForm(true); } }}>
+                    <i className={'fas fa-' + (showForm && !editingBill ? 'times' : 'plus') + ' me-1'}></i>
+                    {showForm && !editingBill ? 'Cancel' : 'Add Bill'}
+                </button>
+            </div>
+
+            <div className="card mb-3" style={{borderRadius:'12px', background:'linear-gradient(135deg,#4a6cf7,#6a3de8)', color:'#fff', border:'none'}}>
+                <div className="card-body py-2 px-3">
+                    <div style={{fontSize:'0.8rem', opacity:0.85}}>Monthly Commitment</div>
+                    <div style={{fontSize:'1.5rem', fontWeight:'700'}}>{fmtCurrency(monthlyCommitment, 'GBP')}</div>
+                    <div style={{fontSize:'0.78rem', opacity:0.8}}>{activeBills.length} active bill{activeBills.length !== 1 ? 's' : ''}</div>
+                </div>
+            </div>
+
+            {logMsg && <div className="alert alert-success py-1 px-3 mb-2" style={{fontSize:'0.85rem'}}>{logMsg}</div>}
+
+            {showForm && (
+                <div className="card mb-3" style={{borderRadius:'12px', border:'1px solid #e9ecef'}}>
+                    <div className="card-body">
+                        <h6 className="card-title mb-3">{editingBill ? 'Edit Bill' : 'New Bill / Subscription'}</h6>
+                        <form onSubmit={handleSubmit}>
+                            <div className="row g-2">
+                                <div className="col-12">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Bill Name *</label>
+                                    <input type="text" className={'form-control ' + (formErrors.name ? 'is-invalid' : '')} value={formData.name} onChange={e => setFormData(p => ({...p, name: e.target.value}))} placeholder="e.g., Netflix, Rent, Phone" />
+                                    {formErrors.name && <div className="invalid-feedback">{formErrors.name}</div>}
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Amount *</label>
+                                    <input type="number" step="0.01" min="0.01" className={'form-control ' + (formErrors.amount ? 'is-invalid' : '')} value={formData.amount} onChange={e => setFormData(p => ({...p, amount: e.target.value}))} placeholder="0.00" />
+                                    {formErrors.amount && <div className="invalid-feedback">{formErrors.amount}</div>}
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Currency</label>
+                                    <select className="form-select" value={formData.currency} onChange={e => setFormData(p => ({...p, currency: e.target.value}))}>
+                                        {currencies.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Frequency</label>
+                                    <select className="form-select" value={formData.frequency} onChange={e => setFormData(p => ({...p, frequency: e.target.value}))}>
+                                        {frequencies.map(f => <option key={f} value={f}>{f}</option>)}
+                                    </select>
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Next Due Date *</label>
+                                    <input type="date" className={'form-control ' + (formErrors.nextDueDate ? 'is-invalid' : '')} value={formData.nextDueDate} onChange={e => setFormData(p => ({...p, nextDueDate: e.target.value}))} />
+                                    {formErrors.nextDueDate && <div className="invalid-feedback">{formErrors.nextDueDate}</div>}
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Category</label>
+                                    <select className="form-select" value={formData.categoryId} onChange={e => setFormData(p => ({...p, categoryId: e.target.value}))}>
+                                        <option value="">None</option>
+                                        {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Remind (days before)</label>
+                                    <input type="number" min="1" max="14" className="form-control" value={formData.reminderDaysBefore} onChange={e => setFormData(p => ({...p, reminderDaysBefore: e.target.value}))} />
+                                </div>
+                                <div className="col-12">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Notes</label>
+                                    <input type="text" className="form-control" value={formData.notes} onChange={e => setFormData(p => ({...p, notes: e.target.value}))} placeholder="Optional notes" />
+                                </div>
+                            </div>
+                            <div className="d-flex gap-2 mt-3">
+                                <button type="submit" className="btn btn-primary btn-sm"><i className={'fas fa-' + (editingBill ? 'save' : 'plus') + ' me-1'}></i>{editingBill ? 'Save Changes' : 'Add Bill'}</button>
+                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => { resetForm(); setShowForm(false); }}>Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {bills.length === 0 && !showForm ? (
+                <div className="empty-state">
+                    <i className="fas fa-file-invoice-dollar fa-3x"></i>
+                    <h4>No bills tracked yet</h4>
+                    <p>Add your regular bills and subscriptions to stay on top of payments.</p>
+                </div>
+            ) : (
+                <>
+                    {activeBills.map(bill => <BillRow key={bill.id} bill={bill} />)}
+                    {inactiveBills.length > 0 && (
+                        <>
+                            <div style={{fontSize:'0.8rem', color:'#6c757d', marginTop:'1rem', marginBottom:'0.5rem', textTransform:'uppercase', letterSpacing:'0.05em'}}>Inactive</div>
+                            {inactiveBills.map(bill => <BillRow key={bill.id} bill={bill} />)}
+                        </>
+                    )}
+                </>
+            )}
+
+            {deleteConfirm && (
+                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Delete Bill</h5></div>
+                            <div className="modal-body"><p>Delete <strong>{deleteConfirm.name}</strong>? This cannot be undone.</p></div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
+                                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -2312,6 +2578,7 @@ function App() {
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
     const [people, setPeople] = useState([]);
     const [budgetAlerts, setBudgetAlerts] = useState([]);
+    const [billsDueSoon, setBillsDueSoon] = useState([]);
 
     useEffect(() => {
         const loadData = async () => {
@@ -2326,6 +2593,8 @@ function App() {
                     const alerts = await DataService.checkBudgetAlerts();
                     setBudgetAlerts(alerts);
                 } else { setBudgetAlerts([]); }
+                const today = new Date().toISOString().split('T')[0];
+                setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(today)) / 86400000); return diff <= b.reminderDaysBefore; }));
             } catch (error) { console.error('Error loading data:', error); }
         };
         loadData();
@@ -2343,6 +2612,8 @@ function App() {
                 const alerts = await DataService.checkBudgetAlerts();
                 setBudgetAlerts(alerts);
             } else { setBudgetAlerts([]); }
+            const todayStr = new Date().toISOString().split('T')[0];
+            setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
         } catch (error) { console.error('Error updating data:', error); }
     };
 
@@ -2356,6 +2627,7 @@ function App() {
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} />;
+            case 'bills': return <BillTracker categories={categories} onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
@@ -2374,6 +2646,12 @@ function App() {
                     <button className="btn-close btn-close-sm float-end" onClick={() => setBudgetAlerts(prev => prev.filter((_,j) => j !== i))}></button>
                 </div>
             ))}
+            {billsDueSoon.length > 0 && (
+                <div className="alert alert-info" style={{margin: '0 1rem 0.5rem', fontSize: '0.85rem', cursor: 'pointer'}} onClick={() => setCurrentScreen('bills')}>
+                    <i className="fas fa-clock me-2"></i>
+                    ⏰ {billsDueSoon.length} bill{billsDueSoon.length !== 1 ? 's' : ''} due soon — {billsDueSoon.map(b => b.name).join(', ')}
+                </div>
+            )}
             <div className="app-content">{renderScreen()}</div>
             <Navigation currentScreen={currentScreen} onScreenChange={setCurrentScreen} />
         </div>
