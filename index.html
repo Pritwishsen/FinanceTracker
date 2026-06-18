@@ -19,7 +19,7 @@
     <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
     
     <script type="text/babel">
-const { useState, useEffect } = React;
+const { useState, useEffect, useMemo } = React;
 
 class CurrencyService {
     static ratesCache = {};
@@ -687,7 +687,6 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
 }
 
 function ExpenseList({ expenses, categories, onUpdate }) {
-    const [filteredExpenses, setFilteredExpenses] = useState(expenses);
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
     const [filterPerson, setFilterPerson] = useState('');
@@ -705,7 +704,7 @@ function ExpenseList({ expenses, categories, onUpdate }) {
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
-    useEffect(() => {
+    const filteredExpenses = useMemo(() => {
         let filtered = expenses;
         if (filterCategory) filtered = filtered.filter(expense => expense.categoryId === parseInt(filterCategory));
         if (filterSubcategory) filtered = filtered.filter(expense => expense.subcategory === filterSubcategory);
@@ -716,7 +715,7 @@ function ExpenseList({ expenses, categories, onUpdate }) {
         if (filterPaidBy === 'self') filtered = filtered.filter(expense => !expense.paidBy || expense.paidBy === '');
         else if (filterPaidBy) filtered = filtered.filter(expense => expense.paidBy === filterPaidBy);
         if (searchTerm) filtered = filtered.filter(expense => (expense.description || '').toLowerCase().includes(searchTerm.toLowerCase()));
-        setFilteredExpenses(filtered);
+        return filtered;
     }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, filterPaidBy, searchTerm]);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
