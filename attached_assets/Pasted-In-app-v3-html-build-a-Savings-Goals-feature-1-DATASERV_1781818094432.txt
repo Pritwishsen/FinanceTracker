@@ -1,0 +1,46 @@
+In app-v3.html, build a Savings Goals feature.
+
+1. DATASERVICE — add these sync methods (localStorage only, no await needed):
+   getGoals(): return JSON.parse(localStorage.getItem('financeApp_goals') || '[]')
+   saveGoals(goals): localStorage.setItem('financeApp_goals', JSON.stringify(goals))
+   addGoal({ name, targetAmount, currency, deadline, notes, emoji, currentSaved }):
+   - Validate name >= 2 chars, unique case-insensitive
+   - Validate targetAmount > 0
+   - If deadline set, must be in the future
+   const goal = { id: Date.now(), name, targetAmount: parseFloat(targetAmount),
+     currency, deadline: deadline||"", notes: notes||"", emoji: emoji||"",
+     currentSaved: parseFloat(currentSaved||0), createdAt: new Date().toISOString() };
+   push, saveGoals(), return goal
+   updateGoal(id, updates): find, merge, saveGoals()
+   deleteGoal(id): splice, saveGoals()
+   addToGoal(id, amount): find goal, goal.currentSaved += parseFloat(amount), saveGoals()
+
+2. NAVIGATION — add nav item:
+   { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' }
+   (Replace Income's piggy-bank icon with fas fa-wallet to avoid collision)
+
+3. BUILD SavingsGoals COMPONENT:
+   ADD GOAL FORM:
+   - Fields: Goal Name (required), Target Amount (required, > 0),
+     Currency (GBP/EUR/USD/INR), Deadline (optional, future date),
+     Current Saved (optional, default 0), Emoji (optional), Notes (optional)
+   - On submit: DataService.addGoal(...); reload goals
+
+   GOALS LIST:
+   - For each goal show: emoji + name, target amount, progress bar
+     (currentSaved/targetAmount%), "Saved: [amount]", "Remaining: [amount]"
+     or "GOAL REACHED! 🎉" if currentSaved >= targetAmount
+   - Deadline shown if set; "X days remaining" or "OVERDUE" if past deadline
+   - Projected completion: if monthlyNet > 0:
+     monthsLeft = (targetAmount - currentSaved) / monthlyNet
+     Show "Projected: [Month Year] at current saving rate"
+   - Add Funds button: opens inline input to add an amount to currentSaved
+   - Edit button: prefills form
+   - Delete button: confirmation modal
+
+   EMPTY STATE: "No savings goals yet. Create your first goal!"
+
+4. APP COMPONENT — add to renderScreen():
+   case "goals": return <SavingsGoals defaultCurrency={defaultCurrency} />
+
+Use Bootstrap progress and card classes. No external libraries.

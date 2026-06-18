@@ -533,6 +533,22 @@ class DataService {
         recentExpenses.forEach(expense => { const key = expense.categoryId + '-' + expense.subcategory; categoryCount[key] = (categoryCount[key] || 0) + 1; });
         return Object.entries(categoryCount).sort(([,a], [,b]) => b - a).slice(0, limit).map(([key]) => { const [categoryId, subcategory] = key.split('-'); const category = this.data.categories.find(cat => cat.id === parseInt(categoryId)); return { category, subcategory }; }).filter(item => item.category);
     }
+    static getGoals() { return JSON.parse(localStorage.getItem('financeApp_goals') || '[]'); }
+    static saveGoals(goals) { localStorage.setItem('financeApp_goals', JSON.stringify(goals)); }
+    static addGoal({ name, targetAmount, currency, deadline, notes, emoji, currentSaved }) {
+        const goals = this.getGoals();
+        if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
+        if (goals.find(g => g.name.toLowerCase() === name.trim().toLowerCase())) throw new Error('A goal with this name already exists');
+        if (!targetAmount || parseFloat(targetAmount) <= 0) throw new Error('Target amount must be greater than 0');
+        if (deadline && new Date(deadline) <= new Date()) throw new Error('Deadline must be in the future');
+        const goal = { id: Date.now(), name: name.trim(), targetAmount: parseFloat(targetAmount), currency: currency || 'GBP', deadline: deadline || '', notes: notes || '', emoji: emoji || '', currentSaved: parseFloat(currentSaved || 0), createdAt: new Date().toISOString() };
+        goals.push(goal);
+        this.saveGoals(goals);
+        return goal;
+    }
+    static updateGoal(id, updates) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals[i] = { ...goals[i], ...updates }; this.saveGoals(goals); } }
+    static deleteGoal(id) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals.splice(i, 1); this.saveGoals(goals); } }
+    static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
 }
 window.DataService = DataService;
 
@@ -541,7 +557,8 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'expenses', icon: 'fas fa-list', label: 'Expenses' },
         { key: 'add-expense', icon: 'fas fa-plus', label: 'Add' },
         { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
-        { key: 'income', icon: 'fas fa-piggy-bank', label: 'Income' },
+        { key: 'income', icon: 'fas fa-wallet', label: 'Income' },
+        { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
@@ -2055,6 +2072,238 @@ function BulkUpload({ categories, onUpdate }) {
     );
 }
 
+function SavingsGoals({ defaultCurrency }) {
+    const [goals, setGoals] = useState([]);
+    const [monthlyNet, setMonthlyNet] = useState(0);
+    const [showForm, setShowForm] = useState(false);
+    const [editingGoal, setEditingGoal] = useState(null);
+    const [formData, setFormData] = useState({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '' });
+    const [formErrors, setFormErrors] = useState({});
+    const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [addFundsGoalId, setAddFundsGoalId] = useState(null);
+    const [addFundsAmount, setAddFundsAmount] = useState('');
+    const [addFundsError, setAddFundsError] = useState('');
+
+    const loadGoals = () => setGoals(DataService.getGoals());
+
+    useEffect(() => {
+        loadGoals();
+        const calcMonthlyNet = async () => {
+            const now = new Date();
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            const [expenses, income] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
+            const monthExp = expenses.filter(e => new Date(e.date) >= startOfMonth).reduce((s, e) => s + e.amount, 0);
+            const monthInc = income.filter(i => new Date(i.date) >= startOfMonth).reduce((s, i) => s + i.amount, 0);
+            setMonthlyNet(Math.max(0, monthInc - monthExp));
+        };
+        calcMonthlyNet();
+    }, []);
+
+    const resetForm = () => {
+        setFormData({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '' });
+        setFormErrors({});
+        setEditingGoal(null);
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        const errors = {};
+        if (!formData.name || formData.name.trim().length < 2) errors.name = 'Name must be at least 2 characters';
+        if (!formData.targetAmount || parseFloat(formData.targetAmount) <= 0) errors.targetAmount = 'Target amount must be greater than 0';
+        if (formData.deadline && new Date(formData.deadline) <= new Date()) errors.deadline = 'Deadline must be in the future';
+        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
+        try {
+            if (editingGoal) {
+                DataService.updateGoal(editingGoal.id, { name: formData.name.trim(), targetAmount: parseFloat(formData.targetAmount), currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: parseFloat(formData.currentSaved || 0) });
+            } else {
+                DataService.addGoal({ name: formData.name.trim(), targetAmount: formData.targetAmount, currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: formData.currentSaved });
+            }
+            resetForm(); setShowForm(false); loadGoals();
+        } catch (err) { setFormErrors({ name: err.message }); }
+    };
+
+    const handleEdit = (goal) => {
+        setFormData({ name: goal.name, targetAmount: goal.targetAmount.toString(), currency: goal.currency || defaultCurrency || 'GBP', deadline: goal.deadline || '', currentSaved: goal.currentSaved.toString(), emoji: goal.emoji || '', notes: goal.notes || '' });
+        setEditingGoal(goal); setShowForm(true);
+    };
+
+    const handleDelete = (id) => { DataService.deleteGoal(id); setDeleteConfirm(null); loadGoals(); };
+
+    const handleAddFunds = (goalId) => {
+        const amount = parseFloat(addFundsAmount);
+        if (!addFundsAmount || isNaN(amount) || amount <= 0) { setAddFundsError('Enter a valid amount > 0'); return; }
+        DataService.addToGoal(goalId, amount);
+        setAddFundsGoalId(null); setAddFundsAmount(''); setAddFundsError(''); loadGoals();
+    };
+
+    const getProjectedCompletion = (goal) => {
+        const remaining = goal.targetAmount - goal.currentSaved;
+        if (remaining <= 0 || monthlyNet <= 0) return null;
+        const projDate = new Date();
+        projDate.setMonth(projDate.getMonth() + Math.ceil(remaining / monthlyNet));
+        return projDate.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    };
+
+    const getDeadlineInfo = (deadline) => {
+        if (!deadline) return null;
+        const diffDays = Math.ceil((new Date(deadline) - new Date()) / (1000 * 60 * 60 * 24));
+        if (diffDays < 0) return { text: 'OVERDUE', overdue: true };
+        return { text: diffDays + ' days remaining', overdue: false };
+    };
+
+    const currencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const fmt = (amount, currency) => ValidationUtils.formatCurrency(amount, currency || defaultCurrency);
+
+    return (
+        <div className="screen">
+            <div className="screen-header" style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                <h2><i className="fas fa-piggy-bank me-2"></i>Savings Goals</h2>
+                <button className="btn btn-primary btn-sm" onClick={() => { if (showForm && !editingGoal) { resetForm(); setShowForm(false); } else { resetForm(); setShowForm(true); } }}>
+                    <i className={'fas fa-' + (showForm && !editingGoal ? 'times' : 'plus') + ' me-1'}></i>
+                    {showForm && !editingGoal ? 'Cancel' : 'New Goal'}
+                </button>
+            </div>
+
+            {showForm && (
+                <div className="card mb-3" style={{borderRadius:'12px', border:'1px solid #e9ecef'}}>
+                    <div className="card-body">
+                        <h6 className="card-title mb-3">{editingGoal ? 'Edit Goal' : 'New Savings Goal'}</h6>
+                        <form onSubmit={handleSubmit}>
+                            <div className="row g-2">
+                                <div className="col-8">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Goal Name *</label>
+                                    <input type="text" className={'form-control ' + (formErrors.name ? 'is-invalid' : '')} value={formData.name} onChange={e => setFormData(p => ({...p, name: e.target.value}))} placeholder="e.g., Holiday Fund" />
+                                    {formErrors.name && <div className="invalid-feedback">{formErrors.name}</div>}
+                                </div>
+                                <div className="col-4">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Emoji</label>
+                                    <input type="text" className="form-control" value={formData.emoji} onChange={e => setFormData(p => ({...p, emoji: e.target.value}))} placeholder="✈️" maxLength={2} />
+                                </div>
+                                <div className="col-8">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Target Amount *</label>
+                                    <input type="number" step="0.01" min="0.01" className={'form-control ' + (formErrors.targetAmount ? 'is-invalid' : '')} value={formData.targetAmount} onChange={e => setFormData(p => ({...p, targetAmount: e.target.value}))} placeholder="0.00" />
+                                    {formErrors.targetAmount && <div className="invalid-feedback">{formErrors.targetAmount}</div>}
+                                </div>
+                                <div className="col-4">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Currency</label>
+                                    <select className="form-select" value={formData.currency} onChange={e => setFormData(p => ({...p, currency: e.target.value}))}>
+                                        {currencies.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Currently Saved</label>
+                                    <input type="number" step="0.01" min="0" className="form-control" value={formData.currentSaved} onChange={e => setFormData(p => ({...p, currentSaved: e.target.value}))} placeholder="0.00" />
+                                </div>
+                                <div className="col-6">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Deadline (optional)</label>
+                                    <input type="date" className={'form-control ' + (formErrors.deadline ? 'is-invalid' : '')} value={formData.deadline} onChange={e => setFormData(p => ({...p, deadline: e.target.value}))} />
+                                    {formErrors.deadline && <div className="invalid-feedback">{formErrors.deadline}</div>}
+                                </div>
+                                <div className="col-12">
+                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Notes (optional)</label>
+                                    <textarea className="form-control" rows={2} value={formData.notes} onChange={e => setFormData(p => ({...p, notes: e.target.value}))} placeholder="Optional notes..." />
+                                </div>
+                            </div>
+                            <div className="d-flex gap-2 mt-3">
+                                <button type="submit" className="btn btn-primary btn-sm"><i className={'fas fa-' + (editingGoal ? 'save' : 'plus') + ' me-1'}></i>{editingGoal ? 'Save Changes' : 'Add Goal'}</button>
+                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => { resetForm(); setShowForm(false); }}>Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {goals.length === 0 && !showForm ? (
+                <div className="empty-state">
+                    <i className="fas fa-piggy-bank fa-3x"></i>
+                    <h4>No savings goals yet</h4>
+                    <p>Create your first goal!</p>
+                </div>
+            ) : (
+                goals.map(goal => {
+                    const pct = goal.targetAmount > 0 ? Math.min((goal.currentSaved / goal.targetAmount) * 100, 100) : 0;
+                    const reached = goal.currentSaved >= goal.targetAmount;
+                    const projected = getProjectedCompletion(goal);
+                    const deadlineInfo = getDeadlineInfo(goal.deadline);
+                    const currency = goal.currency || defaultCurrency;
+                    return (
+                        <div key={goal.id} className="card mb-3" style={{borderRadius:'12px', border:'1px solid ' + (reached ? '#28a745' : '#e9ecef')}}>
+                            <div className="card-body">
+                                <div className="d-flex justify-content-between align-items-start mb-2">
+                                    <div>
+                                        {goal.emoji && <span style={{fontSize:'1.4rem', marginRight:'0.4rem'}}>{goal.emoji}</span>}
+                                        <strong style={{fontSize:'1rem'}}>{goal.name}</strong>
+                                    </div>
+                                    <div className="d-flex gap-1">
+                                        <button className="btn btn-outline-primary btn-sm" onClick={() => handleEdit(goal)}><i className="fas fa-edit"></i></button>
+                                        <button className="btn btn-outline-danger btn-sm" onClick={() => setDeleteConfirm(goal)}><i className="fas fa-trash"></i></button>
+                                    </div>
+                                </div>
+
+                                {reached ? (
+                                    <div className="alert alert-success py-1 px-2 mb-2" style={{fontSize:'0.85rem'}}>🎉 GOAL REACHED!</div>
+                                ) : (
+                                    <>
+                                        <div className="progress mb-1" style={{height:'10px'}}>
+                                            <div className="progress-bar bg-success" role="progressbar" style={{width: pct + '%'}} aria-valuenow={Math.round(pct)} aria-valuemin="0" aria-valuemax="100"></div>
+                                        </div>
+                                        <div className="d-flex justify-content-between mb-1" style={{fontSize:'0.82rem', color:'#6c757d'}}>
+                                            <span>Saved: {fmt(goal.currentSaved, currency)}</span>
+                                            <span>Remaining: {fmt(goal.targetAmount - goal.currentSaved, currency)}</span>
+                                        </div>
+                                    </>
+                                )}
+
+                                <div style={{fontSize:'0.85rem', marginBottom:'0.3rem'}}>
+                                    Target: <strong>{fmt(goal.targetAmount, currency)}</strong>
+                                    {deadlineInfo && (
+                                        <span className={'ms-2 badge ' + (deadlineInfo.overdue ? 'bg-danger' : 'bg-secondary')}>
+                                            <i className="fas fa-clock me-1"></i>{deadlineInfo.text}
+                                        </span>
+                                    )}
+                                </div>
+
+                                {projected && !reached && (
+                                    <div style={{fontSize:'0.8rem', color:'#6c757d', marginBottom:'0.3rem'}}>
+                                        <i className="fas fa-calendar-check me-1"></i>Projected: {projected} at current saving rate
+                                    </div>
+                                )}
+                                {goal.notes && <div style={{fontSize:'0.8rem', color:'#888', fontStyle:'italic', marginBottom:'0.3rem'}}>{goal.notes}</div>}
+
+                                {addFundsGoalId === goal.id ? (
+                                    <div className="d-flex gap-2 align-items-center mt-2" style={{flexWrap:'wrap'}}>
+                                        <input type="number" step="0.01" min="0.01" className={'form-control form-control-sm ' + (addFundsError ? 'is-invalid' : '')} style={{width:'120px'}} value={addFundsAmount} onChange={e => { setAddFundsAmount(e.target.value); setAddFundsError(''); }} placeholder="Amount" autoFocus />
+                                        {addFundsError && <div className="text-danger" style={{fontSize:'0.78rem', width:'100%'}}>{addFundsError}</div>}
+                                        <button className="btn btn-success btn-sm" onClick={() => handleAddFunds(goal.id)}><i className="fas fa-check me-1"></i>Add</button>
+                                        <button className="btn btn-secondary btn-sm" onClick={() => { setAddFundsGoalId(null); setAddFundsAmount(''); setAddFundsError(''); }}>Cancel</button>
+                                    </div>
+                                ) : (
+                                    !reached && <button className="btn btn-outline-success btn-sm mt-2" onClick={() => { setAddFundsGoalId(goal.id); setAddFundsAmount(''); setAddFundsError(''); }}><i className="fas fa-plus me-1"></i>Add Funds</button>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })
+            )}
+
+            {deleteConfirm && (
+                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Delete Goal</h5></div>
+                            <div className="modal-body"><p>Delete <strong>{deleteConfirm.emoji} {deleteConfirm.name}</strong>? This cannot be undone.</p></div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
+                                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -2106,6 +2355,7 @@ function App() {
             case 'categories': return <CategoryManager categories={categories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} />;
+            case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
