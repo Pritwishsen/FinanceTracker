@@ -3322,8 +3322,8 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url; a.download = filename;
-        document.body.appendChild(a); a.click();
-        document.body.removeChild(a); URL.revokeObjectURL(url);
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 500);
     };
 
     const getCatName = (id) => { const c = categories.find(c => c.id === id); return c ? c.name : id || ''; };
