@@ -3344,7 +3344,7 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
         if (filteredExp.length === 0 && filteredInc.length === 0) { showToast('No records match. Export will be empty.'); return; }
         const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Tags','Notes'];
         const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income"];
-        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), getSubName(e.categoryId, e.subcategoryId), e.paidBy || '', (e.tags || []).join(';'), e.notes || '']);
+        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', (e.tags || []).join(';'), e.notes || '']);
         const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.whosIncome || i.paidBy || '']);
         if (filteredExp.length > 0) exportToCSV(`financetracker-expenses-${todayStr()}.csv`, expHeaders, expRows);
         if (filteredInc.length > 0) setTimeout(() => exportToCSV(`financetracker-income-${todayStr()}.csv`, incHeaders, incRows), filteredExp.length > 0 ? 200 : 0);
