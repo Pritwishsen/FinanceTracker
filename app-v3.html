@@ -2986,7 +2986,7 @@ function RecurringList({ onUpdate }) {
     );
 }
 
-function RegistrationScreen({ onRegister }) {
+function RegistrationScreen({ onRegister, onLogin }) {
     const [activeTab, setActiveTab] = useState('register');
     const [formData, setFormData] = useState({ displayName: '', email: '', password: '', confirmPassword: '' });
     const [errors, setErrors] = useState({});
@@ -2994,6 +2994,17 @@ function RegistrationScreen({ onRegister }) {
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
     const [oauthToast, setOauthToast] = useState('');
+    const [signEmail, setSignEmail] = useState('');
+    const [signPw, setSignPw] = useState('');
+    const [signShowPw, setSignShowPw] = useState(false);
+    const [signRemember, setSignRemember] = useState(false);
+    const [signLockUntil] = useState(() => { const v = parseInt(localStorage.getItem('financeApp_failLockUntil') || '0'); return v > Date.now() ? v : 0; });
+    const [failCount, setFailCount] = useState(() => parseInt(localStorage.getItem('financeApp_failCount') || '0'));
+    const [signError, setSignError] = useState(() => { const until = parseInt(localStorage.getItem('financeApp_failLockUntil') || '0'); return until > Date.now() ? 'Too many failed attempts. Please try again in 15 minutes.' : ''; });
+    const [lockedOut, setLockedOut] = useState(() => { const v = parseInt(localStorage.getItem('financeApp_failLockUntil') || '0'); return v > Date.now(); });
+    const [showForgot, setShowForgot] = useState(false);
+    const [forgotEmail, setForgotEmail] = useState('');
+    const [forgotSent, setForgotSent] = useState(false);
 
     const handleChange = (field, value) => { setFormData(prev => ({ ...prev, [field]: value })); if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' })); };
 
@@ -3019,8 +3030,11 @@ function RegistrationScreen({ onRegister }) {
         if (Object.keys(errs).length > 0) { setErrors(errs); return; }
         setIsSubmitting(true);
         try {
-            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), authProvider: 'email', createdAt: new Date().toISOString() };
+            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), password: formData.password, authProvider: 'email', createdAt: new Date().toISOString() };
             localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+            localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+            localStorage.removeItem('financeApp_failCount');
+            localStorage.removeItem('financeApp_failLockUntil');
             await DataService.updateSettings({ displayName: user.displayName });
             try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {}
             onRegister(user);
@@ -3028,6 +3042,43 @@ function RegistrationScreen({ onRegister }) {
     };
 
     const showOauthToast = () => { setOauthToast('OAuth coming soon — use email registration'); setTimeout(() => setOauthToast(''), 3000); };
+
+    const handleSignIn = (ev) => {
+        ev.preventDefault();
+        if (lockedOut) return;
+        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+        if (!stored || stored.email !== signEmail.trim().toLowerCase() || stored.password !== signPw) {
+            const newCount = failCount + 1;
+            setFailCount(newCount);
+            localStorage.setItem('financeApp_failCount', String(newCount));
+            if (newCount >= 5) {
+                const until = Date.now() + 15 * 60 * 1000;
+                localStorage.setItem('financeApp_failLockUntil', String(until));
+                setLockedOut(true);
+                setSignError('Too many failed attempts. Please try again in 15 minutes.');
+            } else {
+                setSignError('Incorrect email or password.');
+            }
+            return;
+        }
+        localStorage.removeItem('financeApp_failCount');
+        localStorage.removeItem('financeApp_failLockUntil');
+        if (signRemember) {
+            localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+        } else {
+            sessionStorage.setItem('financeApp_session_active', 'true');
+        }
+        const people = DataService.getPeople();
+        const match = people.find(p => p.name === stored.displayName && p.systemManaged);
+        if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
+        (onLogin || onRegister)(stored);
+    };
+
+    const handleForgotPw = () => {
+        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+        console.log('[ForgotPW] Reset requested for:', forgotEmail.trim().toLowerCase(), '| match:', stored && stored.email === forgotEmail.trim().toLowerCase());
+        setForgotSent(true);
+    };
 
     const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
     const cardRounded = { borderRadius: '16px', border: 'none' };
@@ -3088,15 +3139,51 @@ function RegistrationScreen({ onRegister }) {
                             </form>
                         )}
                         {activeTab === 'signin' && (
-                            <div className="text-center py-2">
-                                <i className="fas fa-lock fa-2x text-muted mb-3 d-block"></i>
-                                <h6 className="fw-semibold mb-2">Sign In</h6>
-                                <p className="text-muted small mb-3">Your data is stored on this device. Sign in with an existing account or create a new one.</p>
-                                <div className="d-grid gap-2 mb-3">
-                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
-                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
-                                </div>
-                                <p className="small text-muted mb-0">No account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('register')}>Create one</button></p>
+                            <div>
+                                {!showForgot ? (
+                                    <form onSubmit={handleSignIn} noValidate>
+                                        {signError && <div className="alert alert-danger py-2 small mb-3">{signError}</div>}
+                                        <div className="mb-3">
+                                            <label className="form-label fw-semibold">Email Address</label>
+                                            <input type="email" className="form-control" placeholder="you@example.com" value={signEmail} onChange={e => { setSignEmail(e.target.value); setSignError(''); }} autoComplete="email" />
+                                        </div>
+                                        <div className="mb-3">
+                                            <label className="form-label fw-semibold">Password</label>
+                                            <div className="input-group">
+                                                <input type={signShowPw ? 'text' : 'password'} className="form-control" placeholder="Your password" value={signPw} onChange={e => { setSignPw(e.target.value); setSignError(''); }} autoComplete="current-password" />
+                                                <button type="button" className="btn btn-outline-secondary" onClick={() => setSignShowPw(v => !v)} tabIndex={-1}><i className={'fas fa-' + (signShowPw ? 'eye-slash' : 'eye')}></i></button>
+                                            </div>
+                                        </div>
+                                        <div className="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                            <div className="form-check mb-0">
+                                                <input className="form-check-input" type="checkbox" id="rememberMe" checked={signRemember} onChange={e => setSignRemember(e.target.checked)} />
+                                                <label className="form-check-label small" htmlFor="rememberMe">Remember me (30 days)</label>
+                                            </div>
+                                            <button type="button" className="btn btn-link btn-sm p-0 small text-decoration-none" onClick={() => { setShowForgot(true); setForgotEmail(signEmail); setForgotSent(false); }}>Forgot your password?</button>
+                                        </div>
+                                        <button type="submit" className="btn btn-primary w-100 fw-semibold py-2 mb-3" disabled={lockedOut} style={{...gradientBtn, ...btnRounded}}>Sign In</button>
+                                        <div className="d-flex align-items-center my-3"><hr className="flex-grow-1 m-0" /><span className="px-2 text-muted small">or</span><hr className="flex-grow-1 m-0" /></div>
+                                        <div className="d-grid gap-2">
+                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
+                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
+                                        </div>
+                                        <p className="text-center small text-muted mt-3 mb-0">No account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('register')}>Create one</button></p>
+                                    </form>
+                                ) : (
+                                    <div>
+                                        <button type="button" className="btn btn-link btn-sm p-0 mb-3 text-decoration-none" onClick={() => setShowForgot(false)}><i className="fas fa-arrow-left me-1"></i>Back to sign in</button>
+                                        <h6 className="fw-semibold mb-1">Reset your password</h6>
+                                        <p className="text-muted small mb-3">Enter your email and we'll send a reset link.</p>
+                                        {forgotSent ? (
+                                            <div className="alert alert-success py-2 small">If that email is registered, a reset link has been sent.</div>
+                                        ) : (
+                                            <>
+                                                <div className="mb-3"><input type="email" className="form-control" placeholder="you@example.com" value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} /></div>
+                                                <button type="button" className="btn btn-primary w-100 fw-semibold py-2" onClick={handleForgotPw} style={{...gradientBtn, ...btnRounded}}>Send Reset</button>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -3162,7 +3249,14 @@ function App() {
     const [budgetAlerts, setBudgetAlerts] = useState([]);
     const [billsDueSoon, setBillsDueSoon] = useState([]);
     const [currentUser, setCurrentUser] = useState(() => {
-        try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; }
+        try {
+            const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
+            const sessionActive = sessionStorage.getItem('financeApp_session_active') === 'true';
+            if (expiry > Date.now() || sessionActive) {
+                return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null');
+            }
+            return null;
+        } catch (_) { return null; }
     });
 
     useEffect(() => {
@@ -3232,7 +3326,7 @@ function App() {
         }
     };
 
-    if (!currentUser) return <RegistrationScreen onRegister={handleRegister} />;
+    if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
 
     return (

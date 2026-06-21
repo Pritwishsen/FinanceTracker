@@ -1,0 +1,39 @@
+In app-v3.html, implement User Login (FT-18). Build inside RegistrationScreen as the "Sign In" tab.
+
+1. SIGN IN TAB FORM (inside RegistrationScreen, tab "Sign In"):
+   - Fields: Email (required), Password (required, show/hide toggle)
+   - Checkbox: "Remember me (stay logged in for 30 days)"
+   - Button: "Sign In"
+   - Link: "Forgot your password?" (see step 3)
+   - Link: "No account? Create one" → switches to Create Account tab
+
+2. SIGN IN LOGIC:
+   - Load stored user from localStorage 'financeApp_currentUser'
+   - Compare email (case-insensitive) and password (exact match)
+   - On valid credentials:
+     a. If "Remember me" checked: set localStorage "financeApp_session_expiry"
+        to Date.now() + (30 * 24 * 60 * 60 * 1000)
+     b. If unchecked: set sessionStorage "financeApp_session_active" = "true"
+     c. Restore Display Name as paidBy default: re-apply isDefault=true to
+        the system-managed People entry for this user
+     d. Call onLogin(user)
+   - On invalid credentials: show "Incorrect email or password." (generic, no field hint)
+   - After 5 consecutive failed attempts: show "Too many failed attempts.
+     Please try again in 15 minutes." Disable submit for 15 minutes.
+
+3. SESSION RESTORATION on App mount:
+   - Check localStorage "financeApp_session_expiry"
+     → if present and not expired: auto-login (skip login screen)
+   - Check sessionStorage "financeApp_session_active"
+     → if "true": auto-login
+   - Otherwise: show RegistrationScreen
+
+4. FORGOT PASSWORD FLOW (simplified for prototype):
+   - "Forgot your password?" link shows an inline form: Email input + "Send Reset" button
+   - On submit: show "If that email is registered, a reset link has been sent."
+     (Same message regardless of whether email exists — prevents enumeration)
+   - No actual email sending required for prototype; log to console instead
+
+5. OAUTH BUTTONS: same as FT-17 (show "coming soon" toast)
+
+Do not change any existing components. Auth state is managed in App only.
