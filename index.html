@@ -629,6 +629,13 @@ class DataService {
         history.unshift({ filename, createdAt: new Date().toISOString() });
         localStorage.setItem('financeApp_backupHistory', JSON.stringify(history.slice(0, 10)));
     }
+    static saveLatestBackup() {
+        try {
+            const backup = this.createBackup();
+            localStorage.setItem('financeApp_latestBackup', JSON.stringify(backup));
+            localStorage.setItem('financeApp_lastSaveTime', new Date().toISOString());
+        } catch (e) { /* silently ignore storage errors */ }
+    }
 }
 window.DataService = DataService;
 
@@ -1714,6 +1721,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     const [budgetAlertsEnabled, setBudgetAlertsEnabled] = useState(true);
     const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
     const [backupHistory, setBackupHistory] = useState([]);
+    const [lastSaveTime, setLastSaveTime] = useState('');
     const [restoreFile, setRestoreFile] = useState(null);
     const [restorePreview, setRestorePreview] = useState(null);
     const [restoreError, setRestoreError] = useState('');
@@ -1729,6 +1737,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     useEffect(() => {
         DataService.getSettings().then(s => setAutoBackupEnabled(s.autoBackupEnabled !== false));
         setBackupHistory(DataService.getBackupHistory());
+        setLastSaveTime(localStorage.getItem('financeApp_lastSaveTime') || '');
     }, []);
 
     const handleToggleBudgetAlerts = (enabled) => {
@@ -2045,6 +2054,12 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
                 <button className={'btn w-100 mb-2 ' + (backupDownloaded ? 'btn-success' : 'btn-primary')} onClick={handleDownloadBackup}>
                     {backupDownloaded ? <><i className="fas fa-check me-2"></i>Downloaded!</> : <><i className="fas fa-download me-2"></i>Download Backup Now</>}
                 </button>
+                {lastSaveTime && (
+                    <div className="small text-muted text-center mb-2">
+                        <i className="fas fa-shield-alt me-1 text-success"></i>
+                        Last auto-saved: <strong>{new Date(lastSaveTime).toLocaleString()}</strong>
+                    </div>
+                )}
                 {backupHistory.length > 0 && (
                     <div className="mb-3">
                         <div className="small fw-semibold text-muted mb-1">Recent backups:</div>
@@ -3024,6 +3039,7 @@ function App() {
             } else { setBudgetAlerts([]); }
             const todayStr = new Date().toISOString().split('T')[0];
             setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
+            DataService.saveLatestBackup();
         } catch (error) { console.error('Error updating data:', error); }
     };
 
