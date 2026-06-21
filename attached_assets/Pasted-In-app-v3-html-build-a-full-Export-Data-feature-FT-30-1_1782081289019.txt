@@ -1,0 +1,49 @@
+In app-v3.html, build a full Export Data feature (FT-30).
+
+1. NAVIGATION — add: { key: 'export', icon: 'fas fa-file-export', label: 'Export' }
+
+2. APP COMPONENT — add case "export" to renderScreen():
+   case "export": return <ExportData expenses={expenses} income={income}
+     categories={categories} defaultCurrency={defaultCurrency} />
+
+3. BUILD ExportData COMPONENT:
+   CONTROLS:
+   - Format selector: "CSV" (default) or "PDF (Summary)"
+     Note: PDF exports the Financial Summary view; CSV exports raw rows.
+   - Scope selector: "All Data" | "Expenses Only" | "Income Only" | "Current Month"
+   - Optional date range override: From Date / To Date inputs
+     When set, these override the scope date logic
+   - "Export" button
+
+   CSV EXPORT LOGIC:
+   Add helper: exportToCSV(filename, headers, rows)
+   - Build CSV string from headers array + rows (array of arrays)
+   - Wrap values containing commas/quotes in double quotes; escape inner quotes as ""
+   - Create Blob with type text/csv, trigger download via temporary <a> link
+
+   Expenses CSV: 9 columns:
+   Date, Description, Amount, Currency, Category, Sub Category, Paid By, Tags, Notes
+   - Tags: join tags array with semicolons e.g. "work;holiday"
+   - Category: look up name from categoryId
+   - Filename: financetracker-expenses-YYYY-MM-DD.csv
+
+   Income CSV columns:
+   Date, Source of Income, Currency, Amount, Who's Income
+   - Filename: financetracker-income-YYYY-MM-DD.csv
+
+   When scope = "All Data", export both expenses AND income as two separate
+   CSV files downloaded back-to-back (200ms setTimeout between them).
+
+   If no records match scope/date range: show toast "No records match. Export will be empty."
+
+   MULTI-CURRENCY NOTE: export amounts in original stored currency (do not convert).
+   Include a Currency column so the user knows which currency each row uses.
+
+   PDF EXPORT LOGIC (Summary view):
+   - Use window.print() with print-only CSS that hides navigation
+   - Before printing, navigate to Summary screen in App
+   - Show a 'Printing...' message that clears after 2 seconds
+   - No external PDF library needed
+
+4. All export logic is entirely client-side. No server calls.
+Do not modify DataService or any other component.

@@ -658,6 +658,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'bills', icon: 'fas fa-file-invoice-dollar', label: 'Bills' },
         { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
+        { key: 'export', icon: 'fas fa-file-export', label: 'Export' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
     ];
@@ -3242,6 +3243,153 @@ function DisplayNamePrompt({ onRegister }) {
     );
 }
 
+function ExportData({ expenses, income, categories, defaultCurrency, onNavigate }) {
+    const [format, setFormat] = useState('csv');
+    const [scope, setScope] = useState('all');
+    const [fromDate, setFromDate] = useState('');
+    const [toDate, setToDate] = useState('');
+    const [toast, setToast] = useState('');
+    const [printing, setPrinting] = useState(false);
+
+    const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
+
+    const todayStr = () => new Date().toISOString().split('T')[0];
+
+    const getDateRange = () => {
+        if (fromDate || toDate) return { from: fromDate || null, to: toDate || null };
+        if (scope === 'current-month') {
+            const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+            return { from: new Date(y, m, 1).toISOString().split('T')[0], to: new Date(y, m + 1, 0).toISOString().split('T')[0] };
+        }
+        return { from: null, to: null };
+    };
+
+    const inRange = (dateStr, from, to) => {
+        if (!dateStr) return true;
+        if (from && dateStr < from) return false;
+        if (to && dateStr > to) return false;
+        return true;
+    };
+
+    const exportToCSV = (filename, headers, rows) => {
+        const esc = (val) => { const s = String(val == null ? '' : val); return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        const lines = [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))];
+        const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+    };
+
+    const getCatName = (id) => { const c = categories.find(c => c.id === id); return c ? c.name : id || ''; };
+    const getSubName = (cid, sid) => { const c = categories.find(c => c.id === cid); if (!c || !c.subcategories) return sid || ''; const s = c.subcategories.find(s => s.id === sid); return s ? s.name : sid || ''; };
+
+    const handleExport = () => {
+        if (format === 'pdf') {
+            if (onNavigate) onNavigate('summary');
+            setPrinting(true);
+            setTimeout(() => { window.print(); setTimeout(() => setPrinting(false), 2000); }, 400);
+            return;
+        }
+        const { from, to } = getDateRange();
+        const doExp = scope !== 'income-only';
+        const doInc = scope !== 'expenses-only';
+        const filteredExp = doExp ? expenses.filter(e => inRange(e.date, from, to)) : [];
+        const filteredInc = doInc ? income.filter(i => inRange(i.date, from, to)) : [];
+        if (filteredExp.length === 0 && filteredInc.length === 0) { showToast('No records match. Export will be empty.'); return; }
+        const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Tags','Notes'];
+        const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income"];
+        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), getSubName(e.categoryId, e.subcategoryId), e.paidBy || '', (e.tags || []).join(';'), e.notes || '']);
+        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.whosIncome || i.paidBy || '']);
+        if (filteredExp.length > 0) exportToCSV(`financetracker-expenses-${todayStr()}.csv`, expHeaders, expRows);
+        if (filteredInc.length > 0) setTimeout(() => exportToCSV(`financetracker-income-${todayStr()}.csv`, incHeaders, incRows), filteredExp.length > 0 ? 200 : 0);
+    };
+
+    const scopeOptions = [
+        { value: 'all', label: 'All Data' },
+        { value: 'expenses-only', label: 'Expenses Only' },
+        { value: 'income-only', label: 'Income Only' },
+        { value: 'current-month', label: 'Current Month' }
+    ];
+    const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
+
+    return (
+        <div className="p-3" style={{maxWidth: '480px', margin: '0 auto'}}>
+            <h5 className="fw-bold mb-3"><i className="fas fa-file-export me-2 text-primary"></i>Export Data</h5>
+
+            <div className="card shadow-sm mb-3">
+                <div className="card-body">
+                    <div className="mb-3">
+                        <label className="form-label fw-semibold">Format</label>
+                        <div className="d-flex gap-2">
+                            {[['csv','CSV'],['pdf','PDF (Summary)']].map(([v, l]) => (
+                                <button key={v} onClick={() => setFormat(v)} style={{flex: 1, borderRadius: '8px', fontWeight: '600', fontSize: '0.88rem', padding: '0.5rem', border: '2px solid ' + (format === v ? '#4a6cf7' : '#dee2e6'), background: format === v ? '#eef1ff' : '#fff', color: format === v ? '#4a6cf7' : '#555', cursor: 'pointer', transition: 'all 0.15s'}}>{l}</button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {format === 'csv' && (
+                        <div className="mb-3">
+                            <label className="form-label fw-semibold">Scope</label>
+                            <div className="d-flex flex-wrap gap-2">
+                                {scopeOptions.map(o => (
+                                    <button key={o.value} onClick={() => setScope(o.value)} style={{borderRadius: '8px', fontWeight: '600', fontSize: '0.82rem', padding: '0.4rem 0.75rem', border: '2px solid ' + (scope === o.value ? '#4a6cf7' : '#dee2e6'), background: scope === o.value ? '#eef1ff' : '#fff', color: scope === o.value ? '#4a6cf7' : '#555', cursor: 'pointer', transition: 'all 0.15s'}}>{o.label}</button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {format === 'csv' && (
+                        <div className="mb-1">
+                            <label className="form-label fw-semibold">Date Range Override <span className="text-muted fw-normal small">(optional — overrides scope)</span></label>
+                            <div className="d-flex gap-2">
+                                <div className="flex-fill">
+                                    <label className="form-label small text-muted mb-1">From</label>
+                                    <input type="date" className="form-control form-control-sm" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+                                </div>
+                                <div className="flex-fill">
+                                    <label className="form-label small text-muted mb-1">To</label>
+                                    <input type="date" className="form-control form-control-sm" value={toDate} onChange={e => setToDate(e.target.value)} />
+                                </div>
+                                {(fromDate || toDate) && <div className="d-flex align-items-end pb-1"><button className="btn btn-sm btn-outline-secondary" onClick={() => { setFromDate(''); setToDate(''); }} title="Clear dates">✕</button></div>}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {format === 'pdf' && (
+                <div className="alert alert-info small mb-3">
+                    <i className="fas fa-info-circle me-2"></i>This will navigate to the Financial Summary and open your browser's print/save-as-PDF dialog.
+                </div>
+            )}
+
+            {format === 'csv' && (
+                <div className="alert alert-light small mb-3 text-muted border">
+                    <i className="fas fa-info-circle me-2"></i>Amounts are exported in their original stored currency. A Currency column is included in each file.
+                    {scope === 'all' && ' All Data exports two files: one for expenses and one for income.'}
+                </div>
+            )}
+
+            <button className="btn btn-primary w-100 fw-semibold py-2" onClick={handleExport} style={gradientBtn}>
+                <i className={'fas fa-' + (format === 'pdf' ? 'print' : 'download') + ' me-2'}></i>
+                {format === 'pdf' ? 'Print / Save as PDF' : 'Download CSV'}
+            </button>
+
+            {printing && (
+                <div className="text-center text-muted mt-3 small"><span className="spinner-border spinner-border-sm me-2"></span>Opening print dialog…</div>
+            )}
+
+            {toast && (
+                <div style={{position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)', background: '#333', color: '#fff', padding: '0.65rem 1.25rem', borderRadius: '8px', zIndex: 9999, fontSize: '0.88rem', whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(0,0,0,0.3)'}}>
+                    <i className="fas fa-exclamation-circle me-2"></i>{toast}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function ProfileScreen({ currentUser, onLogout, onUpdate }) {
     const [user, setUser] = useState({ ...currentUser });
     const [editingName, setEditingName] = useState(false);
@@ -3486,6 +3634,7 @@ function App() {
             case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
+            case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
         }
