@@ -1,0 +1,52 @@
+In app-v3.html, implement User Registration (FT-17).
+
+1. AUTH STATE IN APP COMPONENT
+   Add state: const [currentUser, setCurrentUser] = useState(null)
+   On mount: load from localStorage key "financeApp_currentUser"
+   If no currentUser → render <RegistrationScreen onRegister={handleRegister} />
+   If currentUser but no displayName confirmed → render <DisplayNamePrompt ... />
+   Otherwise → render the main app screens as normal
+
+2. BUILD RegistrationScreen COMPONENT:
+   TABS: "Create Account" | "Sign In" (Sign In = FT-18)
+
+   EMAIL/PASSWORD REGISTRATION FORM:
+   - Fields: Display Name (required, 2–50 chars), Email (required, valid format),
+     Password (required, min 8 chars, show/hide toggle),
+     Confirm Password (must match)
+   - Submit: "Create Account" button
+   - On submit:
+     a. Validate all fields (inline errors)
+     b. Save to localStorage 'financeApp_currentUser':
+        { id: Date.now(), displayName, email, authProvider: "email",
+          createdAt: new Date().toISOString() }
+     c. Save displayName to financeApp_settings.displayName
+     d. Call DataService.addPerson({ name: displayName, isDefault: true, systemManaged: true })
+     e. Call onRegister(user)
+
+   OAUTH BUTTONS (below form, separated by "or" divider):
+   - "Continue with Google" button (Google blue, Google G icon)
+   - "Continue with Facebook" button (Facebook blue, f icon)
+   For now these buttons show a toast: "OAuth coming soon — use email registration"
+   (Full OAuth integration requires server-side setup outside this prompt scope)
+
+   SIGN IN LINK: "Already have an account? Sign in" → switches to Sign In tab
+
+3. BUILD DisplayNamePrompt COMPONENT (full-screen):
+   Shown to users who registered via OAuth without setting a Display Name.
+   - Heading: "What should we call you?"
+   - Input: Display Name (required, 2–50 chars)
+   - Button: "Continue"
+   - This step cannot be skipped
+   - On save: update financeApp_currentUser.displayName, update financeApp_settings.displayName,
+     call DataService.addPerson({ name, isDefault: true, systemManaged: true })
+     then call onRegister(updatedUser)
+
+4. VALIDATION:
+   - Display Name: 2–50 chars, allowed chars: letters, spaces, hyphens, apostrophes
+   - Email: standard format validation
+   - Password: minimum 8 characters
+   - Confirm Password: must match password exactly
+   - All validation errors shown inline under the relevant field
+
+No external auth libraries. Store user in localStorage only for this prototype.

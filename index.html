@@ -2986,6 +2986,172 @@ function RecurringList({ onUpdate }) {
     );
 }
 
+function RegistrationScreen({ onRegister }) {
+    const [activeTab, setActiveTab] = useState('register');
+    const [formData, setFormData] = useState({ displayName: '', email: '', password: '', confirmPassword: '' });
+    const [errors, setErrors] = useState({});
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showPassword, setShowPassword] = useState(false);
+    const [showConfirm, setShowConfirm] = useState(false);
+    const [oauthToast, setOauthToast] = useState('');
+
+    const handleChange = (field, value) => { setFormData(prev => ({ ...prev, [field]: value })); if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' })); };
+
+    const validate = () => {
+        const e = {};
+        const nameRx = /^[a-zA-Z\s\-']+$/;
+        const n = formData.displayName.trim();
+        if (!n || n.length < 2) e.displayName = 'Display name must be at least 2 characters';
+        else if (n.length > 50) e.displayName = 'Display name must be 50 characters or fewer';
+        else if (!nameRx.test(n)) e.displayName = 'Only letters, spaces, hyphens and apostrophes allowed';
+        if (!formData.email.trim()) e.email = 'Email is required';
+        else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) e.email = 'Enter a valid email address';
+        if (!formData.password) e.password = 'Password is required';
+        else if (formData.password.length < 8) e.password = 'Password must be at least 8 characters';
+        if (!formData.confirmPassword) e.confirmPassword = 'Please confirm your password';
+        else if (formData.password !== formData.confirmPassword) e.confirmPassword = 'Passwords do not match';
+        return e;
+    };
+
+    const handleSubmit = async (ev) => {
+        ev.preventDefault();
+        const errs = validate();
+        if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+        setIsSubmitting(true);
+        try {
+            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), authProvider: 'email', createdAt: new Date().toISOString() };
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+            await DataService.updateSettings({ displayName: user.displayName });
+            try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {}
+            onRegister(user);
+        } catch (err) { setErrors({ general: 'Registration failed. Please try again.' }); setIsSubmitting(false); }
+    };
+
+    const showOauthToast = () => { setOauthToast('OAuth coming soon — use email registration'); setTimeout(() => setOauthToast(''), 3000); };
+
+    const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
+    const cardRounded = { borderRadius: '16px', border: 'none' };
+    const btnRounded = { borderRadius: '10px' };
+
+    return (
+        <div style={{minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)', padding: '1rem'}}>
+            <div style={{width: '100%', maxWidth: '420px'}}>
+                <div className="text-center text-white mb-4">
+                    <i className="fas fa-wallet fa-3x mb-3" style={{opacity: 0.9}}></i>
+                    <h1 style={{fontWeight: '700', fontSize: '1.8rem'}}>Personal Finance</h1>
+                    <p style={{opacity: 0.85, marginBottom: 0}}>Track your money, reach your goals</p>
+                </div>
+                <div className="card shadow-lg" style={cardRounded}>
+                    <div className="card-body p-4">
+                        <ul className="nav nav-pills nav-fill mb-4" style={{background: '#f8f9fa', borderRadius: '10px', padding: '4px'}}>
+                            <li className="nav-item"><button className={'nav-link' + (activeTab === 'register' ? ' active' : '')} style={{borderRadius: '8px', fontWeight: '600'}} onClick={() => setActiveTab('register')}>Create Account</button></li>
+                            <li className="nav-item"><button className={'nav-link' + (activeTab === 'signin' ? ' active' : '')} style={{borderRadius: '8px', fontWeight: '600'}} onClick={() => setActiveTab('signin')}>Sign In</button></li>
+                        </ul>
+                        {activeTab === 'register' && (
+                            <form onSubmit={handleSubmit} noValidate>
+                                {errors.general && <div className="alert alert-danger py-2 small mb-3">{errors.general}</div>}
+                                <div className="mb-3">
+                                    <label className="form-label fw-semibold">Display Name</label>
+                                    <input type="text" className={'form-control' + (errors.displayName ? ' is-invalid' : '')} placeholder="e.g. Alex Smith" value={formData.displayName} onChange={e => handleChange('displayName', e.target.value)} />
+                                    {errors.displayName && <div className="invalid-feedback">{errors.displayName}</div>}
+                                </div>
+                                <div className="mb-3">
+                                    <label className="form-label fw-semibold">Email Address</label>
+                                    <input type="email" className={'form-control' + (errors.email ? ' is-invalid' : '')} placeholder="you@example.com" value={formData.email} onChange={e => handleChange('email', e.target.value)} autoComplete="email" />
+                                    {errors.email && <div className="invalid-feedback">{errors.email}</div>}
+                                </div>
+                                <div className="mb-3">
+                                    <label className="form-label fw-semibold">Password</label>
+                                    <div className="input-group">
+                                        <input type={showPassword ? 'text' : 'password'} className={'form-control' + (errors.password ? ' is-invalid' : '')} placeholder="Min. 8 characters" value={formData.password} onChange={e => handleChange('password', e.target.value)} autoComplete="new-password" />
+                                        <button type="button" className="btn btn-outline-secondary" onClick={() => setShowPassword(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showPassword ? 'eye-slash' : 'eye')}></i></button>
+                                        {errors.password && <div className="invalid-feedback">{errors.password}</div>}
+                                    </div>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="form-label fw-semibold">Confirm Password</label>
+                                    <div className="input-group">
+                                        <input type={showConfirm ? 'text' : 'password'} className={'form-control' + (errors.confirmPassword ? ' is-invalid' : '')} placeholder="Re-enter your password" value={formData.confirmPassword} onChange={e => handleChange('confirmPassword', e.target.value)} autoComplete="new-password" />
+                                        <button type="button" className="btn btn-outline-secondary" onClick={() => setShowConfirm(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showConfirm ? 'eye-slash' : 'eye')}></i></button>
+                                        {errors.confirmPassword && <div className="invalid-feedback">{errors.confirmPassword}</div>}
+                                    </div>
+                                </div>
+                                <button type="submit" className="btn btn-primary w-100 fw-semibold py-2 mb-3" disabled={isSubmitting} style={{...gradientBtn, ...btnRounded}}>
+                                    {isSubmitting ? <><span className="spinner-border spinner-border-sm me-2"></span>Creating...</> : 'Create Account'}
+                                </button>
+                                <div className="d-flex align-items-center my-3"><hr className="flex-grow-1 m-0" /><span className="px-2 text-muted small">or</span><hr className="flex-grow-1 m-0" /></div>
+                                <div className="d-grid gap-2">
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
+                                </div>
+                                <p className="text-center small text-muted mt-3 mb-0">Already have an account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('signin')}>Sign in</button></p>
+                            </form>
+                        )}
+                        {activeTab === 'signin' && (
+                            <div className="text-center py-2">
+                                <i className="fas fa-lock fa-2x text-muted mb-3 d-block"></i>
+                                <h6 className="fw-semibold mb-2">Sign In</h6>
+                                <p className="text-muted small mb-3">Your data is stored on this device. Sign in with an existing account or create a new one.</p>
+                                <div className="d-grid gap-2 mb-3">
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
+                                </div>
+                                <p className="small text-muted mb-0">No account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('register')}>Create one</button></p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+            {oauthToast && (
+                <div style={{position: 'fixed', bottom: '2rem', left: '50%', transform: 'translateX(-50%)', background: '#333', color: '#fff', padding: '0.75rem 1.5rem', borderRadius: '8px', zIndex: 9999, fontSize: '0.9rem', whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(0,0,0,0.3)'}}>
+                    <i className="fas fa-info-circle me-2"></i>{oauthToast}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function DisplayNamePrompt({ onRegister }) {
+    const [name, setName] = useState('');
+    const [error, setError] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    const handleSave = async () => {
+        const trimmed = name.trim();
+        if (!trimmed || trimmed.length < 2) { setError('Name must be at least 2 characters'); return; }
+        if (trimmed.length > 50) { setError('Name must be 50 characters or fewer'); return; }
+        if (!/^[a-zA-Z\s\-']+$/.test(trimmed)) { setError("Only letters, spaces, hyphens and apostrophes allowed"); return; }
+        setSaving(true);
+        try {
+            const user = JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}');
+            const updated = { ...user, displayName: trimmed };
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(updated));
+            await DataService.updateSettings({ displayName: trimmed });
+            try { DataService.addPerson({ name: trimmed, isDefault: true, systemManaged: true }); } catch (_) {}
+            onRegister(updated);
+        } catch (e) { setError('Failed to save. Please try again.'); setSaving(false); }
+    };
+
+    return (
+        <div style={{minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)', padding: '1rem'}}>
+            <div style={{width: '100%', maxWidth: '380px'}}>
+                <div className="card shadow-lg" style={{borderRadius: '16px', border: 'none'}}>
+                    <div className="card-body p-4 text-center">
+                        <i className="fas fa-user-circle fa-3x mb-3" style={{color: '#4a6cf7'}}></i>
+                        <h4 className="fw-bold mb-1">What should we call you?</h4>
+                        <p className="text-muted small mb-4">This name will appear across your expenses and reports.</p>
+                        <input type="text" className={'form-control form-control-lg text-center mb-2' + (error ? ' is-invalid' : '')} placeholder="Your name" value={name} onChange={e => { setName(e.target.value); setError(''); }} autoFocus />
+                        {error && <div className="invalid-feedback d-block mb-2">{error}</div>}
+                        <button className="btn btn-primary w-100 fw-semibold py-2 mt-2" onClick={handleSave} disabled={saving} style={{borderRadius: '10px', background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none'}}>
+                            {saving ? <><span className="spinner-border spinner-border-sm me-2"></span>Saving...</> : 'Continue'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -2995,6 +3161,9 @@ function App() {
     const [people, setPeople] = useState([]);
     const [budgetAlerts, setBudgetAlerts] = useState([]);
     const [billsDueSoon, setBillsDueSoon] = useState([]);
+    const [currentUser, setCurrentUser] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; }
+    });
 
     useEffect(() => {
         const loadData = async () => {
@@ -3043,6 +3212,8 @@ function App() {
         } catch (error) { console.error('Error updating data:', error); }
     };
 
+    const handleRegister = (user) => { setCurrentUser(user); };
+
     const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
 
     const renderScreen = () => {
@@ -3060,6 +3231,9 @@ function App() {
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
         }
     };
+
+    if (!currentUser) return <RegistrationScreen onRegister={handleRegister} />;
+    if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
 
     return (
         <div className="mobile-app">
