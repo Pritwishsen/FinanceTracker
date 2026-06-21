@@ -3094,10 +3094,13 @@ function RegistrationScreen({ onRegister, onLogin }) {
                 </div>
                 <div className="card shadow-lg" style={cardRounded}>
                     <div className="card-body p-4">
-                        <ul className="nav nav-pills nav-fill mb-4" style={{background: '#f8f9fa', borderRadius: '10px', padding: '4px'}}>
-                            <li className="nav-item"><button className={'nav-link' + (activeTab === 'register' ? ' active' : '')} style={{borderRadius: '8px', fontWeight: '600'}} onClick={() => setActiveTab('register')}>Create Account</button></li>
-                            <li className="nav-item"><button className={'nav-link' + (activeTab === 'signin' ? ' active' : '')} style={{borderRadius: '8px', fontWeight: '600'}} onClick={() => setActiveTab('signin')}>Sign In</button></li>
-                        </ul>
+                        <div className="d-flex mb-4" style={{background: '#f8f9fa', borderRadius: '10px', padding: '4px', gap: '4px'}}>
+                            {[['register','Create Account'],['signin','Sign In']].map(([tab, label]) => (
+                                <button key={tab} onClick={() => setActiveTab(tab)} style={{flex: 1, borderRadius: '8px', fontWeight: '600', fontSize: '0.88rem', padding: '0.45rem 0.5rem', border: 'none', whiteSpace: 'nowrap', cursor: 'pointer', background: activeTab === tab ? '#0d6efd' : 'transparent', color: activeTab === tab ? '#fff' : '#555', boxShadow: activeTab === tab ? '0 1px 4px rgba(0,0,0,0.15)' : 'none', transition: 'all 0.15s'}}>
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
                         {activeTab === 'register' && (
                             <form onSubmit={handleSubmit} noValidate>
                                 {errors.general && <div className="alert alert-danger py-2 small mb-3">{errors.general}</div>}
