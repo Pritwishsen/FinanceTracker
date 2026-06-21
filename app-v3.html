@@ -573,8 +573,44 @@ class DataService {
         bill.nextDueDate = d.toISOString().split('T')[0]; bill.isPaid = false;
         this.saveBills(bills);
     }
+    static getRecurring() { return JSON.parse(localStorage.getItem('financeApp_recurring') || '[]'); }
+    static saveRecurring(r) { localStorage.setItem('financeApp_recurring', JSON.stringify(r)); }
+    static addRecurring({ templateExpense, frequency, endDate, type }) {
+        const schedule = { id: DataService._uniqueId(), templateExpense, frequency, endDate: endDate || '', type, nextDue: computeNextDue(new Date(), frequency), lastGenerated: null, isActive: true };
+        const r = this.getRecurring(); r.push(schedule); this.saveRecurring(r); return schedule;
+    }
+    static pauseRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = false; this.saveRecurring(r); } }
+    static resumeRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = true; this.saveRecurring(r); } }
+    static deleteRecurring(id) { const r = this.getRecurring(); const i = r.findIndex(x => x.id === id); if (i !== -1) { r.splice(i, 1); this.saveRecurring(r); } }
+    static async processRecurringSchedules() {
+        const schedules = this.getRecurring();
+        const today = new Date().toISOString().split('T')[0];
+        let changed = false;
+        for (const schedule of schedules) {
+            if (!schedule.isActive) continue;
+            if (schedule.endDate && today > schedule.endDate) continue;
+            while (schedule.nextDue <= today) {
+                const instance = { ...schedule.templateExpense, id: DataService._uniqueId(), date: schedule.nextDue, createdAt: new Date().toISOString() };
+                if (schedule.type === 'expense') await this.addExpense(instance);
+                else await this.addIncome(instance);
+                schedule.lastGenerated = schedule.nextDue;
+                schedule.nextDue = computeNextDue(schedule.nextDue, schedule.frequency);
+                changed = true;
+            }
+        }
+        if (changed) this.saveRecurring(schedules);
+    }
 }
 window.DataService = DataService;
+
+function computeNextDue(fromDate, frequency) {
+    const d = new Date(fromDate);
+    if (frequency === 'daily') d.setDate(d.getDate() + 1);
+    if (frequency === 'weekly') d.setDate(d.getDate() + 7);
+    if (frequency === 'monthly') d.setMonth(d.getMonth() + 1);
+    if (frequency === 'yearly') d.setFullYear(d.getFullYear() + 1);
+    return d.toISOString().split('T')[0];
+}
 
 function Navigation({ currentScreen, onScreenChange }) {
     const navItems = [
@@ -584,6 +620,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'income', icon: 'fas fa-wallet', label: 'Income' },
         { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' },
         { key: 'bills', icon: 'fas fa-file-invoice-dollar', label: 'Bills' },
+        { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
@@ -619,6 +656,9 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
     const [recentlyUsed, setRecentlyUsed] = useState([]);
+    const [isRecurring, setIsRecurring] = useState(false);
+    const [recurringFreq, setRecurringFreq] = useState('monthly');
+    const [recurringEndDate, setRecurringEndDate] = useState('');
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
     useEffect(() => { if (!editExpense) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
@@ -639,7 +679,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
             let description = formData.description.trim();
             if (!description && selectedCategory) description = selectedCategory.name + ' - ' + formData.subcategory;
             const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) };
-            if (editExpense) { DataService.updateExpense(editExpense.id, expenseData); } else { DataService.addExpenseWithConversion(expenseData); }
+            if (editExpense) { DataService.updateExpense(editExpense.id, expenseData); } else { DataService.addExpenseWithConversion(expenseData); if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); } }
             setShowSuccess(true);
             setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save expense. Please try again.' }); }
@@ -735,6 +775,26 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                     {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
                     <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
                 </div>
+                {!editExpense && (
+                    <div className="form-group">
+                        <div className="form-check">
+                            <input className="form-check-input" type="checkbox" id="isRecurring" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} />
+                            <label className="form-check-label" htmlFor="isRecurring"><i className="fas fa-redo me-1"></i>Make this a recurring expense</label>
+                        </div>
+                        {isRecurring && (
+                            <div className="mt-2">
+                                <select className="form-select mb-2" value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)}>
+                                    <option value="daily">Daily</option>
+                                    <option value="weekly">Weekly</option>
+                                    <option value="monthly">Monthly</option>
+                                    <option value="yearly">Yearly</option>
+                                </select>
+                                <label className="form-label small text-muted">End Date (Optional)</label>
+                                <input type="date" className="form-control" value={recurringEndDate} min={new Date().toISOString().split('T')[0]} onChange={e => setRecurringEndDate(e.target.value)} />
+                            </div>
+                        )}
+                    </div>
+                )}
                 <div className="form-actions">
                     <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={isSubmitting}>Cancel</button>
                     <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
@@ -1101,6 +1161,9 @@ function IncomeForm({ income, onUpdate }) {
     const [showSuccess, setShowSuccess] = useState(false);
     const [editingIncome, setEditingIncome] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+    const [isRecurring, setIsRecurring] = useState(false);
+    const [recurringFreq, setRecurringFreq] = useState('monthly');
+    const [recurringEndDate, setRecurringEndDate] = useState('');
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
@@ -1111,7 +1174,7 @@ function IncomeForm({ income, onUpdate }) {
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
         try {
             const incomeData = { ...formData, amount: parseFloat(formData.amount) };
-            if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); }
+            if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); if (isRecurring) { DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }); } }
             setShowSuccess(true);
             setTimeout(() => { setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP' }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
@@ -1175,6 +1238,26 @@ function IncomeForm({ income, onUpdate }) {
                         )}
                         <div className="form-text">{people.length > 0 ? 'Select who received this income' : 'Enter who received this income (leave empty if it\'s your own)'}</div>
                     </div>
+                    {!editingIncome && (
+                        <div className="form-group">
+                            <div className="form-check">
+                                <input className="form-check-input" type="checkbox" id="isRecurringIncome" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} />
+                                <label className="form-check-label" htmlFor="isRecurringIncome"><i className="fas fa-redo me-1"></i>Make this a recurring income</label>
+                            </div>
+                            {isRecurring && (
+                                <div className="mt-2">
+                                    <select className="form-select mb-2" value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)}>
+                                        <option value="daily">Daily</option>
+                                        <option value="weekly">Weekly</option>
+                                        <option value="monthly">Monthly</option>
+                                        <option value="yearly">Yearly</option>
+                                    </select>
+                                    <label className="form-label small text-muted">End Date (Optional)</label>
+                                    <input type="date" className="form-control" value={recurringEndDate} min={new Date().toISOString().split('T')[0]} onChange={e => setRecurringEndDate(e.target.value)} />
+                                </div>
+                            )}
+                        </div>
+                    )}
                     <div className="form-actions">
                         {editingIncome && (<button type="button" className="btn btn-secondary" onClick={handleCancelEdit} disabled={isSubmitting}>Cancel</button>)}
                         <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
@@ -2560,6 +2643,103 @@ function BillTracker({ categories, onUpdate }) {
     );
 }
 
+function RecurringList({ onUpdate }) {
+    const [schedules, setSchedules] = useState([]);
+    const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+    const load = () => setSchedules(DataService.getRecurring());
+    useEffect(() => { load(); }, []);
+
+    const today = new Date().toISOString().split('T')[0];
+
+    const getStatus = (s) => {
+        if (s.endDate && today > s.endDate) return 'ended';
+        if (!s.isActive) return 'paused';
+        return 'active';
+    };
+
+    const handlePauseResume = (s) => {
+        if (s.isActive) DataService.pauseRecurring(s.id);
+        else DataService.resumeRecurring(s.id);
+        load(); onUpdate();
+    };
+
+    const handleDelete = (id) => {
+        DataService.deleteRecurring(id);
+        setDeleteConfirm(null); load(); onUpdate();
+    };
+
+    const freqLabel = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
+
+    return (
+        <div className="screen">
+            <div className="screen-header"><h2><i className="fas fa-redo me-2"></i>Recurring Transactions</h2></div>
+            {schedules.length === 0 ? (
+                <div className="empty-state">
+                    <i className="fas fa-redo fa-3x"></i>
+                    <h4>No recurring transactions</h4>
+                    <p>When adding an expense or income, tick "Make this recurring" to set one up.</p>
+                </div>
+            ) : (
+                <div style={{padding: '0 1rem 1rem'}}>
+                    {schedules.map(s => {
+                        const status = getStatus(s);
+                        const t = s.templateExpense || {};
+                        const isDueToday = s.nextDue === today;
+                        return (
+                            <div key={s.id} className="card mb-3 shadow-sm" style={{opacity: status === 'ended' ? 0.6 : 1}}>
+                                <div className="card-body p-3">
+                                    <div className="d-flex justify-content-between align-items-start mb-2">
+                                        <div>
+                                            <span className={`badge me-1 ${s.type === 'expense' ? 'bg-danger' : 'bg-success'}`}>{s.type === 'expense' ? 'Expense' : 'Income'}</span>
+                                            {status === 'active' && <span className="badge bg-success me-1">Active</span>}
+                                            {status === 'paused' && <span className="badge bg-warning text-dark me-1">Paused</span>}
+                                            {status === 'ended' && <span className="badge bg-secondary me-1">Ended</span>}
+                                            {isDueToday && status === 'active' && <span className="badge bg-primary">Due Today</span>}
+                                        </div>
+                                        <div className="d-flex gap-1">
+                                            {status !== 'ended' && (
+                                                <button className={`btn btn-sm ${s.isActive ? 'btn-outline-warning' : 'btn-outline-success'}`} onClick={() => handlePauseResume(s)} title={s.isActive ? 'Pause' : 'Resume'}>
+                                                    <i className={`fas fa-${s.isActive ? 'pause' : 'play'}`}></i>
+                                                </button>
+                                            )}
+                                            <button className="btn btn-sm btn-outline-danger" onClick={() => setDeleteConfirm(s)} title="Delete"><i className="fas fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                    <div className="fw-semibold">{t.description || t.source || '—'}</div>
+                                    <div className="text-muted small">
+                                        {ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')} &bull; {freqLabel(s.frequency)}
+                                        {t.paidBy && <> &bull; {t.paidBy}</>}
+                                    </div>
+                                    <div className="small mt-1">
+                                        <span className="text-muted">Next: </span><strong>{s.nextDue}</strong>
+                                        {s.lastGenerated && <> &bull; <span className="text-muted">Last run: {s.lastGenerated}</span></>}
+                                        {s.endDate && <> &bull; <span className="text-muted">Ends: {s.endDate}</span></>}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+            {deleteConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Delete Recurring</h5></div>
+                            <div className="modal-body"><p>Delete the recurring <strong>{deleteConfirm.type}</strong> for <strong>{(deleteConfirm.templateExpense || {}).description || (deleteConfirm.templateExpense || {}).source || 'this item'}</strong>? Future transactions will no longer be generated.</p></div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
+                                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -2573,6 +2753,7 @@ function App() {
     useEffect(() => {
         const loadData = async () => {
             try {
+                await DataService.processRecurringSchedules();
                 const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
                     DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
                 ]);
@@ -2618,6 +2799,7 @@ function App() {
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} />;
             case 'bills': return <BillTracker categories={categories} onUpdate={handleDataUpdate} />;
+            case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;

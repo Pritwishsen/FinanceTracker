@@ -1,0 +1,78 @@
+In app-v3.html, implement Recurring Transactions (FT-20).
+
+1. DATASERVICE — add recurring methods:
+   getRecurring(): return JSON.parse(localStorage.getItem("financeApp_recurring") || "[]")
+   saveRecurring(r): localStorage.setItem("financeApp_recurring", JSON.stringify(r))
+   addRecurring({ templateExpense, frequency, endDate, type }):
+     // type: "expense" or "income"
+     const schedule = { id: Date.now(), templateExpense, frequency,
+       endDate: endDate || "", type,
+       nextDue: computeNextDue(new Date(), frequency),
+       lastGenerated: null, isActive: true };
+     push, saveRecurring(), return schedule
+   pauseRecurring(id): find, set isActive=false, saveRecurring()
+   resumeRecurring(id): find, set isActive=true, saveRecurring()
+   deleteRecurring(id): splice, saveRecurring()
+
+   ADD computeNextDue(fromDate, frequency) helper:
+     const d = new Date(fromDate);
+     if (frequency === "daily") d.setDate(d.getDate() + 1);
+     if (frequency === "weekly") d.setDate(d.getDate() + 7);
+     if (frequency === "monthly") d.setMonth(d.getMonth() + 1);
+     if (frequency === "yearly") d.setFullYear(d.getFullYear() + 1);
+     return d.toISOString().split("T")[0];
+
+2. ADD processRecurringSchedules() TO DataService (called on every app load):
+   static async processRecurringSchedules() {
+     const schedules = this.getRecurring();
+     const today = new Date().toISOString().split("T")[0];
+     let changed = false;
+     for (const schedule of schedules) {
+       if (!schedule.isActive) continue;
+       if (schedule.endDate && today > schedule.endDate) continue;
+       while (schedule.nextDue <= today) {
+         const instance = { ...schedule.templateExpense,
+           id: Date.now() + Math.random(),
+           date: schedule.nextDue,
+           createdAt: new Date().toISOString() };
+         if (schedule.type === "expense") await this.addExpense(instance);
+         else await this.addIncome(instance);
+         schedule.lastGenerated = schedule.nextDue;
+         schedule.nextDue = computeNextDue(schedule.nextDue, schedule.frequency);
+         changed = true;
+       }
+     }
+     if (changed) this.saveRecurring(schedules);
+   }
+
+3. CALL processRecurringSchedules() in App loadData() before loading expenses.
+
+4. EXPENSE FORM — add recurring toggle at bottom of form:
+   <div className="form-check mt-2">
+     <input type="checkbox" checked={isRecurring}
+       onChange={e => setIsRecurring(e.target.checked)} />
+     <label>Make this a recurring expense</label>
+   </div>
+   When isRecurring is true, show frequency select:
+   <select value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)}>
+     <option value="daily">Daily</option>
+     <option value="weekly">Weekly</option>
+     <option value="monthly">Monthly</option>
+     <option value="yearly">Yearly</option>
+   </select>
+   And optional End Date: <input type="date" ... />
+   On save: if isRecurring, call DataService.addRecurring({ templateExpense: savedExpense,
+     frequency: recurringFreq, endDate: recurringEndDate, type: "expense" })
+
+5. INCOME FORM — same recurring toggle as Expense Form. type: "income"
+
+6. NAVIGATION — add nav item:
+   { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' }
+
+7. BUILD RecurringList COMPONENT (renderScreen case "recurring"):
+   - Show all schedules in a table:
+     Columns: Type, Description, Amount, Frequency, Next Due, Status, Actions
+   - Status badge: Active (green) | Paused (amber) | Ended (grey)
+   - "Due Today" badge if nextDue === today
+   - Actions: Pause / Resume toggle, Delete (with confirmation modal)
+   - Empty state: "No recurring transactions set up yet."
