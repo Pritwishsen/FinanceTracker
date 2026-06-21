@@ -1,0 +1,41 @@
+In app-v3.html, implement User Profile & Logout (FT-19).
+
+1. NAVIGATION — add Profile icon button to the app header (top-right):
+   <button className="btn btn-sm btn-outline-light" onClick={() => setScreen("profile")}
+     title="My Profile">
+     <i className="fas fa-user-circle"></i>
+   </button>
+
+2. APP COMPONENT — add case "profile" to renderScreen():
+   case "profile": return <ProfileScreen currentUser={currentUser}
+     onLogout={handleLogout} onUpdate={handleDataUpdate} />
+
+3. BUILD ProfileScreen COMPONENT:
+
+   PROFILE DETAILS SECTION:
+   - Display Name: editable text input with Save / Cancel buttons
+     - Same validation as FT-13: 2–50 chars
+     - On save: call DataService.migratePersonName(oldName, newName),
+       update financeApp_currentUser.displayName, update financeApp_settings.displayName,
+       update system-managed People entry via DataService.updatePerson()
+   - Email: read-only label (cannot be changed)
+   - Auth Provider: read-only ("Email & Password", "Google", or "Facebook")
+   - Account created: read-only date
+
+   CHANGE PASSWORD SECTION (only show if authProvider === "email"):
+   - Fields: Current Password, New Password (min 8 chars), Confirm New Password
+   - Button: "Change Password"
+   - Validate current password matches stored password before allowing change
+   - On success: update stored password, show "Password changed successfully."
+   - On wrong current password: "Current password is incorrect."
+
+   LOGOUT BUTTON (prominent, bottom of screen):
+   - Text: "Log Out"
+   - On click: show confirmation: "Are you sure you want to log out?"
+   - On confirm:
+     a. Remove "financeApp_session_expiry" from localStorage
+     b. Remove "financeApp_session_active" from sessionStorage
+     c. Call onLogout() → App sets currentUser = null → shows RegistrationScreen
+
+4. Keep all app data (expenses, income, categories, settings) intact on logout.
+   Only session tokens are cleared. User data remains for next login.

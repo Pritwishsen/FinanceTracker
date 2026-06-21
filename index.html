@@ -3239,6 +3239,166 @@ function DisplayNamePrompt({ onRegister }) {
     );
 }
 
+function ProfileScreen({ currentUser, onLogout, onUpdate }) {
+    const [user, setUser] = useState({ ...currentUser });
+    const [editingName, setEditingName] = useState(false);
+    const [newName, setNewName] = useState(user.displayName || '');
+    const [nameError, setNameError] = useState('');
+    const [nameSaving, setNameSaving] = useState(false);
+    const [nameSuccess, setNameSuccess] = useState('');
+    const [currPw, setCurrPw] = useState('');
+    const [newPw, setNewPw] = useState('');
+    const [confirmPw, setConfirmPw] = useState('');
+    const [pwError, setPwError] = useState('');
+    const [pwSuccess, setPwSuccess] = useState('');
+    const [showCurrPw, setShowCurrPw] = useState(false);
+    const [showNewPw, setShowNewPw] = useState(false);
+    const [showConfirmPw, setShowConfirmPw] = useState(false);
+    const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+
+    const handleSaveName = async () => {
+        const trimmed = newName.trim();
+        if (!trimmed || trimmed.length < 2) { setNameError('Name must be at least 2 characters'); return; }
+        if (trimmed.length > 50) { setNameError('Name must be 50 characters or fewer'); return; }
+        if (!/^[a-zA-Z\s\-']+$/.test(trimmed)) { setNameError("Only letters, spaces, hyphens and apostrophes allowed"); return; }
+        setNameSaving(true);
+        try {
+            const oldName = user.displayName;
+            if (oldName && oldName !== trimmed) DataService.migratePersonName(oldName, trimmed);
+            const people = DataService.getPeople();
+            const match = people.find(p => p.name === oldName && p.systemManaged);
+            if (match) { try { DataService.updatePerson(match.id, { name: trimmed }); } catch (_) {} }
+            const updated = { ...user, displayName: trimmed };
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(updated));
+            await DataService.updateSettings({ displayName: trimmed });
+            setUser(updated);
+            setEditingName(false);
+            setNameSuccess('Display name updated.');
+            setTimeout(() => setNameSuccess(''), 3000);
+            if (onUpdate) onUpdate();
+        } catch (e) { setNameError('Failed to save. Please try again.'); }
+        setNameSaving(false);
+    };
+
+    const handleChangePw = () => {
+        setPwError(''); setPwSuccess('');
+        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}'); } catch (_) { return {}; } })();
+        if (stored.password !== currPw) { setPwError('Current password is incorrect.'); return; }
+        if (!newPw || newPw.length < 8) { setPwError('New password must be at least 8 characters.'); return; }
+        if (newPw !== confirmPw) { setPwError('New passwords do not match.'); return; }
+        stored.password = newPw;
+        localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+        setCurrPw(''); setNewPw(''); setConfirmPw('');
+        setPwSuccess('Password changed successfully.');
+        setTimeout(() => setPwSuccess(''), 4000);
+    };
+
+    const handleLogoutConfirm = () => {
+        localStorage.removeItem('financeApp_session_expiry');
+        sessionStorage.removeItem('financeApp_session_active');
+        onLogout();
+    };
+
+    const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
+    const providerLabel = { email: 'Email & Password', google: 'Google', facebook: 'Facebook' };
+    const createdDate = user.createdAt ? new Date(user.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
+
+    return (
+        <div className="p-3" style={{maxWidth: '480px', margin: '0 auto'}}>
+            <div className="card mb-3 shadow-sm">
+                <div className="card-header fw-semibold"><i className="fas fa-user-circle me-2 text-primary"></i>Profile Details</div>
+                <div className="card-body">
+                    {nameSuccess && <div className="alert alert-success py-2 small mb-3">{nameSuccess}</div>}
+                    <div className="mb-3">
+                        <label className="form-label fw-semibold small text-muted text-uppercase" style={{fontSize: '0.7rem', letterSpacing: '0.05em'}}>Display Name</label>
+                        {editingName ? (
+                            <div>
+                                <input type="text" className={'form-control mb-2' + (nameError ? ' is-invalid' : '')} value={newName} onChange={e => { setNewName(e.target.value); setNameError(''); }} autoFocus />
+                                {nameError && <div className="invalid-feedback d-block mb-2">{nameError}</div>}
+                                <div className="d-flex gap-2">
+                                    <button className="btn btn-primary btn-sm fw-semibold" onClick={handleSaveName} disabled={nameSaving} style={gradientBtn}>{nameSaving ? 'Saving…' : 'Save'}</button>
+                                    <button className="btn btn-outline-secondary btn-sm" onClick={() => { setEditingName(false); setNewName(user.displayName || ''); setNameError(''); }}>Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="d-flex align-items-center gap-2">
+                                <span className="fw-semibold">{user.displayName}</span>
+                                <button className="btn btn-outline-secondary btn-sm" onClick={() => { setEditingName(true); setNewName(user.displayName || ''); }}><i className="fas fa-pencil-alt me-1"></i>Edit</button>
+                            </div>
+                        )}
+                    </div>
+                    <div className="mb-3">
+                        <label className="form-label fw-semibold small text-muted text-uppercase" style={{fontSize: '0.7rem', letterSpacing: '0.05em'}}>Email</label>
+                        <div className="p-2 rounded bg-light text-muted small">{user.email || '—'}</div>
+                    </div>
+                    <div className="mb-3">
+                        <label className="form-label fw-semibold small text-muted text-uppercase" style={{fontSize: '0.7rem', letterSpacing: '0.05em'}}>Sign-in Method</label>
+                        <div className="p-2 rounded bg-light text-muted small">{providerLabel[user.authProvider] || user.authProvider || '—'}</div>
+                    </div>
+                    <div>
+                        <label className="form-label fw-semibold small text-muted text-uppercase" style={{fontSize: '0.7rem', letterSpacing: '0.05em'}}>Account Created</label>
+                        <div className="p-2 rounded bg-light text-muted small">{createdDate}</div>
+                    </div>
+                </div>
+            </div>
+
+            {user.authProvider === 'email' && (
+                <div className="card mb-3 shadow-sm">
+                    <div className="card-header fw-semibold"><i className="fas fa-lock me-2 text-primary"></i>Change Password</div>
+                    <div className="card-body">
+                        {pwError && <div className="alert alert-danger py-2 small mb-3">{pwError}</div>}
+                        {pwSuccess && <div className="alert alert-success py-2 small mb-3">{pwSuccess}</div>}
+                        <div className="mb-3">
+                            <label className="form-label fw-semibold small">Current Password</label>
+                            <div className="input-group">
+                                <input type={showCurrPw ? 'text' : 'password'} className="form-control" value={currPw} onChange={e => { setCurrPw(e.target.value); setPwError(''); }} autoComplete="current-password" />
+                                <button type="button" className="btn btn-outline-secondary" onClick={() => setShowCurrPw(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showCurrPw ? 'eye-slash' : 'eye')}></i></button>
+                            </div>
+                        </div>
+                        <div className="mb-3">
+                            <label className="form-label fw-semibold small">New Password <span className="text-muted fw-normal">(min. 8 characters)</span></label>
+                            <div className="input-group">
+                                <input type={showNewPw ? 'text' : 'password'} className="form-control" value={newPw} onChange={e => { setNewPw(e.target.value); setPwError(''); }} autoComplete="new-password" />
+                                <button type="button" className="btn btn-outline-secondary" onClick={() => setShowNewPw(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showNewPw ? 'eye-slash' : 'eye')}></i></button>
+                            </div>
+                        </div>
+                        <div className="mb-3">
+                            <label className="form-label fw-semibold small">Confirm New Password</label>
+                            <div className="input-group">
+                                <input type={showConfirmPw ? 'text' : 'password'} className="form-control" value={confirmPw} onChange={e => { setConfirmPw(e.target.value); setPwError(''); }} autoComplete="new-password" />
+                                <button type="button" className="btn btn-outline-secondary" onClick={() => setShowConfirmPw(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showConfirmPw ? 'eye-slash' : 'eye')}></i></button>
+                            </div>
+                        </div>
+                        <button className="btn btn-primary w-100 fw-semibold" onClick={handleChangePw} style={gradientBtn}>Change Password</button>
+                    </div>
+                </div>
+            )}
+
+            <div className="card shadow-sm">
+                <div className="card-body text-center">
+                    <p className="text-muted small mb-3">Your expenses, income and settings stay on this device — only your session is cleared.</p>
+                    <button className="btn btn-danger w-100 fw-semibold py-2" onClick={() => setShowLogoutConfirm(true)}><i className="fas fa-sign-out-alt me-2"></i>Log Out</button>
+                </div>
+            </div>
+
+            {showLogoutConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title"><i className="fas fa-sign-out-alt me-2"></i>Log Out</h5></div>
+                            <div className="modal-body"><p className="mb-0">Are you sure you want to log out? Your data will remain safe on this device.</p></div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setShowLogoutConfirm(false)}>Cancel</button>
+                                <button className="btn btn-danger fw-semibold" onClick={handleLogoutConfirm}>Log Out</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -3307,6 +3467,7 @@ function App() {
     };
 
     const handleRegister = (user) => { setCurrentUser(user); };
+    const handleLogout = () => { setCurrentUser(null); };
 
     const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
 
@@ -3322,6 +3483,7 @@ function App() {
             case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
+            case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
         }
     };
@@ -3331,7 +3493,10 @@ function App() {
 
     return (
         <div className="mobile-app">
-            <div className="app-header"><h1><i className="fas fa-wallet"></i> Personal Finance</h1></div>
+            <div className="app-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                <h1 style={{margin:0}}><i className="fas fa-wallet"></i> Personal Finance</h1>
+                <button className="btn btn-sm btn-outline-light" onClick={() => setCurrentScreen('profile')} title="My Profile"><i className="fas fa-user-circle"></i></button>
+            </div>
             {budgetAlerts.map((alert, i) => (
                 <div key={i} className={'alert ' + (alert.type === 'over' ? 'alert-danger' : 'alert-warning')} style={{margin: '0.5rem 1rem', fontSize: '0.85rem'}}>
                     <i className={'fas fa-' + (alert.type === 'over' ? 'exclamation-circle' : 'exclamation-triangle') + ' me-2'}></i>
