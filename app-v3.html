@@ -600,6 +600,35 @@ class DataService {
         }
         if (changed) this.saveRecurring(schedules);
     }
+    static createBackup() {
+        const keys = ['expenses', 'income', 'categories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth'];
+        const data = {};
+        keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
+        return { version: '1.0', createdAt: new Date().toISOString(), data };
+    }
+    static downloadBackup() {
+        const backup = this.createBackup();
+        const date = new Date().toISOString().split('T')[0];
+        const filename = 'financetracker-backup-' + date + '.json';
+        const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        this.recordBackupEntry(filename);
+        return filename;
+    }
+    static restoreBackup(backupData) {
+        if (!backupData || !backupData.version || !backupData.data) throw new Error('Invalid backup structure');
+        let count = 0;
+        Object.entries(backupData.data).forEach(([key, value]) => { if (value !== null && value !== undefined) { localStorage.setItem('financeApp_' + key, JSON.stringify(value)); count++; } });
+        return count;
+    }
+    static getBackupHistory() { return JSON.parse(localStorage.getItem('financeApp_backupHistory') || '[]'); }
+    static recordBackupEntry(filename) {
+        const history = this.getBackupHistory();
+        history.unshift({ filename, createdAt: new Date().toISOString() });
+        localStorage.setItem('financeApp_backupHistory', JSON.stringify(history.slice(0, 10)));
+    }
 }
 window.DataService = DataService;
 
@@ -1683,6 +1712,13 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
     const [nameSaved, setNameSaved] = useState(false);
     const [savedDisplayName, setSavedDisplayName] = useState('');
     const [budgetAlertsEnabled, setBudgetAlertsEnabled] = useState(true);
+    const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
+    const [backupHistory, setBackupHistory] = useState([]);
+    const [restoreFile, setRestoreFile] = useState(null);
+    const [restorePreview, setRestorePreview] = useState(null);
+    const [restoreError, setRestoreError] = useState('');
+    const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+    const [backupDownloaded, setBackupDownloaded] = useState(false);
 
     useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); }); }, []);
     useEffect(() => {
@@ -1690,11 +1726,49 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
         setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
     }, []);
 
+    useEffect(() => {
+        DataService.getSettings().then(s => setAutoBackupEnabled(s.autoBackupEnabled !== false));
+        setBackupHistory(DataService.getBackupHistory());
+    }, []);
+
     const handleToggleBudgetAlerts = (enabled) => {
         setBudgetAlertsEnabled(enabled);
         const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
         notifSettings.budgetAlertsEnabled = enabled;
         localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
+    };
+
+    const handleToggleAutoBackup = async (enabled) => {
+        setAutoBackupEnabled(enabled);
+        await DataService.updateSettings({ autoBackupEnabled: enabled });
+    };
+
+    const handleDownloadBackup = () => {
+        DataService.downloadBackup();
+        setBackupHistory(DataService.getBackupHistory());
+        setBackupDownloaded(true);
+        setTimeout(() => setBackupDownloaded(false), 2000);
+    };
+
+    const handleRestoreFileChange = (e) => {
+        setRestoreError(''); setRestorePreview(null); setRestoreFile(null);
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            try {
+                const parsed = JSON.parse(evt.target.result);
+                if (!parsed.version || !parsed.data) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); return; }
+                setRestoreFile(parsed);
+                setRestorePreview({ date: parsed.createdAt, expenses: (parsed.data.expenses || []).length, income: (parsed.data.income || []).length });
+            } catch (err) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); }
+        };
+        reader.readAsText(file);
+    };
+
+    const handleConfirmRestore = () => {
+        try { DataService.restoreBackup(restoreFile); window.location.reload(); }
+        catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); }
     };
 
     useEffect(() => {
@@ -1954,6 +2028,68 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
                     </div>
                 </div>
             </div>
+
+            <hr style={{margin: '1.5rem 0'}} />
+            <div style={{marginBottom: '1rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}><i className="fas fa-database me-2"></i>Backup & Restore</h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>Download your data or restore from a previous backup.</p>
+                <div className="d-flex justify-content-between align-items-center mb-3" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
+                    <div>
+                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Auto-backup daily</div>
+                        <div className="text-muted" style={{fontSize: '0.82rem'}}>Automatically download a backup each day when the app opens</div>
+                    </div>
+                    <div className="form-check form-switch mb-0">
+                        <input className="form-check-input" type="checkbox" id="autoBackupToggle" checked={autoBackupEnabled} onChange={e => handleToggleAutoBackup(e.target.checked)} style={{cursor: 'pointer'}} />
+                    </div>
+                </div>
+                <button className={'btn w-100 mb-2 ' + (backupDownloaded ? 'btn-success' : 'btn-primary')} onClick={handleDownloadBackup}>
+                    {backupDownloaded ? <><i className="fas fa-check me-2"></i>Downloaded!</> : <><i className="fas fa-download me-2"></i>Download Backup Now</>}
+                </button>
+                {backupHistory.length > 0 && (
+                    <div className="mb-3">
+                        <div className="small fw-semibold text-muted mb-1">Recent backups:</div>
+                        {backupHistory.map((h, i) => (
+                            <div key={i} className="small text-muted d-flex justify-content-between py-1" style={{borderBottom: '1px solid #f0f0f0'}}>
+                                <span style={{wordBreak: 'break-all'}}>{h.filename}</span>
+                                <span className="ms-2 text-nowrap">{new Date(h.createdAt).toLocaleDateString()}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                <hr style={{margin: '1rem 0'}} />
+                <h6 className="fw-semibold mb-2">Restore from Backup</h6>
+                <div className="alert alert-warning d-flex gap-2 py-2 mb-3" style={{fontSize: '0.85rem'}}>
+                    <i className="fas fa-exclamation-triangle mt-1 flex-shrink-0"></i>
+                    <span>Restoring a backup will replace ALL current app data. This cannot be undone.</span>
+                </div>
+                <input type="file" accept=".json" className="form-control mb-2" onChange={handleRestoreFileChange} />
+                {restoreError && <div className="alert alert-danger py-2 small mb-2">{restoreError}</div>}
+                {restorePreview && (
+                    <div className="alert alert-info py-2 small mb-2">
+                        Backup from <strong>{new Date(restorePreview.date).toLocaleString()}</strong>, contains <strong>{restorePreview.expenses}</strong> expenses and <strong>{restorePreview.income}</strong> income records.
+                    </div>
+                )}
+                {restorePreview && (
+                    <button className="btn btn-danger w-100" onClick={() => setShowRestoreConfirm(true)}>
+                        <i className="fas fa-upload me-2"></i>Restore Backup
+                    </button>
+                )}
+            </div>
+
+            {showRestoreConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title"><i className="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Restore</h5></div>
+                            <div className="modal-body"><p>Are you sure? This will <strong>replace all your current data</strong> with the selected backup. This cannot be undone.</p></div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setShowRestoreConfirm(false)}>Cancel</button>
+                                <button className="btn btn-danger" onClick={handleConfirmRestore}><i className="fas fa-upload me-2"></i>Yes, Restore Now</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -2849,6 +2985,14 @@ function App() {
         const loadData = async () => {
             try {
                 await DataService.processRecurringSchedules();
+                const lastBackup = localStorage.getItem('financeApp_lastAutoBackup');
+                const todayStr = new Date().toISOString().split('T')[0];
+                const appSettings = await DataService.getSettings();
+                if (appSettings.autoBackupEnabled !== false && lastBackup !== todayStr) {
+                    DataService.downloadBackup();
+                    localStorage.setItem('financeApp_lastAutoBackup', todayStr);
+                    DataService.recordBackupEntry('auto-backup-' + todayStr + '.json');
+                }
                 const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
                     DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
                 ]);

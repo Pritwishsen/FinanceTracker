@@ -1,0 +1,57 @@
+In app-v3.html, build a Data Backup & Restore feature (FT-26).
+
+1. BACKUP DATA STRUCTURE
+   A backup is a JSON object containing all financeApp_* localStorage keys:
+   { version: "1.0", createdAt: ISO string, data: {
+     expenses: [...], income: [...], categories: [...],
+     settings: {...}, goals: [...], bills: [...],
+     recurring: [...], debts: [...], networth: [...] } }
+   NEVER include: auth tokens, passwords, session data.
+
+2. DATASERVICE — add backup methods:
+   createBackup(): collects all financeApp_* keys, returns backup JSON object
+   downloadBackup(): calls createBackup(), triggers file download as:
+     "financetracker-backup-YYYY-MM-DD.json"
+     Use Blob + temporary <a> link (same pattern as CSV export)
+   restoreBackup(backupData):
+     - Validate backupData has required fields (version, data)
+     - Restore each key: localStorage.setItem("financeApp_" + key, JSON.stringify(data[key]))
+     - Return count of restored keys
+   getBackupHistory():
+     return JSON.parse(localStorage.getItem("financeApp_backupHistory") || "[]")
+   recordBackupEntry(filename):
+     const history = this.getBackupHistory();
+     history.unshift({ filename, createdAt: new Date().toISOString() });
+     localStorage.setItem("financeApp_backupHistory", JSON.stringify(history.slice(0, 10)));
+
+3. AUTO-BACKUP ON APP LOAD
+   In App loadData(), check if auto-backup is due:
+   const lastBackup = localStorage.getItem("financeApp_lastAutoBackup");
+   const today = new Date().toISOString().split("T")[0];
+   const settings = await DataService.getSettings();
+   if (settings.autoBackupEnabled !== false && lastBackup !== today) {
+     DataService.downloadBackup();
+     localStorage.setItem("financeApp_lastAutoBackup", today);
+     DataService.recordBackupEntry("auto-backup-" + today + ".json");
+   }
+
+4. SETTINGS SCREEN — add "Backup & Restore" section at bottom of SettingsScreen:
+
+   BACKUP SECTION:
+   - Toggle: "Auto-backup daily" (default: on)
+     Stores as financeApp_settings.autoBackupEnabled
+   - Button: "Download Backup Now" → calls DataService.downloadBackup()
+   - Last backup timestamp: "Last backup: [date]" or "Never"
+   - Backup history: show last 10 backup filenames and dates
+
+   RESTORE SECTION:
+   - Warning: "⚠️ Restoring a backup will replace ALL current app data. This cannot be undone."
+   - File input: accepts .json files only
+   - On file selected: parse JSON, validate structure
+     Show preview: "Backup from [date], contains [N] expenses, [N] income records."
+   - "Restore Backup" button (red/danger styling)
+   - Confirmation modal: "Are you sure? This will replace all your current data."
+   - On confirm: call DataService.restoreBackup(parsedData), then reload page
+   - On error: "Invalid backup file. Please select a valid FinanceTracker backup."
+
+5. No external libraries. Client-side only. No server calls.
