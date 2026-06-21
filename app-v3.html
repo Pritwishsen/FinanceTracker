@@ -659,6 +659,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
+    const [isSplit, setIsSplit] = useState(false);
+    const [splitParticipants, setSplitParticipants] = useState([]);
+    const [splitMethod, setSplitMethod] = useState('equal');
+    const [customAmounts, setCustomAmounts] = useState({});
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
     useEffect(() => { if (!editExpense) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
@@ -675,11 +679,37 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         setIsSubmitting(true);
         const validation = ValidationUtils.validateExpense({ ...formData, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
+        if (!editExpense && isSplit) {
+            if (splitParticipants.length < 2) { setErrors({ general: 'Add at least 2 participants for a split expense.' }); setIsSubmitting(false); return; }
+            if (splitMethod === 'custom') {
+                const total = splitParticipants.reduce((sum, p) => sum + (parseFloat(customAmounts[p.id]) || 0), 0);
+                const target = parseFloat(formData.amount);
+                if (Math.abs(total - target) > 0.01) { setErrors({ general: `Custom amounts must sum to ${ValidationUtils.formatCurrency(target, formData.currency)}. Current total: ${ValidationUtils.formatCurrency(total, formData.currency)}.` }); setIsSubmitting(false); return; }
+                if (splitParticipants.some(p => !(parseFloat(customAmounts[p.id]) > 0))) { setErrors({ general: 'Each participant must have an amount greater than 0.' }); setIsSubmitting(false); return; }
+            }
+        }
         try {
             let description = formData.description.trim();
             if (!description && selectedCategory) description = selectedCategory.name + ' - ' + formData.subcategory;
             const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) };
-            if (editExpense) { DataService.updateExpense(editExpense.id, expenseData); } else { DataService.addExpenseWithConversion(expenseData); if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); } }
+            if (editExpense) {
+                DataService.updateExpense(editExpense.id, expenseData);
+            } else if (isSplit && splitParticipants.length >= 2) {
+                const splitGroupId = 'split_' + Date.now();
+                const totalAmt = parseFloat(formData.amount);
+                const n = splitParticipants.length;
+                const baseShare = Math.round(totalAmt / n * 100) / 100;
+                splitParticipants.forEach((p, i) => {
+                    const share = splitMethod === 'equal'
+                        ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
+                        : parseFloat(customAmounts[p.id] || 0);
+                    DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: p.name, splitGroupId, isSplitRecord: true });
+                });
+                if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
+            } else {
+                DataService.addExpenseWithConversion(expenseData);
+                if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
+            }
             setShowSuccess(true);
             setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save expense. Please try again.' }); }
@@ -775,6 +805,68 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                     {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
                     <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
                 </div>
+                {!editExpense && (
+                    <div className="form-group">
+                        <div className="form-check">
+                            <input className="form-check-input" type="checkbox" id="isSplit" checked={isSplit} onChange={e => {
+                                const val = e.target.checked;
+                                setIsSplit(val);
+                                if (val && splitParticipants.length === 0) {
+                                    setSplitParticipants([{ id: 'me', name: formData.paidBy || 'Me' }]);
+                                }
+                            }} />
+                            <label className="form-check-label" htmlFor="isSplit"><i className="fas fa-users me-1"></i>Split this expense between people</label>
+                        </div>
+                        {isSplit && (
+                            <div className="mt-3 p-3 border rounded" style={{backgroundColor: '#f8f9fa'}}>
+                                <div className="mb-2 fw-semibold small text-uppercase text-muted">Participants</div>
+                                {splitParticipants.map(p => (
+                                    <div key={p.id} className="d-flex justify-content-between align-items-center mb-1">
+                                        <span className="small">{p.name}{p.id === 'me' ? <span className="text-muted"> (you)</span> : ''}</span>
+                                        {p.id !== 'me' && (
+                                            <button type="button" className="btn btn-sm btn-outline-danger py-0 px-1" style={{lineHeight:'1.2'}} onClick={() => { setSplitParticipants(prev => prev.filter(x => x.id !== p.id)); setCustomAmounts(prev => { const n = {...prev}; delete n[p.id]; return n; }); }}><i className="fas fa-times"></i></button>
+                                        )}
+                                    </div>
+                                ))}
+                                {people.filter(p => !splitParticipants.find(s => s.name === p.name)).length > 0 && (
+                                    <select className="form-select form-select-sm mt-2 mb-2" value="" onChange={e => { const person = people.find(p => p.name === e.target.value); if (person) setSplitParticipants(prev => [...prev, { id: person.id, name: person.name }]); }}>
+                                        <option value="">+ Add person to split...</option>
+                                        {people.filter(p => !splitParticipants.find(s => s.name === p.name)).map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
+                                    </select>
+                                )}
+                                {splitParticipants.length < 2 && <div className="text-warning small mt-1"><i className="fas fa-exclamation-triangle me-1"></i>At least 2 participants required</div>}
+                                <div className="mt-3 mb-2 fw-semibold small text-uppercase text-muted">Split Method</div>
+                                <div className="d-flex gap-2 mb-3">
+                                    <button type="button" className={'btn btn-sm ' + (splitMethod === 'equal' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setSplitMethod('equal')}>Equal Split</button>
+                                    <button type="button" className={'btn btn-sm ' + (splitMethod === 'custom' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setSplitMethod('custom')}>Custom Amounts</button>
+                                </div>
+                                {splitMethod === 'equal' && splitParticipants.length >= 1 && (
+                                    <div className="small text-muted">Each person pays: <strong>{ValidationUtils.formatCurrency(parseFloat(formData.amount || 0) / Math.max(splitParticipants.length, 1), formData.currency)}</strong></div>
+                                )}
+                                {splitMethod === 'custom' && (
+                                    <div>
+                                        {splitParticipants.map(p => (
+                                            <div key={p.id} className="d-flex align-items-center gap-2 mb-2">
+                                                <label className="small mb-0" style={{minWidth: '80px', flexShrink: 0}}>{p.name}</label>
+                                                <div className="input-group input-group-sm">
+                                                    <span className="input-group-text">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
+                                                    <input type="number" className="form-control" placeholder="0.00" step="0.01" min="0" value={customAmounts[p.id] || ''} onChange={e => setCustomAmounts(prev => ({ ...prev, [p.id]: e.target.value }))} />
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {(() => {
+                                            const total = splitParticipants.reduce((sum, p) => sum + (parseFloat(customAmounts[p.id]) || 0), 0);
+                                            const target = parseFloat(formData.amount || 0);
+                                            const match = Math.abs(total - target) < 0.01;
+                                            const over = total > target + 0.01;
+                                            return (<div className={'small fw-semibold ' + (match ? 'text-success' : over ? 'text-danger' : 'text-muted')}>Split total: {ValidationUtils.formatCurrency(total, formData.currency)} of {ValidationUtils.formatCurrency(target, formData.currency)}{match && ' ✓'}</div>);
+                                        })()}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
                 {!editExpense && (
                     <div className="form-group">
                         <div className="form-check">
@@ -912,7 +1004,10 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                         <div key={expense.id} className="expense-item">
                             <div className="expense-main">
                                 <div className="expense-info">
-                                    <div className="expense-description">{expense.description}</div>
+                                    <div className="expense-description">
+                                        {expense.isSplitRecord && <span className="badge bg-info me-1" style={{fontSize:'0.7em'}}><i className="fas fa-users me-1"></i>Split</span>}
+                                        {expense.description}
+                                    </div>
                                     <div className="expense-category"><i className="fas fa-tag"></i>{getCategoryName(expense.categoryId)} - {expense.subcategory}</div>
                                     {expense.paidBy && (<div className="expense-paid-by"><i className="fas fa-user"></i>Paid by: {expense.paidBy}</div>)}
                                     <div className="expense-date"><i className="fas fa-calendar"></i>{ValidationUtils.formatDate(expense.date)}</div>
