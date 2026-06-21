@@ -1,0 +1,41 @@
+In app-v3.html, implement FT-31 Expense Tags (extends any basic tag work with stricter rules).
+
+1. EXPENSE FORM (ExpenseForm) — add tags field:
+   - Add tags: editExpense ? (editExpense.tags || []) : [] to formData initial state
+   - Add a text input below description labelled "Tags (Optional)"
+   - Placeholder: "e.g. work, holiday, one-off (comma separated)"
+   - On change: split by comma, trim each, lowercase, filter empty strings → store as array
+   - De-duplicate case-insensitively (adding "Work" when "work" exists: silently ignore)
+   - Display current tags as small badge spans below the input as user types
+   - VALIDATION:
+     - Max 10 tags: show "Maximum 10 tags allowed per expense"
+     - Each tag max 30 chars: show "Tags must be 30 characters or fewer"
+
+2. EXPENSE LIST — display tags on each expense row:
+   {expense.tags && expense.tags.length > 0 && (
+     <div className="expense-tags">
+       {expense.tags.map(tag => (
+         <span key={tag} className="badge bg-secondary me-1"
+           style={{fontSize:'0.7rem'}}>{tag}</span>
+       ))}
+     </div>
+   )}
+
+3. TAG FILTER IN EXPENSE LIST (multi-select AND logic):
+   - Add "Filter by Tag" multi-select or checkbox list below the person filter
+   - Populate from all unique tags across all expenses (sorted A-Z)
+   - When one or more tags selected: show only expenses that have ALL selected tags
+   - Include tag filter in the Clear Filters button reset
+
+4. EXPENSE LIST SEARCH — extend search to match tags:
+   Current: expense.description.toLowerCase().includes(searchTerm)
+   New: also match if any tag includes searchTerm.toLowerCase()
+
+5. EXPORT INTEGRATION:
+   - In any CSV export (FT-30), ensure Tags column contains tags joined with semicolons.
+   - If expense has no tags, Tags cell is empty (not "undefined")
+
+6. STORAGE: tags stored as string[] on each expense in financeApp_expenses.
+   No DataService changes needed beyond those already in FT-22 base work.
+
+Do not change any other form fields or DataService methods.

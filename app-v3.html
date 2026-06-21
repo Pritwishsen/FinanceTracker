@@ -686,9 +686,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
             categoryId: editExpense ? editExpense.categoryId : '',
             subcategory: editExpense ? editExpense.subcategory : '',
             paidBy: editExpense ? (editExpense.paidBy || '') : (defaultPerson ? defaultPerson.name : ''),
-            currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP'
+            currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP',
+            tags: editExpense ? (editExpense.tags || []) : []
         };
     });
+    const [tagInputRaw, setTagInputRaw] = useState(() => editExpense ? (editExpense.tags || []).join(', ') : '');
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -711,9 +713,21 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         if (field === 'categoryId') setFormData(prev => ({ ...prev, subcategory: '' }));
     };
 
+    const handleTagInput = (raw) => {
+        setTagInputRaw(raw);
+        const tags = [...new Set(raw.split(',').map(t => t.trim().toLowerCase()).filter(t => t.length > 0))];
+        if (tags.length > 10) { setErrors(prev => ({ ...prev, tags: 'Maximum 10 tags allowed per expense' })); return; }
+        if (tags.some(t => t.length > 30)) { setErrors(prev => ({ ...prev, tags: 'Tags must be 30 characters or fewer' })); return; }
+        setErrors(prev => ({ ...prev, tags: '' }));
+        setFormData(prev => ({ ...prev, tags }));
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
         setIsSubmitting(true);
+        const tags = formData.tags || [];
+        if (tags.length > 10) { setErrors({ tags: 'Maximum 10 tags allowed per expense' }); setIsSubmitting(false); return; }
+        if (tags.some(t => t.length > 30)) { setErrors({ tags: 'Tags must be 30 characters or fewer' }); setIsSubmitting(false); return; }
         const validation = ValidationUtils.validateExpense({ ...formData, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
         if (!editExpense && isSplit) {
@@ -810,6 +824,16 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                     <input type="text" id="description" className={'form-control ' + (errors.description ? 'is-invalid' : '')} value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Enter expense description" />
                     {errors.description && <div className="invalid-feedback">{errors.description}</div>}
                     <div className="form-text">Leave empty to auto-generate from category and subcategory</div>
+                </div>
+                <div className="form-group">
+                    <label htmlFor="tags">Tags (Optional)</label>
+                    <input type="text" id="tags" className={'form-control ' + (errors.tags ? 'is-invalid' : '')} value={tagInputRaw} onChange={(e) => handleTagInput(e.target.value)} placeholder="e.g. work, holiday, one-off (comma separated)" />
+                    {errors.tags && <div className="invalid-feedback">{errors.tags}</div>}
+                    {formData.tags && formData.tags.length > 0 && (
+                        <div style={{marginTop:'0.4rem',display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                            {formData.tags.map(tag => <span key={tag} className="badge bg-secondary" style={{fontSize:'0.75rem'}}>{tag}</span>)}
+                        </div>
+                    )}
                 </div>
                 <div className="form-group">
                     <label htmlFor="category">Category *</label>
@@ -949,6 +973,7 @@ function ExpenseList({ expenses, categories, onUpdate }) {
     const [duplicateDate, setDuplicateDate] = useState('today');
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
     const [duplicateDateError, setDuplicateDateError] = useState('');
+    const [filterTags, setFilterTags] = useState([]);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
 
@@ -960,9 +985,10 @@ function ExpenseList({ expenses, categories, onUpdate }) {
         else if (filterPerson) filtered = filtered.filter(expense => (expense.paidBy || '').trim() === filterPerson.trim());
         if (filterDateFrom) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) >= filterDateFrom);
         if (filterDateTo) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) <= filterDateTo);
-        if (searchTerm) filtered = filtered.filter(expense => (expense.description || '').toLowerCase().includes(searchTerm.toLowerCase()));
+        if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(e => (e.description || '').toLowerCase().includes(st) || (e.tags || []).some(tag => tag.includes(st))); }
+        if (filterTags.length > 0) filtered = filtered.filter(e => filterTags.every(ft => (e.tags || []).includes(ft)));
         return filtered;
-    }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm]);
+    }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags]);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
@@ -1023,12 +1049,25 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                         {[...new Set([...people.map(p => p.name), ...expenses.map(e => e.paidBy).filter(Boolean)])].sort().map(name => (<option key={name} value={name}>{name}</option>))}
                     </select>
                 </div>
+                {(() => { const allTags = [...new Set(expenses.flatMap(e => e.tags || []))].sort(); return allTags.length > 0 ? (
+                    <div className="filter-row" style={{flexDirection:'column',alignItems:'flex-start',gap:'6px'}}>
+                        <select className="form-select form-select-sm" style={{width:'auto',minWidth:'170px'}} value="" onChange={(e) => { if (e.target.value) setFilterTags(prev => prev.includes(e.target.value) ? prev : [...prev, e.target.value]); }}>
+                            <option value="">Filter by tag…</option>
+                            {allTags.filter(t => !filterTags.includes(t)).map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                        {filterTags.length > 0 && (
+                            <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                                {filterTags.map(t => <span key={t} className="badge bg-secondary" style={{fontSize:'0.75rem',cursor:'pointer'}} onClick={() => setFilterTags(prev => prev.filter(x => x !== t))} title="Remove filter">{t} ✕</span>)}
+                            </div>
+                        )}
+                    </div>
+                ) : null; })()}
                 <div className="filter-row">
                     <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
                     <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
                 </div>
-                {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || searchTerm) && (
-                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); }}>
+                {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterTags.length > 0) && (
+                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterTags([]); }}>
                         <i className="fas fa-times me-1"></i>Clear Filters
                     </button>
                 )}
@@ -1048,6 +1087,11 @@ function ExpenseList({ expenses, categories, onUpdate }) {
                                     <div className="expense-category"><i className="fas fa-tag"></i>{getCategoryName(expense.categoryId)} - {expense.subcategory}</div>
                                     {expense.paidBy && (<div className="expense-paid-by"><i className="fas fa-user"></i>Paid by: {expense.paidBy}</div>)}
                                     <div className="expense-date"><i className="fas fa-calendar"></i>{ValidationUtils.formatDate(expense.date)}</div>
+                                    {expense.tags && expense.tags.length > 0 && (
+                                        <div className="expense-tags" style={{marginTop:'3px'}}>
+                                            {expense.tags.map(tag => <span key={tag} className="badge bg-secondary me-1" style={{fontSize:'0.7rem'}}>{tag}</span>)}
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}</div>
                             </div>
