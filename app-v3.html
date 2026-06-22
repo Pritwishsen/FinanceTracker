@@ -3913,7 +3913,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
     );
 }
 
-function DebtTracker({ defaultCurrency, onUpdate }) {
+function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const [activeTab, setActiveTab] = useState('owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
     const [showForm, setShowForm] = useState(false);
@@ -3922,6 +3922,8 @@ function DebtTracker({ defaultCurrency, onUpdate }) {
     const [showSettleModal, setShowSettleModal] = useState(null);
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showLinkedModal, setShowLinkedModal] = useState(null);
+    const [linkedCatId, setLinkedCatId] = useState('');
+    const [linkedSubcat, setLinkedSubcat] = useState('');
     const [showSettled, setShowSettled] = useState(false);
 
     const reload = () => setDebts(DataService.getDebts());
@@ -3961,16 +3963,21 @@ function DebtTracker({ defaultCurrency, onUpdate }) {
     const handleSettle = (debt) => {
         DataService.settleDebt(debt.id);
         setShowSettleModal(null);
+        setLinkedCatId('');
+        setLinkedSubcat('');
         setShowLinkedModal(debt);
         reload();
     };
 
     const handleLinkedRecord = async (debt) => {
         if (debt.direction === 'owe') {
-            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: null, subcategory: '', description: `Settled debt to ${debt.counterparty}`, paidBy: '', tags: [] });
+            const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
+            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId || null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: '', tags: [] });
         } else {
             await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, whosIncome: '' });
         }
+        setLinkedCatId('');
+        setLinkedSubcat('');
         setShowLinkedModal(null);
         if (onUpdate) onUpdate();
     };
@@ -4130,10 +4137,43 @@ function DebtTracker({ defaultCurrency, onUpdate }) {
                 <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
                     <div className="modal-dialog modal-dialog-centered">
                         <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title"><i className="fas fa-check-circle text-success me-2"></i>Debt Settled!</h5></div>
+                            <div className="modal-header">
+                                <h5 className="modal-title"><i className="fas fa-check-circle text-success me-2"></i>Debt Settled!</h5>
+                            </div>
                             <div className="modal-body">
-                                <p>Would you like to add a matching <strong>{showLinkedModal.direction==='owe' ? 'expense' : 'income'} record</strong> for <strong>{fmtAmt(showLinkedModal.amount, showLinkedModal.currency)}</strong>?</p>
-                                <p className="text-muted small mb-0">This will be added with today's date and won't affect the debt totals above.</p>
+                                {showLinkedModal.direction === 'owe' ? (
+                                    <>
+                                        <p>Would you like to add an <strong>expense record</strong> for <strong>{fmtAmt(showLinkedModal.amount, showLinkedModal.currency)}</strong>?</p>
+                                        <div className="mb-2">
+                                            <label className="form-label" style={{fontSize:'0.82rem',fontWeight:600}}>Category</label>
+                                            <select className="form-select form-select-sm" value={linkedCatId}
+                                                onChange={e => { setLinkedCatId(e.target.value); setLinkedSubcat(''); }}>
+                                                <option value="">— Select category (optional) —</option>
+                                                {(categories || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                            </select>
+                                        </div>
+                                        {linkedCatId && (() => {
+                                            const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
+                                            const subcats = cat && cat.subcategories && cat.subcategories.length > 0 ? cat.subcategories : [];
+                                            return subcats.length > 0 ? (
+                                                <div className="mb-2">
+                                                    <label className="form-label" style={{fontSize:'0.82rem',fontWeight:600}}>Sub Category</label>
+                                                    <select className="form-select form-select-sm" value={linkedSubcat}
+                                                        onChange={e => setLinkedSubcat(e.target.value)}>
+                                                        <option value="">— Select sub category (optional) —</option>
+                                                        {subcats.map(s => <option key={s} value={s}>{s}</option>)}
+                                                    </select>
+                                                </div>
+                                            ) : null;
+                                        })()}
+                                        <p className="text-muted small mb-0">Added with today's date. Won't affect debt totals.</p>
+                                    </>
+                                ) : (
+                                    <>
+                                        <p>Would you like to add an <strong>income record</strong> for <strong>{fmtAmt(showLinkedModal.amount, showLinkedModal.currency)}</strong>?</p>
+                                        <p className="text-muted small mb-0">Added with today's date. Won't affect debt totals.</p>
+                                    </>
+                                )}
                             </div>
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowLinkedModal(null)}>No thanks</button>
@@ -4252,7 +4292,7 @@ function App() {
             case 'bills': return <BillTracker categories={categories} onUpdate={handleDataUpdate} />;
             case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
-            case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} />;
+            case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
