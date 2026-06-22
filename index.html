@@ -3972,7 +3972,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const handleLinkedRecord = async (debt) => {
         if (debt.direction === 'owe') {
             const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
-            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId || null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: '', tags: [] });
+            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId ? Number(linkedCatId) : null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: '', tags: [] });
         } else {
             await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, whosIncome: '' });
         }
