@@ -1,0 +1,54 @@
+In app-v3.html, build a Debt Tracker feature (FT-33).
+
+1. DATASERVICE — add sync methods:
+   getDebts(): return JSON.parse(localStorage.getItem('financeApp_debts') || '[]')
+   saveDebts(d): localStorage.setItem('financeApp_debts', JSON.stringify(d))
+   addDebt({ counterparty, amount, currency, direction, notes, dueDate }):
+   // direction: 'owe' (I owe them) or 'owed' (they owe me)
+   // counterparty: name of the person (use field name "counterparty" not "name")
+   const debt = { id: Date.now(), counterparty, amount: parseFloat(amount),
+     currency, direction, notes: notes||'', dueDate: dueDate||'',
+     isSettled: false, createdAt: new Date().toISOString() };
+   push to getDebts(), saveDebts(), return debt
+   settleDebt(id): find debt, debt.isSettled = true,
+     debt.settledAt = new Date().toISOString(), saveDebts()
+   deleteDebt(id): splice, saveDebts()
+
+2. BUILD DebtTracker COMPONENT with TWO TABS:
+   Tab 1: "I Owe" | Tab 2: "Owed to Me"
+
+   ADD DEBT FORM (shared, direction set by active tab):
+   - Fields: Person Name / Counterparty (required), Amount (required, > 0), Currency,
+     Notes (optional), Due Date (optional)
+   - Validation: counterparty required, amount > 0
+
+   SUMMARY CARDS (top of screen):
+   - "Total I Owe": sum of active debts where direction === "owe", grouped by currency
+   - "Total Owed to Me": sum where direction === "owed", grouped by currency
+   - Show one total per currency (do not convert)
+
+   ACTIVE DEBTS LIST (filtered by active tab):
+   - Each row: direction badge (red "I OWE" or green "OWED TO ME"),
+     counterparty, amount + currency, optional due date
+   - Overdue debts (dueDate past + isSettled=false):
+     amber background + "OVERDUE" badge, sorted to top
+   - "Mark Settled" button → settlement confirmation modal:
+     "Mark this debt as settled? This cannot be undone."
+     Then prompt: "Add a matching linked record?"
+     If direction="owe": offer to create an expense record (pre-filled)
+     If direction="owed": offer to create an income record (pre-filled)
+     Both use today's date, the debt's amount and currency.
+   - Delete button with confirmation modal
+
+   SETTLED DEBTS (collapsible section at bottom):
+   - "Show settled debts" toggle (hidden by default)
+   - Each settled row: grey, strikethrough amount, settled date shown
+
+   DOES NOT AFFECT Financial Summary totals (debts are separate from expenses/income).
+
+3. NAVIGATION — add: { key: "debts", icon: "fas fa-handshake", label: "Debts" }
+
+4. APP COMPONENT — add to renderScreen():
+   case "debts": return <DebtTracker defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} />
+
+No external libraries.
