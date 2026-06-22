@@ -3960,8 +3960,14 @@ function NetWorth({ defaultCurrency }) {
     const [showHistory, setShowHistory] = useState(true);
     const [selectedPerson, setSelectedPerson] = useState('own');
     const [people, setPeople] = useState(() => DataService.getPeople());
+    const [allExpenses, setAllExpenses] = useState(() => DataService.data.expenses || []);
+    const [allIncome, setAllIncome] = useState(() => DataService.data.income || []);
 
-    useEffect(() => { setPeople(DataService.getPeople()); }, []);
+    useEffect(() => {
+        setPeople(DataService.getPeople());
+        setAllExpenses(DataService.data.expenses || []);
+        setAllIncome(DataService.data.income || []);
+    }, []);
 
     const ASSET_CATS = ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'];
     const LIABILITY_CATS = ['Mortgage', 'Loan', 'Credit Card', 'Other'];
@@ -3981,14 +3987,11 @@ function NetWorth({ defaultCurrency }) {
     };
 
     // Cash Flow (income − expenses) filtered by person
-    const allExpenses = DataService.getExpenses ? DataService.getExpenses() : (DataService.data ? DataService.data.expenses : []);
-    const allIncome = DataService.getIncome ? DataService.getIncome() : (DataService.data ? DataService.data.income : []);
-    const filterByPerson = (arr, paidByKey) => {
-        if (selectedPerson === 'own') return arr.filter(r => !r[paidByKey] || r[paidByKey].trim() === '');
-        return arr.filter(r => r[paidByKey] && r[paidByKey].trim() === selectedPerson);
-    };
-    const filteredExpenses = filterByPerson(allExpenses || [], 'paidBy');
-    const filteredIncome = (allIncome || []).filter(r => {
+    const filteredExpenses = allExpenses.filter(r => {
+        if (selectedPerson === 'own') return !r.paidBy || r.paidBy.trim() === '';
+        return r.paidBy && r.paidBy.trim() === selectedPerson;
+    });
+    const filteredIncome = allIncome.filter(r => {
         const person = (r.whosIncome || r.paidBy || '').trim();
         if (selectedPerson === 'own') return person === '';
         return person === selectedPerson;
@@ -4052,8 +4055,8 @@ function NetWorth({ defaultCurrency }) {
 
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
-    const ItemCard = ({ item, colorClass }) => (
-        <div style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
+    const renderItemCard = (item, colorClass) => (
+        <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}</div>
                 <div style={{fontSize:'0.92rem',fontWeight:700,color:colorClass}}>{fmt(item.value, item.currency)}</div>
@@ -4181,7 +4184,7 @@ function NetWorth({ defaultCurrency }) {
                         : ASSET_CATS.filter(c => assetsByCat[c]).map(cat => (
                             <div key={cat} style={{marginBottom:'8px'}}>
                                 <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
-                                {assetsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#198754" />)}
+                                {assetsByCat[cat].map(item => renderItemCard(item, '#198754'))}
                             </div>
                         ))
                     }
@@ -4200,7 +4203,7 @@ function NetWorth({ defaultCurrency }) {
                             {LIABILITY_CATS.filter(c => liabsByCat[c]).map(cat => (
                                 <div key={cat} style={{marginBottom:'8px'}}>
                                     <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
-                                    {liabsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#dc3545" />)}
+                                    {liabsByCat[cat].map(item => renderItemCard(item, '#dc3545'))}
                                 </div>
                             ))}
                             {debtLiabilities.length > 0 && (
