@@ -3596,12 +3596,16 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
 }
 
 function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentUser, onMonthSelect }) {
-    const [timeWindow, setTimeWindow] = useState('6m');
-    const [selectedPerson, setSelectedPerson] = useState('__me__');
-    const [selectedCats, setSelectedCats] = useState([]);
+    const [timeWindow, setTimeWindow] = useState(() => sessionStorage.getItem('trends_timeWindow') || '6m');
+    const [selectedPerson, setSelectedPerson] = useState(() => sessionStorage.getItem('trends_person') || '__me__');
+    const [selectedCats, setSelectedCats] = useState(() => { try { return JSON.parse(sessionStorage.getItem('trends_cats') || '[]'); } catch(_) { return []; } });
     const [showCatFilter, setShowCatFilter] = useState(false);
     const [expanded, setExpanded] = useState({});
     const [people] = useState(() => DataService.getPeople());
+
+    const setTw = (v) => { setTimeWindow(v); sessionStorage.setItem('trends_timeWindow', v); };
+    const setPerson = (v) => { setSelectedPerson(v); sessionStorage.setItem('trends_person', v); };
+    const setCats = (fn) => { setSelectedCats(prev => { const next = typeof fn === 'function' ? fn(prev) : fn; sessionStorage.setItem('trends_cats', JSON.stringify(next)); return next; }); };
 
     const toggle = (key) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
 
@@ -3716,13 +3720,13 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
             <div style={{padding:'0 1rem 0.6rem'}}>
                 <div className="btn-group w-100" role="group">
                     {[['3m','3M'],['6m','6M'],['12m','12M'],['year','This Year']].map(([v,l]) => (
-                        <button key={v} type="button" className={'btn btn-sm ' + (timeWindow === v ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setTimeWindow(v)} style={{fontSize:'0.75rem'}}>{l}</button>
+                        <button key={v} type="button" className={'btn btn-sm ' + (timeWindow === v ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setTw(v)} style={{fontSize:'0.75rem'}}>{l}</button>
                     ))}
                 </div>
             </div>
 
             <div style={{padding:'0 1rem 0.6rem',display:'flex',gap:'8px',flexWrap:'wrap'}}>
-                <select className="form-select form-select-sm" style={{flex:'1',minWidth:'150px'}} value={selectedPerson} onChange={e => setSelectedPerson(e.target.value)}>
+                <select className="form-select form-select-sm" style={{flex:'1',minWidth:'150px'}} value={selectedPerson} onChange={e => setPerson(e.target.value)}>
                     <option value="__me__">My expenses ({personName})</option>
                     <option value="__all__">Everyone</option>
                     {people.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
@@ -3737,14 +3741,14 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                     <div style={{background:'#f8f9fa',borderRadius:'8px',padding:'0.5rem 0.6rem'}}>
                         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'0.4rem'}}>
                             <span style={{fontSize:'0.78rem',color:'#6c757d',fontWeight:600}}>Filter by category</span>
-                            {selectedCats.length > 0 && <button type="button" className="btn btn-sm btn-link p-0" style={{fontSize:'0.75rem'}} onClick={() => setSelectedCats([])}>Clear all</button>}
+                            {selectedCats.length > 0 && <button type="button" className="btn btn-sm btn-link p-0" style={{fontSize:'0.75rem'}} onClick={() => setCats([])}>Clear all</button>}
                         </div>
                         <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
                             {categories.map(cat => (
                                 <button key={cat.id} type="button"
                                     className={'btn btn-sm ' + (selectedCats.includes(cat.id) ? 'btn-primary' : 'btn-outline-secondary')}
                                     style={{fontSize:'0.73rem',padding:'2px 8px'}}
-                                    onClick={() => setSelectedCats(prev => prev.includes(cat.id) ? prev.filter(id => id !== cat.id) : [...prev, cat.id])}>
+                                    onClick={() => setCats(prev => prev.includes(cat.id) ? prev.filter(id => id !== cat.id) : [...prev, cat.id])}>
                                     {cat.name}
                                 </button>
                             ))}
