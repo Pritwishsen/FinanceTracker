@@ -4097,13 +4097,13 @@ function NetWorth({ defaultCurrency }) {
                 </select>
             </div>
 
-            {/* Summary banner — Net Worth | Cash Flow | Liabilities */}
+            {/* Summary banner — Total Assets | Cash Flow | Liabilities, then Net Worth centred */}
             <div style={{padding:'0 1rem 0.5rem'}}>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
-                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>NET WORTH</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Flow − Liab</div>
+                    <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL ASSETS</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:'#198754',lineHeight:1.1}}>{fmt(totalAssets, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>All assets</div>
                     </div>
                     <div style={{background:cashFlow>=0?'#f0fff4':'#fff5f5',border:`1px solid ${cashFlow>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
                         <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>CASH FLOW</div>
@@ -4116,9 +4116,12 @@ function NetWorth({ defaultCurrency }) {
                         <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Total owed</div>
                     </div>
                 </div>
-                <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'9px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                    <span style={{fontSize:'0.7rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em'}}>TOTAL ASSETS</span>
-                    <span style={{fontSize:'0.95rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</span>
+                <div style={{display:'flex',justifyContent:'center'}}>
+                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'10px 32px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.65rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.05em',marginBottom:'3px'}}>NET WORTH</div>
+                        <div style={{fontSize:'1.2rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Flow − Liabilities</div>
+                    </div>
                 </div>
             </div>
 
