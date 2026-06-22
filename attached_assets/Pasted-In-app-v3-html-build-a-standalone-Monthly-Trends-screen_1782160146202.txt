@@ -1,0 +1,49 @@
+In app-v3.html, build a standalone Monthly Trends screen (FT-32).
+NOTE: Do NOT embed trends in the Summary component. FT-32 is a separate nav screen.
+
+1. NAVIGATION — add: { key: 'trends', icon: 'fas fa-chart-line', label: 'Trends' }
+
+2. APP COMPONENT — add case "trends" to renderScreen():
+   case "trends": return <MonthlyTrends expenses={expenses} income={income}
+     categories={categories} defaultCurrency={defaultCurrency} />
+
+3. BUILD MonthlyTrends COMPONENT:
+
+   TIME WINDOW SELECTOR (tabs or button group):
+   "Last 3 Months" | "Last 6 Months" (default) | "Last 12 Months" | "This Year"
+
+   METRIC SELECTOR (dropdown):
+   "Total Expenses" | "Total Income" | "Net Balance" | "Savings Rate"
+   | [Each category name from categories list]
+   When a specific category is selected, show only that category's spending per month.
+
+   MONTHLY DATA TABLE (no canvas, Bootstrap only):
+   Columns: Month | Income | Expenses | Net | Savings Rate | Bar
+   - Bar column: Bootstrap progress bar showing expenses/income ratio
+   - Current (incomplete) month: dashed border, label "(current)"
+   - Net: green if positive, red if negative
+   - Savings Rate: (Income - Expenses) / Income × 100 per month
+     Show "N/A" if income = 0 for that month
+
+   CLICKABLE MONTHS:
+   - Clicking any month row navigates to Expenses screen with
+     filterDateFrom = first day of that month, filterDateTo = last day
+   - To do this: lift filterDateFrom/filterDateTo state up to App, or
+     pass a callback onMonthSelect(from, to) that sets state and
+     switches to the 'expenses' screen.
+
+   EMPTY / INSUFFICIENT DATA STATE:
+   - If fewer than 2 complete calendar months of data exist,
+     show: "Not enough data yet. Add expenses over at least 2 months to see trends."
+
+   CATEGORY DRILL-DOWN:
+   - When a category is selected in the metric selector,
+     show a second table below the main trends table:
+     "Subcategory breakdown for [Category Name]"
+     Columns: Month | [Each subcategory used in that period]
+     Each cell: spend amount for that subcategory in that month
+
+4. CURRENCY: convert all amounts to defaultCurrency using
+   CurrencyService.fallbackRates for synchronous conversion (same as Summary).
+
+No external chart libraries. Bootstrap and inline CSS only.

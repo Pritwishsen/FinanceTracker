@@ -659,6 +659,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'export', icon: 'fas fa-file-export', label: 'Export' },
+        { key: 'trends', icon: 'fas fa-chart-line', label: 'Trends' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
         { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
     ];
@@ -959,12 +960,12 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     );
 }
 
-function ExpenseList({ expenses, categories, onUpdate }) {
+function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '' }) {
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
     const [filterPerson, setFilterPerson] = useState('');
-    const [filterDateFrom, setFilterDateFrom] = useState('');
-    const [filterDateTo, setFilterDateTo] = useState('');
+    const [filterDateFrom, setFilterDateFrom] = useState(initialDateFrom || '');
+    const [filterDateTo, setFilterDateTo] = useState(initialDateTo || '');
     const [editingExpense, setEditingExpense] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -3594,6 +3595,165 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
     );
 }
 
+function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthSelect }) {
+    const [timeWindow, setTimeWindow] = useState('6m');
+    const [metric, setMetric] = useState('expenses');
+
+    const convertSync = (amount, from, to) => {
+        if (!from || !to || from === to) return amount;
+        const rates = CurrencyService.fallbackRates[from];
+        if (rates && rates[to]) return Math.round(amount * rates[to] * 100) / 100;
+        return amount;
+    };
+    const fmt = (n) => ValidationUtils.formatCurrency(n, defaultCurrency);
+
+    const getMonths = () => {
+        const now = new Date();
+        const months = [];
+        if (timeWindow === 'year') {
+            for (let m = 0; m <= now.getMonth(); m++) months.push({ year: now.getFullYear(), month: m });
+        } else {
+            const count = timeWindow === '3m' ? 3 : timeWindow === '12m' ? 12 : 6;
+            for (let i = count - 1; i >= 0; i--) {
+                const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                months.push({ year: d.getFullYear(), month: d.getMonth() });
+            }
+        }
+        return months;
+    };
+
+    const months = getMonths();
+    const now = new Date();
+    const curYear = now.getFullYear(), curMonth = now.getMonth();
+
+    const monthData = months.map(({ year, month }) => {
+        const mm = String(month + 1).padStart(2, '0');
+        const prefix = `${year}-${mm}`;
+        const me = expenses.filter(e => (e.date || '').startsWith(prefix));
+        const mi = income.filter(i => (i.date || '').startsWith(prefix));
+        const totalExp = me.reduce((s, e) => s + convertSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
+        const totalInc = mi.reduce((s, i) => s + convertSync(i.amount, i.currency || 'GBP', defaultCurrency), 0);
+        const net = totalInc - totalExp;
+        const savingsRate = totalInc > 0 ? ((totalInc - totalExp) / totalInc) * 100 : null;
+        const isCurrent = year === curYear && month === curMonth;
+        const lastDay = new Date(year, month + 1, 0).getDate();
+        const from = `${year}-${mm}-01`;
+        const to = `${year}-${mm}-${String(lastDay).padStart(2, '0')}`;
+        const label = new Date(year, month, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+        let barValue = 0;
+        if (metric === 'expenses') barValue = totalExp;
+        else if (metric === 'income') barValue = totalInc;
+        else if (metric === 'net') barValue = Math.max(0, net);
+        else if (metric === 'savings') barValue = savingsRate !== null ? Math.max(0, savingsRate) : 0;
+        else if (metric.startsWith('cat_')) { const cid = parseInt(metric.slice(4)); barValue = me.filter(e => e.categoryId === cid).reduce((s, e) => s + convertSync(e.amount, e.currency || 'GBP', defaultCurrency), 0); }
+        return { year, month, label, totalExp, totalInc, net, savingsRate, isCurrent, from, to, barValue, prefix, mm };
+    });
+
+    const completeMonths = monthData.filter(m => !m.isCurrent && (m.totalExp > 0 || m.totalInc > 0));
+    const maxBar = Math.max(...monthData.map(m => m.barValue), 1);
+    const selectedCat = metric.startsWith('cat_') ? categories.find(c => c.id === parseInt(metric.slice(4))) : null;
+    const allSubcats = selectedCat ? [...new Set(expenses.filter(e => e.categoryId === selectedCat.id).map(e => e.subcategory).filter(Boolean))] : [];
+    const metricOpts = [
+        { value: 'expenses', label: 'Total Expenses' },
+        { value: 'income', label: 'Total Income' },
+        { value: 'net', label: 'Net Balance' },
+        { value: 'savings', label: 'Savings Rate' },
+        ...categories.map(c => ({ value: `cat_${c.id}`, label: c.name }))
+    ];
+    const barColor = (metric === 'net' || metric === 'savings') ? '#198754' : 'linear-gradient(90deg,#4a6cf7,#6a3de8)';
+
+    return (
+        <div className="screen">
+            <div className="screen-header"><h2><i className="fas fa-chart-line me-2"></i>Monthly Trends</h2></div>
+            <div style={{padding:'0 1rem 0.75rem'}}>
+                <div className="btn-group w-100" role="group">
+                    {[['3m','3 Months'],['6m','6 Months'],['12m','12 Months'],['year','This Year']].map(([v,l]) => (
+                        <button key={v} type="button" className={'btn btn-sm ' + (timeWindow === v ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setTimeWindow(v)} style={{fontSize:'0.75rem',whiteSpace:'nowrap'}}>{l}</button>
+                    ))}
+                </div>
+            </div>
+            <div style={{padding:'0 1rem 1rem'}}>
+                <select className="form-select form-select-sm" value={metric} onChange={e => setMetric(e.target.value)}>
+                    {metricOpts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+            </div>
+            {completeMonths.length < 2 ? (
+                <div style={{textAlign:'center',padding:'3rem 1rem'}}>
+                    <i className="fas fa-chart-line fa-3x text-muted" style={{display:'block',marginBottom:'1rem'}}></i>
+                    <h5 className="text-muted">Not enough data yet</h5>
+                    <p className="text-muted small">Add expenses over at least 2 months to see trends.</p>
+                </div>
+            ) : (
+                <React.Fragment>
+                    <div style={{padding:'0 1rem',overflowX:'auto'}}>
+                        <table className="table table-sm table-hover" style={{fontSize:'0.82rem'}}>
+                            <thead>
+                                <tr className="table-light">
+                                    <th>Month</th>
+                                    <th className="text-end">Income</th>
+                                    <th className="text-end">Expenses</th>
+                                    <th className="text-end">Net</th>
+                                    <th className="text-end">Savings%</th>
+                                    <th style={{minWidth:'70px'}}>Bar</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {monthData.map(m => (
+                                    <tr key={`${m.year}-${m.month}`}
+                                        style={{cursor:'pointer', ...(m.isCurrent ? {outline:'2px dashed #adb5bd',outlineOffset:'-2px'} : {})}}
+                                        onClick={() => onMonthSelect(m.from, m.to)}
+                                        title={`Tap to view ${m.label} expenses`}>
+                                        <td>{m.label}{m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.62rem'}}>current</span>}</td>
+                                        <td className="text-end" style={{color:'#198754'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span className="text-muted">—</span>}</td>
+                                        <td className="text-end">{m.totalExp > 0 ? fmt(m.totalExp) : <span className="text-muted">—</span>}</td>
+                                        <td className="text-end" style={{fontWeight:600,color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#6c757d'}}>
+                                            {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
+                                        </td>
+                                        <td className="text-end">{m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : <span className="text-muted">N/A</span>}</td>
+                                        <td style={{verticalAlign:'middle'}}>
+                                            <div className="progress" style={{height:'10px',borderRadius:'5px'}}>
+                                                <div className="progress-bar" style={{width:Math.min(100,(m.barValue/maxBar)*100)+'%',background:barColor,minWidth:m.barValue>0?'3px':'0'}}></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    {selectedCat && allSubcats.length > 0 && (
+                        <div style={{padding:'0 1rem 1rem'}}>
+                            <h6 style={{fontSize:'0.85rem',color:'#6c757d',marginBottom:'0.5rem'}}>
+                                <i className="fas fa-th me-1"></i>Subcategory breakdown — {selectedCat.name}
+                            </h6>
+                            <div style={{overflowX:'auto'}}>
+                                <table className="table table-sm table-bordered" style={{fontSize:'0.78rem'}}>
+                                    <thead>
+                                        <tr className="table-light">
+                                            <th>Month</th>
+                                            {allSubcats.map(s => <th key={s} className="text-end">{s}</th>)}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {monthData.map(m => (
+                                            <tr key={`sb-${m.year}-${m.month}`} style={m.isCurrent ? {outline:'2px dashed #adb5bd',outlineOffset:'-2px'} : {}}>
+                                                <td>{m.label}{m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.6rem'}}>now</span>}</td>
+                                                {allSubcats.map(s => {
+                                                    const amt = expenses.filter(e => e.categoryId === selectedCat.id && e.subcategory === s && (e.date||'').startsWith(m.prefix)).reduce((sum, e) => sum + convertSync(e.amount, e.currency||'GBP', defaultCurrency), 0);
+                                                    return <td key={s} className="text-end">{amt > 0 ? fmt(amt) : <span className="text-muted">—</span>}</td>;
+                                                })}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </React.Fragment>
+            )}
+        </div>
+    );
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -3603,6 +3763,8 @@ function App() {
     const [people, setPeople] = useState([]);
     const [budgetAlerts, setBudgetAlerts] = useState([]);
     const [billsDueSoon, setBillsDueSoon] = useState([]);
+    const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
+    const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
         try {
             const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
@@ -3668,7 +3830,8 @@ function App() {
 
     const renderScreen = () => {
         switch (currentScreen) {
-            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
+            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} />;
+            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} />;
             case 'categories': return <CategoryManager categories={categories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
