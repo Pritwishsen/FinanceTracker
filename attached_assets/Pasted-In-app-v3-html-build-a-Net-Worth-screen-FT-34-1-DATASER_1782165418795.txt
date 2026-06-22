@@ -1,0 +1,71 @@
+In app-v3.html, build a Net Worth screen (FT-34).
+
+1. DATASERVICE — add sync methods:
+   getNetWorthItems(): return JSON.parse(localStorage.getItem('financeApp_networth') || '[]')
+   saveNetWorthItems(items): localStorage.setItem('financeApp_networth', JSON.stringify(items))
+   addNetWorthItem({ name, value, currency, category, type, notes }):
+   // type: 'asset' or 'liability'
+   // asset categories: Cash | Investments | Property | Vehicle | Other
+   // liability categories: Mortgage | Loan | Credit Card | Other
+   const item = { id: Date.now(), name, value: parseFloat(value),
+     currency, category, type, notes: notes||'',
+     updatedAt: new Date().toISOString() };
+   push, saveNetWorthItems()
+   // SPEC RULE 2: auto-snapshot on EVERY add/edit/delete
+   this.autoSaveNetWorthSnapshot();
+   return item
+   updateNetWorthItem(id, updates):
+   find, merge updates, updatedAt = new Date().toISOString(), saveNetWorthItems()
+   this.autoSaveNetWorthSnapshot(); // auto-snapshot
+   deleteNetWorthItem(id): splice, saveNetWorthItems()
+   this.autoSaveNetWorthSnapshot(); // auto-snapshot
+   autoSaveNetWorthSnapshot():
+   // compute current net worth in default currency, then:
+   const history = JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]');
+   history.push({ date: new Date().toISOString().split('T')[0],
+     netWorth: this.computeNetWorth() });
+   const trimmed = history.slice(-24); // keep last 24 snapshots
+   localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(trimmed))
+   computeNetWorth(): sum all asset values minus liability values,
+   converted to defaultCurrency via CurrencyService.fallbackRates
+   getNetWorthHistory(): return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]')
+
+2. BUILD NetWorth COMPONENT:
+
+   SUMMARY CARDS (top):
+   - "Total Assets": sum of all asset values converted to defaultCurrency
+   - "Total Liabilities": sum of all liability values converted to defaultCurrency
+   - "Net Worth = Assets - Liabilities": large display, green if positive, red if negative
+   NOTE: NO "Save Snapshot" button. Snapshots are automatic.
+
+   NET WORTH HISTORY (line chart via Bootstrap progress or table):
+   - Show up to 24 stored snapshots
+   - Columns: Date | Net Worth | Change vs previous
+   - Change column: green ▲ if improved, red ▼ if declined
+   - Most recent first
+   - Empty state: "No history yet. Add your first asset or liability below."
+
+   ADD ITEM FORM:
+   - Fields: Name (required), Value (required, > 0), Currency,
+     Type (radio: Asset / Liability),
+     Category (dropdown — options depend on selected Type):
+       Asset: Cash, Investments, Property, Vehicle, Other
+       Liability: Mortgage, Loan, Credit Card, Other
+     Notes (optional)
+
+   ITEMS LIST — two sections: Assets and Liabilities:
+   - Each section shows category sub-headings grouping items
+   - Each item: name, formatted value + currency, category badge, optional notes
+   - Edit (pencil) and Delete (trash) buttons per item
+   - Editing or deleting automatically triggers a new snapshot
+   - Empty state per section: "No assets added yet." / "No liabilities added yet."
+
+   DOES NOT AFFECT Financial Summary totals.
+   Net Worth is a standalone snapshot — not linked to expenses/income.
+
+3. NAVIGATION — add: { key: "networth", icon: "fas fa-balance-scale", label: "Net Worth" }
+
+4. APP COMPONENT — add to renderScreen():
+   case "networth": return <NetWorth defaultCurrency={defaultCurrency} />
+
+No external libraries. Currency conversion via CurrencyService.fallbackRates only.

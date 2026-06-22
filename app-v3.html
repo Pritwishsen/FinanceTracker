@@ -644,6 +644,41 @@ class DataService {
     }
     static settleDebt(id) { const debts = this.getDebts(); const d = debts.find(x => x.id === id); if (d) { d.isSettled = true; d.settledAt = new Date().toISOString(); this.saveDebts(debts); } }
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); } }
+    static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
+    static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
+    static addNetWorthItem({ name, value, currency, category, type, notes }) {
+        const item = { id: Date.now(), name, value: parseFloat(value), currency, category, type, notes: notes||'', updatedAt: new Date().toISOString() };
+        const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
+        this.autoSaveNetWorthSnapshot(); return item;
+    }
+    static updateNetWorthItem(id, updates) {
+        const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
+        if (i !== -1) { items[i] = { ...items[i], ...updates, updatedAt: new Date().toISOString() }; this.saveNetWorthItems(items); }
+        this.autoSaveNetWorthSnapshot();
+    }
+    static deleteNetWorthItem(id) {
+        const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
+        if (i !== -1) { items.splice(i, 1); this.saveNetWorthItems(items); }
+        this.autoSaveNetWorthSnapshot();
+    }
+    static computeNetWorth() {
+        const defaultCurrency = (JSON.parse(localStorage.getItem('financeApp_settings') || '{}')).defaultCurrency || 'GBP';
+        const items = this.getNetWorthItems();
+        let total = 0;
+        items.forEach(item => {
+            const rates = CurrencyService.fallbackRates[item.currency];
+            const rate = rates ? (rates[defaultCurrency] || 1) : 1;
+            const converted = item.value * rate;
+            total += item.type === 'asset' ? converted : -converted;
+        });
+        return total;
+    }
+    static autoSaveNetWorthSnapshot() {
+        const history = JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]');
+        history.push({ date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth() });
+        localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
+    }
+    static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
 }
 window.DataService = DataService;
 
@@ -667,6 +702,7 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
         { key: 'debts', icon: 'fas fa-handshake', label: 'Debts' },
+        { key: 'networth', icon: 'fas fa-balance-scale', label: 'Net Worth' },
         { key: 'export', icon: 'fas fa-file-export', label: 'Export' },
         { key: 'trends', icon: 'fas fa-chart-line', label: 'Trends' },
         { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
@@ -3913,6 +3949,285 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
     );
 }
 
+function NetWorth({ defaultCurrency }) {
+    const [items, setItems] = useState(() => DataService.getNetWorthItems());
+    const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
+    const [showForm, setShowForm] = useState(false);
+    const [editingItem, setEditingItem] = useState(null);
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '' });
+    const [formErrors, setFormErrors] = useState({});
+    const [showDeleteModal, setShowDeleteModal] = useState(null);
+    const [showHistory, setShowHistory] = useState(true);
+
+    const ASSET_CATS = ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'];
+    const LIABILITY_CATS = ['Mortgage', 'Loan', 'Credit Card', 'Other'];
+    const CURRENCIES = ['GBP', 'EUR', 'USD', 'INR'];
+
+    const reload = () => { setItems(DataService.getNetWorthItems()); setHistory(DataService.getNetWorthHistory()); };
+
+    const convertToDefault = (value, currency) => {
+        const rates = CurrencyService.fallbackRates[currency];
+        const rate = rates ? (rates[defaultCurrency] || 1) : 1;
+        return value * rate;
+    };
+
+    const fmt = (amount, currency) => {
+        try { return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(amount); }
+        catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
+    };
+
+    const totalAssets = items.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const totalLiabilities = items.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const netWorth = totalAssets - totalLiabilities;
+
+    const openAddForm = () => {
+        setEditingItem(null);
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '' });
+        setFormErrors({});
+        setShowForm(true);
+    };
+
+    const openEditForm = (item) => {
+        setEditingItem(item);
+        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, category: item.category, notes: item.notes || '' });
+        setFormErrors({});
+        setShowForm(true);
+    };
+
+    const handleTypeChange = (type) => {
+        setForm(f => ({ ...f, type, category: type === 'asset' ? 'Cash' : 'Mortgage' }));
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        const errors = {};
+        if (!form.name.trim()) errors.name = 'Name is required';
+        if (!form.value || parseFloat(form.value) <= 0) errors.value = 'Value must be greater than 0';
+        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
+        if (editingItem) {
+            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes });
+        } else {
+            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes });
+        }
+        setShowForm(false);
+        setEditingItem(null);
+        reload();
+    };
+
+    const handleDelete = (id) => { DataService.deleteNetWorthItem(id); setShowDeleteModal(null); reload(); };
+
+    const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
+    const assetItems = items.filter(i => i.type === 'asset');
+    const liabilityItems = items.filter(i => i.type === 'liability');
+    const assetsByCat = groupBy(assetItems, 'category');
+    const liabsByCat = groupBy(liabilityItems, 'category');
+
+    const sortedHistory = [...history].reverse();
+
+    const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
+
+    const ItemCard = ({ item, colorClass }) => (
+        <div style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
+            <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}</div>
+                <div style={{fontSize:'0.92rem',fontWeight:700,color:colorClass}}>{fmt(item.value, item.currency)}</div>
+                {item.currency !== defaultCurrency && (
+                    <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
+                )}
+                {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
+            </div>
+            <div style={{display:'flex',gap:'4px',flexShrink:0}}>
+                <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => openEditForm(item)}>
+                    <i className="fas fa-pencil-alt"></i>
+                </button>
+                <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(item.id)}>
+                    <i className="fas fa-trash"></i>
+                </button>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="screen">
+            <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
+
+            {/* Summary cards */}
+            <div style={{padding:'0 1rem 0.5rem'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
+                    <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'10px 12px'}}>
+                        <div style={{fontSize:'0.7rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL ASSETS</div>
+                        <div style={{fontSize:'0.95rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</div>
+                    </div>
+                    <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'10px 12px'}}>
+                        <div style={{fontSize:'0.7rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL LIABILITIES</div>
+                        <div style={{fontSize:'0.95rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</div>
+                    </div>
+                </div>
+                <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'14px 16px',textAlign:'center'}}>
+                    <div style={{fontSize:'0.72rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.05em',marginBottom:'4px'}}>NET WORTH</div>
+                    <div style={{fontSize:'1.7rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
+                    <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'4px'}}>Assets − Liabilities</div>
+                </div>
+            </div>
+
+            {/* Add button */}
+            <div style={{padding:'0.5rem 1rem 0.75rem',display:'flex',gap:'8px'}}>
+                <button type="button" className={'btn btn-sm flex-fill ' + (showForm ? 'btn-secondary' : 'btn-primary')}
+                    onClick={() => { if (showForm) { setShowForm(false); setEditingItem(null); } else openAddForm(); }}>
+                    <i className={'fas fa-' + (showForm ? 'times' : 'plus') + ' me-1'}></i>
+                    {showForm ? 'Cancel' : 'Add Asset / Liability'}
+                </button>
+            </div>
+
+            {/* Form */}
+            {showForm && (
+                <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
+                    <h6 style={{marginBottom:'0.6rem',fontSize:'0.85rem',fontWeight:600}}>{editingItem ? 'Edit Item' : 'Add New Item'}</h6>
+                    <form onSubmit={handleSubmit}>
+                        <div className="mb-2" style={{display:'flex',gap:'8px'}}>
+                            <button type="button" className={'btn btn-sm flex-fill ' + (form.type==='asset' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => handleTypeChange('asset')}>
+                                <i className="fas fa-plus-circle me-1"></i>Asset
+                            </button>
+                            <button type="button" className={'btn btn-sm flex-fill ' + (form.type==='liability' ? 'btn-danger' : 'btn-outline-secondary')} onClick={() => handleTypeChange('liability')}>
+                                <i className="fas fa-minus-circle me-1"></i>Liability
+                            </button>
+                        </div>
+                        <div className="mb-2">
+                            <input className={'form-control form-control-sm' + (formErrors.name ? ' is-invalid' : '')}
+                                placeholder="Name (e.g. Savings Account)" value={form.name}
+                                onChange={e => setForm(f => ({...f, name: e.target.value}))} />
+                            {formErrors.name && <div className="invalid-feedback">{formErrors.name}</div>}
+                        </div>
+                        <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 100px',gap:'8px'}}>
+                            <div>
+                                <input type="number" min="0.01" step="0.01"
+                                    className={'form-control form-control-sm' + (formErrors.value ? ' is-invalid' : '')}
+                                    placeholder="Value" value={form.value}
+                                    onChange={e => setForm(f => ({...f, value: e.target.value}))} />
+                                {formErrors.value && <div className="invalid-feedback">{formErrors.value}</div>}
+                            </div>
+                            <select className="form-select form-select-sm" value={form.currency} onChange={e => setForm(f => ({...f, currency: e.target.value}))}>
+                                {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                        </div>
+                        <div className="mb-2">
+                            <select className="form-select form-select-sm" value={form.category} onChange={e => setForm(f => ({...f, category: e.target.value}))}>
+                                {(form.type === 'asset' ? ASSET_CATS : LIABILITY_CATS).map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                        </div>
+                        <div className="mb-3">
+                            <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
+                                onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
+                        </div>
+                        <div style={{display:'flex',gap:'8px'}}>
+                            <button type="submit" className="btn btn-sm btn-primary">{editingItem ? 'Save Changes' : 'Add Item'}</button>
+                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}>Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            )}
+
+            {/* Assets list */}
+            <div style={{padding:'0 1rem'}}>
+                <div style={{marginBottom:'1rem'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px'}}>
+                        <h6 style={{margin:0,fontSize:'0.85rem',fontWeight:700,color:'#198754'}}><i className="fas fa-arrow-up me-1"></i>Assets</h6>
+                        <span className="badge bg-success" style={{fontSize:'0.62rem'}}>{assetItems.length}</span>
+                        <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</span>
+                    </div>
+                    {assetItems.length === 0
+                        ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No assets added yet.</div>
+                        : ASSET_CATS.filter(c => assetsByCat[c]).map(cat => (
+                            <div key={cat} style={{marginBottom:'8px'}}>
+                                <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
+                                {assetsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#198754" />)}
+                            </div>
+                        ))
+                    }
+                </div>
+
+                {/* Liabilities list */}
+                <div style={{marginBottom:'1rem'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px'}}>
+                        <h6 style={{margin:0,fontSize:'0.85rem',fontWeight:700,color:'#dc3545'}}><i className="fas fa-arrow-down me-1"></i>Liabilities</h6>
+                        <span className="badge bg-danger" style={{fontSize:'0.62rem'}}>{liabilityItems.length}</span>
+                        <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</span>
+                    </div>
+                    {liabilityItems.length === 0
+                        ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No liabilities added yet.</div>
+                        : LIABILITY_CATS.filter(c => liabsByCat[c]).map(cat => (
+                            <div key={cat} style={{marginBottom:'8px'}}>
+                                <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
+                                {liabsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#dc3545" />)}
+                            </div>
+                        ))
+                    }
+                </div>
+            </div>
+
+            {/* History table */}
+            <div style={{padding:'0 1rem 1rem'}}>
+                <button type="button" className="btn btn-sm btn-outline-secondary w-100 mb-2" onClick={() => setShowHistory(v => !v)}>
+                    <i className={'fas fa-' + (showHistory ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
+                    {showHistory ? 'Hide' : 'Show'} History ({sortedHistory.length} snapshots)
+                </button>
+                {showHistory && (
+                    sortedHistory.length === 0
+                        ? <div style={{textAlign:'center',padding:'1rem',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No history yet. Add your first asset or liability above.</div>
+                        : <div style={{borderRadius:'10px',overflow:'hidden',border:'1px solid #dee2e6'}}>
+                            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.8rem'}}>
+                                <thead>
+                                    <tr style={{background:'#f8f9fa'}}>
+                                        <th style={{padding:'7px 10px',textAlign:'left',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Date</th>
+                                        <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Net Worth</th>
+                                        <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Change</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {sortedHistory.map((entry, idx) => {
+                                        const prev = sortedHistory[idx + 1];
+                                        const change = prev != null ? entry.netWorth - prev.netWorth : null;
+                                        const isFirst = idx === 0;
+                                        return (
+                                            <tr key={idx} style={{borderBottom:idx < sortedHistory.length-1 ? '1px solid #f0f0f0' : 'none', background:isFirst?'#f0fff4':'#fff'}}>
+                                                <td style={{padding:'7px 10px',color:'#495057'}}>
+                                                    {new Date(entry.date+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+                                                    {isFirst && <span className="badge bg-success ms-1" style={{fontSize:'0.58rem'}}>Latest</span>}
+                                                </td>
+                                                <td style={{padding:'7px 10px',textAlign:'right',fontWeight:isFirst?700:400,color:entry.netWorth>=0?'#198754':'#dc3545'}}>
+                                                    {fmt(entry.netWorth, defaultCurrency)}
+                                                </td>
+                                                <td style={{padding:'7px 10px',textAlign:'right',fontWeight:600,color:change===null?'#adb5bd':change>0?'#198754':change<0?'#dc3545':'#6c757d'}}>
+                                                    {change === null ? '—' : change === 0 ? '±0' : (change > 0 ? '▲ ' : '▼ ') + fmt(Math.abs(change), defaultCurrency)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                          </div>
+                )}
+            </div>
+
+            {/* Delete modal */}
+            {showDeleteModal && (
+                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Delete Item?</h5></div>
+                            <div className="modal-body"><p className="mb-0">Delete this item? This cannot be undone.</p></div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowDeleteModal(null)}>Cancel</button>
+                                <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(showDeleteModal)}><i className="fas fa-trash me-1"></i>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const [activeTab, setActiveTab] = useState('owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
@@ -4293,6 +4608,7 @@ function App() {
             case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
+            case 'networth': return <NetWorth defaultCurrency={defaultCurrency} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
