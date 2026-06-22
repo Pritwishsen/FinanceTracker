@@ -3958,6 +3958,10 @@ function NetWorth({ defaultCurrency }) {
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
+    const [selectedPerson, setSelectedPerson] = useState('own');
+    const [people, setPeople] = useState(() => DataService.getPeople());
+
+    useEffect(() => { setPeople(DataService.getPeople()); }, []);
 
     const ASSET_CATS = ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'];
     const LIABILITY_CATS = ['Mortgage', 'Loan', 'Credit Card', 'Other'];
@@ -3976,8 +3980,30 @@ function NetWorth({ defaultCurrency }) {
         catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
     };
 
+    // Cash Flow (income − expenses) filtered by person
+    const allExpenses = DataService.getExpenses ? DataService.getExpenses() : (DataService.data ? DataService.data.expenses : []);
+    const allIncome = DataService.getIncome ? DataService.getIncome() : (DataService.data ? DataService.data.income : []);
+    const filterByPerson = (arr, paidByKey) => {
+        if (selectedPerson === 'own') return arr.filter(r => !r[paidByKey] || r[paidByKey].trim() === '');
+        return arr.filter(r => r[paidByKey] && r[paidByKey].trim() === selectedPerson);
+    };
+    const filteredExpenses = filterByPerson(allExpenses || [], 'paidBy');
+    const filteredIncome = (allIncome || []).filter(r => {
+        const person = (r.whosIncome || r.paidBy || '').trim();
+        if (selectedPerson === 'own') return person === '';
+        return person === selectedPerson;
+    });
+    const totalIncomeConverted = filteredIncome.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
+    const totalExpensesConverted = filteredExpenses.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
+    const cashFlow = totalIncomeConverted - totalExpensesConverted;
+
+    // Debts "I Owe" → shown as liabilities
+    const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled);
+
     const totalAssets = items.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-    const totalLiabilities = items.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const totalManualLiabilities = items.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const totalDebtLiabilities = debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
+    const totalLiabilities = totalManualLiabilities + totalDebtLiabilities;
     const netWorth = totalAssets - totalLiabilities;
 
     const openAddForm = () => {
@@ -4051,6 +4077,14 @@ function NetWorth({ defaultCurrency }) {
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
 
+            {/* Person filter */}
+            <div style={{padding:'0 1rem 0.5rem'}}>
+                <select className="form-select form-select-sm" value={selectedPerson} onChange={e => setSelectedPerson(e.target.value)}>
+                    <option value="own">Own (Me)</option>
+                    {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
+                </select>
+            </div>
+
             {/* Summary cards */}
             <div style={{padding:'0 1rem 0.5rem'}}>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
@@ -4063,15 +4097,22 @@ function NetWorth({ defaultCurrency }) {
                         <div style={{fontSize:'0.95rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</div>
                     </div>
                 </div>
-                <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'14px 16px',textAlign:'center'}}>
-                    <div style={{fontSize:'0.72rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.05em',marginBottom:'4px'}}>NET WORTH</div>
-                    <div style={{fontSize:'1.7rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
-                    <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'4px'}}>Assets − Liabilities</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
+                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'12px 14px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.68rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.04em',marginBottom:'3px'}}>NET WORTH</div>
+                        <div style={{fontSize:'1.15rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.68rem',color:'#6c757d',marginTop:'3px'}}>Assets − Liabilities</div>
+                    </div>
+                    <div style={{background:cashFlow>=0?'#f0fff4':'#fff5f5',border:`1px solid ${cashFlow>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'12px 14px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.68rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.04em',marginBottom:'3px'}}>NET SAVINGS</div>
+                        <div style={{fontSize:'1.15rem',fontWeight:800,color:cashFlow>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(cashFlow, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.68rem',color:'#6c757d',marginTop:'3px'}}>Income − Expenses</div>
+                    </div>
                 </div>
             </div>
 
             {/* Add button */}
-            <div style={{padding:'0.5rem 1rem 0.75rem',display:'flex',gap:'8px'}}>
+            <div style={{padding:'0.25rem 1rem 0.75rem',display:'flex',gap:'8px'}}>
                 <button type="button" className={'btn btn-sm flex-fill ' + (showForm ? 'btn-secondary' : 'btn-primary')}
                     onClick={() => { if (showForm) { setShowForm(false); setEditingItem(null); } else openAddForm(); }}>
                     <i className={'fas fa-' + (showForm ? 'times' : 'plus') + ' me-1'}></i>
@@ -4150,17 +4191,39 @@ function NetWorth({ defaultCurrency }) {
                 <div style={{marginBottom:'1rem'}}>
                     <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px'}}>
                         <h6 style={{margin:0,fontSize:'0.85rem',fontWeight:700,color:'#dc3545'}}><i className="fas fa-arrow-down me-1"></i>Liabilities</h6>
-                        <span className="badge bg-danger" style={{fontSize:'0.62rem'}}>{liabilityItems.length}</span>
+                        <span className="badge bg-danger" style={{fontSize:'0.62rem'}}>{liabilityItems.length + debtLiabilities.length}</span>
                         <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</span>
                     </div>
-                    {liabilityItems.length === 0
+                    {liabilityItems.length === 0 && debtLiabilities.length === 0
                         ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No liabilities added yet.</div>
-                        : LIABILITY_CATS.filter(c => liabsByCat[c]).map(cat => (
-                            <div key={cat} style={{marginBottom:'8px'}}>
-                                <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
-                                {liabsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#dc3545" />)}
-                            </div>
-                        ))
+                        : <>
+                            {LIABILITY_CATS.filter(c => liabsByCat[c]).map(cat => (
+                                <div key={cat} style={{marginBottom:'8px'}}>
+                                    <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat}</div>
+                                    {liabsByCat[cat].map(item => <ItemCard key={item.id} item={item} colorClass="#dc3545" />)}
+                                </div>
+                            ))}
+                            {debtLiabilities.length > 0 && (
+                                <div style={{marginBottom:'8px'}}>
+                                    <div style={{fontSize:'0.7rem',fontWeight:700,color:'#e83e8c',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>
+                                        Debts I Owe
+                                        <span className="badge ms-1" style={{background:'#e83e8c',fontSize:'0.55rem',verticalAlign:'middle'}}>From Debt Tracker</span>
+                                    </div>
+                                    {debtLiabilities.map(debt => (
+                                        <div key={debt.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #f5c2d0',background:'#fff5f8',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
+                                            <div style={{flex:1,minWidth:0}}>
+                                                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{debt.counterparty}</div>
+                                                <div style={{fontSize:'0.9rem',fontWeight:700,color:'#dc3545'}}>{fmt(debt.amount, debt.currency)}</div>
+                                                {debt.currency !== defaultCurrency && <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(debt.amount, debt.currency), defaultCurrency)}</div>}
+                                                {debt.dueDate && <div style={{fontSize:'0.72rem',color:'#6c757d'}}>Due: {new Date(debt.dueDate+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
+                                                {debt.notes && <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>{debt.notes}</div>}
+                                            </div>
+                                            <span style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,marginTop:'2px'}}>auto</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                          </>
                     }
                 </div>
             </div>
