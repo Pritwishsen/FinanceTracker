@@ -3633,17 +3633,30 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
     const curYear = now.getFullYear(), curMonth = now.getMonth();
     const personName = currentUser ? (currentUser.displayName || 'Me') : 'Me';
 
+    const myName = (currentUser ? (currentUser.displayName || '') : '').toLowerCase().trim();
+
     const filteredExpenses = (() => {
         let exps = expenses;
-        if (selectedPerson === '__me__') exps = exps.filter(e => !(e.paidBy || '').trim());
-        else if (selectedPerson !== '__all__') exps = exps.filter(e => (e.paidBy || '').trim() === selectedPerson);
+        if (selectedPerson === '__me__') {
+            exps = exps.filter(e => {
+                const pb = (e.paidBy || '').toLowerCase().trim();
+                return !pb || (myName && pb === myName);
+            });
+        } else if (selectedPerson !== '__all__') {
+            exps = exps.filter(e => (e.paidBy || '').trim() === selectedPerson);
+        }
         if (selectedCats.length > 0) exps = exps.filter(e => selectedCats.includes(e.categoryId));
         return exps;
     })();
 
     const filteredIncome = (() => {
         if (selectedPerson === '__all__') return income;
-        if (selectedPerson === '__me__') return income.filter(i => !(i.whosIncome || i.paidBy || '').trim());
+        if (selectedPerson === '__me__') {
+            return income.filter(i => {
+                const wi = (i.whosIncome || i.paidBy || '').toLowerCase().trim();
+                return !wi || (myName && wi === myName);
+            });
+        }
         return income.filter(i => (i.whosIncome || i.paidBy || '').trim() === selectedPerson);
     })();
 
@@ -3786,7 +3799,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                         </svg>
                     </div>
 
-                    <div style={{padding:'0 1rem 0.25rem',display:'grid',gridTemplateColumns:'1fr auto auto auto auto',gap:'4px',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
+                    <div style={{padding:'0 10px 0.25rem',display:'grid',gridTemplateColumns:'1fr 65px 65px 65px 44px',gap:'4px',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
                         <span>Month</span>
                         <span style={{textAlign:'right',color:'#198754'}}>Income</span>
                         <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
@@ -3802,18 +3815,18 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                             const hasInc = Object.keys(m.incomeBreakdown).length > 0;
                             return (
                                 <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
-                                    <div style={{display:'grid',gridTemplateColumns:'1fr auto auto auto auto',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff',cursor:'pointer'}}
+                                    <div style={{display:'grid',gridTemplateColumns:'1fr 65px 65px 65px 44px',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff',cursor:'pointer'}}
                                         onClick={() => onMonthSelect(m.from, m.to)} title={`View ${m.label} expenses`}>
                                         <div style={{fontWeight:600,fontSize:'0.85rem'}}>
                                             {m.label}
                                             {m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.6rem'}}>current</span>}
                                         </div>
-                                        <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right',minWidth:'60px'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>
-                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',minWidth:'60px'}}>{m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}</div>
-                                        <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',minWidth:'60px',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
+                                        <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>
+                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right'}}>{m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}</div>
+                                        <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
                                             {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
                                         </div>
-                                        <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right',minWidth:'42px'}}>
+                                        <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right'}}>
                                             {m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : 'N/A'}
                                         </div>
                                     </div>
@@ -3854,7 +3867,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                                                         </div>
                                                         {expanded[catKey] && hasSubs && Object.entries(data.subBreakdown).sort((a,b) => b[1]-a[1]).map(([sub, amt]) => (
                                                             <div key={sub} style={{display:'flex',padding:'3px 10px 3px 46px',fontSize:'0.77rem',color:'#6c757d',background:'#fffdf8'}}>
-                                                                <span style={{flex:1}}><i className="fas fa-angle-right me-1"></i>{sub}</span>
+                                                                <span style={{flex:1}}>{sub}</span>
                                                                 <span>{fmt(amt)}</span>
                                                             </div>
                                                         ))}
