@@ -646,8 +646,8 @@ class DataService {
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); } }
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
-    static addNetWorthItem({ name, value, currency, category, type, notes }) {
-        const item = { id: Date.now(), name, value: parseFloat(value), currency, category, type, notes: notes||'', updatedAt: new Date().toISOString() };
+    static addNetWorthItem({ name, value, currency, category, type, notes, person }) {
+        const item = { id: Date.now(), name, value: parseFloat(value), currency, category, type, notes: notes||'', person: person||'own', updatedAt: new Date().toISOString() };
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(); return item;
     }
@@ -3954,7 +3954,7 @@ function NetWorth({ defaultCurrency }) {
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '' });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: 'own' });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -3968,6 +3968,11 @@ function NetWorth({ defaultCurrency }) {
         setAllExpenses(DataService.data.expenses || []);
         setAllIncome(DataService.data.income || []);
     }, []);
+
+    // Sync form person when person filter changes (only when form is not open for editing)
+    useEffect(() => {
+        if (!editingItem) setForm(f => ({...f, person: selectedPerson}));
+    }, [selectedPerson]);
 
     const ASSET_CATS = ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'];
     const LIABILITY_CATS = ['Mortgage', 'Loan', 'Credit Card', 'Other'];
@@ -4003,22 +4008,26 @@ function NetWorth({ defaultCurrency }) {
     // Debts "I Owe" → shown as liabilities
     const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled);
 
-    const totalAssets = items.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-    const totalManualLiabilities = items.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    // Filter items by selected person
+    const visibleItems = items.filter(i => (i.person || 'own') === selectedPerson);
+
+    const totalAssets = visibleItems.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const totalManualLiabilities = visibleItems.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalDebtLiabilities = debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
     const totalLiabilities = totalManualLiabilities + totalDebtLiabilities;
-    const netWorth = totalAssets - totalLiabilities;
+    // Net Worth = Total Assets + Net Savings (Cash Flow) − Total Liabilities
+    const netWorth = totalAssets + cashFlow - totalLiabilities;
 
     const openAddForm = () => {
         setEditingItem(null);
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '' });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: selectedPerson });
         setFormErrors({});
         setShowForm(true);
     };
 
     const openEditForm = (item) => {
         setEditingItem(item);
-        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, category: item.category, notes: item.notes || '' });
+        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, category: item.category, notes: item.notes || '', person: item.person || 'own' });
         setFormErrors({});
         setShowForm(true);
     };
@@ -4034,9 +4043,9 @@ function NetWorth({ defaultCurrency }) {
         if (!form.value || parseFloat(form.value) <= 0) errors.value = 'Value must be greater than 0';
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
         if (editingItem) {
-            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes });
+            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' });
         } else {
-            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes });
+            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' });
         }
         setShowForm(false);
         setEditingItem(null);
@@ -4046,8 +4055,8 @@ function NetWorth({ defaultCurrency }) {
     const handleDelete = (id) => { DataService.deleteNetWorthItem(id); setShowDeleteModal(null); reload(); };
 
     const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
-    const assetItems = items.filter(i => i.type === 'asset');
-    const liabilityItems = items.filter(i => i.type === 'liability');
+    const assetItems = visibleItems.filter(i => i.type === 'asset');
+    const liabilityItems = visibleItems.filter(i => i.type === 'liability');
     const assetsByCat = groupBy(assetItems, 'category');
     const liabsByCat = groupBy(liabilityItems, 'category');
 
@@ -4088,29 +4097,28 @@ function NetWorth({ defaultCurrency }) {
                 </select>
             </div>
 
-            {/* Summary cards */}
+            {/* Summary banner — Net Worth | Cash Flow | Liabilities */}
             <div style={{padding:'0 1rem 0.5rem'}}>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
-                    <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'10px 12px'}}>
-                        <div style={{fontSize:'0.7rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL ASSETS</div>
-                        <div style={{fontSize:'0.95rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>NET WORTH</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Flow − Liab</div>
                     </div>
-                    <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'10px 12px'}}>
-                        <div style={{fontSize:'0.7rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL LIABILITIES</div>
-                        <div style={{fontSize:'0.95rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</div>
+                    <div style={{background:cashFlow>=0?'#f0fff4':'#fff5f5',border:`1px solid ${cashFlow>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>CASH FLOW</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:cashFlow>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(cashFlow, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Income − Expenses</div>
+                    </div>
+                    <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>LIABILITIES</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:'#dc3545',lineHeight:1.1}}>{fmt(totalLiabilities, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Total owed</div>
                     </div>
                 </div>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
-                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'12px 14px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.68rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.04em',marginBottom:'3px'}}>NET WORTH</div>
-                        <div style={{fontSize:'1.15rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.68rem',color:'#6c757d',marginTop:'3px'}}>Assets − Liabilities</div>
-                    </div>
-                    <div style={{background:cashFlow>=0?'#f0fff4':'#fff5f5',border:`1px solid ${cashFlow>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'12px 14px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.68rem',color:'#6c757d',fontWeight:600,letterSpacing:'0.04em',marginBottom:'3px'}}>NET SAVINGS</div>
-                        <div style={{fontSize:'1.15rem',fontWeight:800,color:cashFlow>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(cashFlow, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.68rem',color:'#6c757d',marginTop:'3px'}}>Income − Expenses</div>
-                    </div>
+                <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'9px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                    <span style={{fontSize:'0.7rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em'}}>TOTAL ASSETS</span>
+                    <span style={{fontSize:'0.95rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</span>
                 </div>
             </div>
 
@@ -4157,6 +4165,13 @@ function NetWorth({ defaultCurrency }) {
                         <div className="mb-2">
                             <select className="form-select form-select-sm" value={form.category} onChange={e => setForm(f => ({...f, category: e.target.value}))}>
                                 {(form.type === 'asset' ? ASSET_CATS : LIABILITY_CATS).map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                        </div>
+                        <div className="mb-2">
+                            <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
+                            <select className="form-select form-select-sm" value={form.person} onChange={e => setForm(f => ({...f, person: e.target.value}))}>
+                                <option value="own">Own (Me)</option>
+                                {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
                             </select>
                         </div>
                         <div className="mb-3">
