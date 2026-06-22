@@ -960,10 +960,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     );
 }
 
-function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '' }) {
+function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '' }) {
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
-    const [filterPerson, setFilterPerson] = useState('');
+    const [filterPerson, setFilterPerson] = useState(initialPaidBy || '');
     const [filterDateFrom, setFilterDateFrom] = useState(initialDateFrom || '');
     const [filterDateTo, setFilterDateTo] = useState(initialDateTo || '');
     const [editingExpense, setEditingExpense] = useState(null);
@@ -3799,30 +3799,34 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                         </svg>
                     </div>
 
-                    <div style={{padding:'0 10px 0.25rem',display:'grid',gridTemplateColumns:'1fr 65px 65px 65px 44px',gap:'4px',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
-                        <span>Month</span>
-                        <span style={{textAlign:'right',color:'#198754'}}>Income</span>
-                        <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
-                        <span style={{textAlign:'right'}}>Net</span>
-                        <span style={{textAlign:'right'}}>Savings%</span>
-                    </div>
-
                     <div style={{padding:'0 1rem 1rem'}}>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 62px 52px',gap:'4px',padding:'0 10px 0.3rem',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
+                            <span>Month</span>
+                            <span style={{textAlign:'right',color:'#198754'}}>Income</span>
+                            <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
+                            <span style={{textAlign:'right'}}>Net</span>
+                            <span style={{textAlign:'right'}}>Savings%</span>
+                        </div>
+
                         {monthData.map(m => {
                             const expKey = `${m.prefix}:exp`;
                             const incKey = `${m.prefix}:inc`;
                             const hasCat = Object.keys(m.catBreakdown).length > 0;
                             const hasInc = Object.keys(m.incomeBreakdown).length > 0;
+                            const paidByFilter = selectedPerson === '__all__' ? '' : selectedPerson === '__me__' ? '__mine__' : selectedPerson;
                             return (
                                 <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
-                                    <div style={{display:'grid',gridTemplateColumns:'1fr 65px 65px 65px 44px',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff',cursor:'pointer'}}
-                                        onClick={() => onMonthSelect(m.from, m.to)} title={`View ${m.label} expenses`}>
+                                    <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 62px 52px',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
                                         <div style={{fontWeight:600,fontSize:'0.85rem'}}>
                                             {m.label}
                                             {m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.6rem'}}>current</span>}
                                         </div>
                                         <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>
-                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right'}}>{m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}</div>
+                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
+                                            onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to, paidByFilter)}
+                                            title={m.totalExp > 0 ? `View ${m.label} expenses` : undefined}>
+                                            {m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}
+                                        </div>
                                         <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
                                             {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
                                         </div>
@@ -3907,6 +3911,7 @@ function App() {
     const [billsDueSoon, setBillsDueSoon] = useState([]);
     const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
+    const [expensesInitPaidBy, setExpensesInitPaidBy] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
         try {
             const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
@@ -3972,8 +3977,8 @@ function App() {
 
     const renderScreen = () => {
         switch (currentScreen) {
-            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} />;
-            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} currentUser={currentUser} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
+            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} initialPaidBy={expensesInitPaidBy} />;
+            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} currentUser={currentUser} onMonthSelect={(from, to, paidBy) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setExpensesInitPaidBy(paidBy || ''); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} />;
             case 'categories': return <CategoryManager categories={categories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
