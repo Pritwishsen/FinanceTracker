@@ -638,9 +638,13 @@ class DataService {
     }
     static getDebts() { return JSON.parse(localStorage.getItem('financeApp_debts') || '[]'); }
     static saveDebts(d) { localStorage.setItem('financeApp_debts', JSON.stringify(d)); }
-    static addDebt({ counterparty, amount, currency, direction, notes, dueDate }) {
-        const debt = { id: Date.now(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', isSettled: false, createdAt: new Date().toISOString() };
+    static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person }) {
+        const debt = { id: Date.now(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', person: person||'own', isSettled: false, createdAt: new Date().toISOString() };
         const debts = this.getDebts(); debts.push(debt); this.saveDebts(debts); return debt;
+    }
+    static updateDebt(id, updates) {
+        const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id);
+        if (i !== -1) { debts[i] = { ...debts[i], ...updates }; this.saveDebts(debts); }
     }
     static settleDebt(id) { const debts = this.getDebts(); const d = debts.find(x => x.id === id); if (d) { d.isSettled = true; d.settledAt = new Date().toISOString(); this.saveDebts(debts); } }
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); } }
@@ -4005,8 +4009,8 @@ function NetWorth({ defaultCurrency }) {
     const totalExpensesConverted = filteredExpenses.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
     const cashFlow = totalIncomeConverted - totalExpensesConverted;
 
-    // Debts "I Owe" → shown as liabilities
-    const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled);
+    // Debts "I Owe" → shown as liabilities, filtered by selected person
+    const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled && (d.person || 'own') === selectedPerson);
 
     // Filter items by selected person
     const visibleItems = items.filter(i => (i.person || 'own') === selectedPerson);
@@ -4316,7 +4320,8 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const [activeTab, setActiveTab] = useState('owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
     const [showForm, setShowForm] = useState(false);
-    const [form, setForm] = useState({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '' });
+    const [editingDebt, setEditingDebt] = useState(null);
+    const [form, setForm] = useState({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: 'own' });
     const [formErrors, setFormErrors] = useState({});
     const [showSettleModal, setShowSettleModal] = useState(null);
     const [showDeleteModal, setShowDeleteModal] = useState(null);
@@ -4324,19 +4329,22 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const [linkedCatId, setLinkedCatId] = useState('');
     const [linkedSubcat, setLinkedSubcat] = useState('');
     const [showSettled, setShowSettled] = useState(false);
+    const [selectedPerson, setSelectedPerson] = useState('own');
+    const [people] = useState(() => DataService.getPeople());
 
     const reload = () => setDebts(DataService.getDebts());
     const today = new Date().toISOString().split('T')[0];
     const currencies = ['GBP', 'EUR', 'USD', 'INR'];
     const isOverdue = (d) => d.dueDate && d.dueDate < today && !d.isSettled;
 
-    const activeDebts = debts.filter(d => !d.isSettled && d.direction === activeTab);
-    const settledDebts = debts.filter(d => d.isSettled && d.direction === activeTab);
+    const personDebts = debts.filter(d => (d.person || 'own') === selectedPerson);
+    const activeDebts = personDebts.filter(d => !d.isSettled && d.direction === activeTab);
+    const settledDebts = personDebts.filter(d => d.isSettled && d.direction === activeTab);
     const sortedActive = [...activeDebts].sort((a, b) => (isOverdue(a) ? 0 : 1) - (isOverdue(b) ? 0 : 1) || new Date(b.createdAt) - new Date(a.createdAt));
 
     const sumByCurrency = (dir) => {
         const totals = {};
-        debts.filter(d => !d.isSettled && d.direction === dir).forEach(d => { totals[d.currency] = (totals[d.currency] || 0) + d.amount; });
+        personDebts.filter(d => !d.isSettled && d.direction === dir).forEach(d => { totals[d.currency] = (totals[d.currency] || 0) + d.amount; });
         return totals;
     };
     const oweTotals = sumByCurrency('owe');
@@ -4352,11 +4360,23 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
         if (!form.counterparty.trim()) errors.counterparty = 'Person name is required';
         if (!form.amount || parseFloat(form.amount) <= 0) errors.amount = 'Amount must be greater than 0';
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-        DataService.addDebt({ ...form, direction: activeTab });
-        setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '' });
+        if (editingDebt) {
+            DataService.updateDebt(editingDebt.id, { counterparty: form.counterparty.trim(), amount: parseFloat(form.amount), currency: form.currency, notes: form.notes, dueDate: form.dueDate, person: form.person || 'own' });
+            setEditingDebt(null);
+        } else {
+            DataService.addDebt({ ...form, counterparty: form.counterparty.trim(), direction: activeTab });
+        }
+        setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson });
         setFormErrors({});
         setShowForm(false);
         reload();
+    };
+
+    const openEditForm = (debt) => {
+        setEditingDebt(debt);
+        setForm({ counterparty: debt.counterparty, amount: String(debt.amount), currency: debt.currency, notes: debt.notes || '', dueDate: debt.dueDate || '', person: debt.person || 'own' });
+        setFormErrors({});
+        setShowForm(true);
     };
 
     const handleSettle = (debt) => {
@@ -4387,6 +4407,14 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-handshake me-2"></i>Debt Tracker</h2></div>
 
+            {/* Person filter */}
+            <div style={{padding:'0 1rem 0.5rem'}}>
+                <select className="form-select form-select-sm" value={selectedPerson} onChange={e => { setSelectedPerson(e.target.value); setShowForm(false); setEditingDebt(null); }}>
+                    <option value="own">Own (Me)</option>
+                    {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
+                </select>
+            </div>
+
             <div style={{padding:'0 1rem 0.75rem',display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
                 <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'10px 12px'}}>
                     <div style={{fontSize:'0.72rem',color:'#dc3545',fontWeight:700,marginBottom:'3px',letterSpacing:'0.03em'}}>TOTAL I OWE</div>
@@ -4409,7 +4437,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
                 <button type="button" className={'btn btn-sm flex-fill ' + (activeTab==='owed' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => setActiveTab('owed')}>
                     <i className="fas fa-arrow-down me-1"></i>Owed to Me
                 </button>
-                <button type="button" className={'btn btn-sm ' + (showForm ? 'btn-secondary' : 'btn-primary')} onClick={() => setShowForm(v => !v)} title="Add debt">
+                <button type="button" className={'btn btn-sm ' + (showForm ? 'btn-secondary' : 'btn-primary')} onClick={() => { if (showForm) { setShowForm(false); setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson }); } else { setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson }); setShowForm(true); } }} title="Add debt">
                     <i className={'fas fa-' + (showForm ? 'times' : 'plus')}></i>
                 </button>
             </div>
@@ -4440,13 +4468,20 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
                                 onChange={e => setForm(f => ({...f, dueDate: e.target.value}))} />
                             <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>Due date (optional)</div>
                         </div>
+                        <div className="mb-2">
+                            <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
+                            <select className="form-select form-select-sm" value={form.person} onChange={e => setForm(f => ({...f, person: e.target.value}))}>
+                                <option value="own">Own (Me)</option>
+                                {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
+                            </select>
+                        </div>
                         <div className="mb-3">
                             <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
                                 onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
                         </div>
                         <div style={{display:'flex',gap:'8px'}}>
-                            <button type="submit" className="btn btn-sm btn-primary">Add Debt</button>
-                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setFormErrors({}); }}>Cancel</button>
+                            <button type="submit" className="btn btn-sm btn-primary">{editingDebt ? 'Save Changes' : 'Add Debt'}</button>
+                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingDebt(null); setFormErrors({}); }}>Cancel</button>
                         </div>
                     </form>
                 </div>
@@ -4476,6 +4511,9 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
                                 <div style={{display:'flex',flexDirection:'column',gap:'4px',flexShrink:0}}>
                                     <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => setShowSettleModal(debt)}>
                                         <i className="fas fa-check me-1"></i>Settle
+                                    </button>
+                                    <button type="button" className="btn btn-sm btn-outline-secondary" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => openEditForm(debt)}>
+                                        <i className="fas fa-pencil-alt"></i>
                                     </button>
                                     <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => setShowDeleteModal(debt.id)}>
                                         <i className="fas fa-trash"></i>
