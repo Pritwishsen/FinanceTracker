@@ -289,7 +289,7 @@ const GDriveService = {
 // ── Microsoft OneDrive (Graph API via MSAL.js v2) ──────────────────────────
 const OneDriveService = {
     get clientId() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.msClientId) || ''; },
-    SCOPES: ['Files.ReadWrite.AppFolder', 'User.Read'],
+    SCOPES: ['Files.ReadWrite.AppFolder'],
     FILE: 'financetracker-data.json',
     _app: null, _account: null,
     isConfigured() { return !!this.clientId; },
@@ -387,6 +387,29 @@ function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
                     <button className="btn btn-outline-secondary" onClick={onKeepLocal} disabled={restoring}><i className="fas fa-mobile-alt me-2"></i>Keep This Device's Data</button>
                 </div>
                 <p className="text-muted text-center mt-2 mb-0" style={{fontSize:'0.72rem'}}>Restoring will reload the app with cloud data</p>
+            </div>
+        </div>
+    );
+}
+
+function CloudReconnectGate({ provider, connecting, error, onConnect, onSkip }) {
+    return (
+        <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)',padding:'1.5rem'}}>
+            <div style={{width:'100%',maxWidth:'400px',textAlign:'center'}}>
+                <div style={{fontSize:'3rem',marginBottom:'1rem',color:'#fff'}}>
+                    <i className={provider === 'gdrive' ? 'fab fa-google-drive' : 'fab fa-microsoft'}></i>
+                </div>
+                <h3 className="text-white fw-bold mb-2">Reconnect {provider === 'gdrive' ? 'Google Drive' : 'OneDrive'}</h3>
+                <p style={{color:'rgba(255,255,255,0.85)',marginBottom:'1.5rem',fontSize:'0.92rem'}}>Your data is backed up on the cloud. Sign in to restore it on this device.</p>
+                {error && <div className="alert alert-warning py-2 mb-3" style={{borderRadius:'10px',fontSize:'0.83rem'}}>{error}</div>}
+                <button className="btn btn-light fw-semibold w-100 mb-2 py-3" style={{borderRadius:'12px',fontSize:'1rem'}} onClick={onConnect} disabled={connecting}>
+                    {connecting
+                        ? <><span className="spinner-border spinner-border-sm me-2"></span>Connecting…</>
+                        : <><i className={'me-2 ' + (provider === 'gdrive' ? 'fab fa-google-drive' : 'fab fa-microsoft')}></i>Connect {provider === 'gdrive' ? 'Google Drive' : 'OneDrive'}</>}
+                </button>
+                <button className="btn btn-outline-light w-100 py-2" style={{borderRadius:'12px',fontSize:'0.9rem',opacity:0.8}} onClick={onSkip} disabled={connecting}>
+                    Continue without syncing
+                </button>
             </div>
         </div>
     );
@@ -5214,8 +5237,10 @@ function App() {
     const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(false);
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
+    const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
     const [cloudRestoreData, setCloudRestoreData] = useState(null);
-    const [showCloudRestoreModal, setShowCloudRestoreModal] = useState(false);
+    const [cloudGateConnecting, setCloudGateConnecting] = useState(false);
+    const [cloudGateError, setCloudGateError] = useState('');
     const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
 
     useEffect(() => {
@@ -5250,16 +5275,21 @@ function App() {
             setShowStoragePicker(false);
             const lastSync = localStorage.getItem('financeApp_lastCloudSync');
             if (lastSync) { setLastSyncTime(lastSync); setSyncStatus('synced'); }
-            // Cloud restore check — only if we have an active session token (no unexpected popups)
-            if (confirmed) {
-                const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
-                if (svc.isConfigured() && svc.isTokenValid()) {
+            // Cloud restore/reconnect gate — blocks main app until check is resolved
+            const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
+            if (svc.isConfigured()) {
+                if (svc.isTokenValid()) {
+                    setCloudSyncGate('checking');
                     SyncService.download().then(cloudBackup => {
-                        if (!cloudBackup) return;
+                        if (!cloudBackup) { setCloudSyncGate('idle'); return; }
                         const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                         const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-                        if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setShowCloudRestoreModal(true); }
-                    }).catch(() => {});
+                        if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
+                        else { setCloudSyncGate('idle'); }
+                    }).catch(() => { setCloudSyncGate('idle'); });
+                } else {
+                    // No active session token — prompt user to reconnect before entering app
+                    setCloudSyncGate('reconnect-prompt');
                 }
             }
         } else if (!confirmed) {
@@ -5334,6 +5364,7 @@ function App() {
         else if (pref === 'onedrive') OneDriveService.clearToken();
         setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false);
         setSyncStatus('idle'); setReconnectBannerDismissed(false);
+        setCloudSyncGate('idle'); setCloudGateConnecting(false); setCloudGateError('');
     };
     const handleStorageConfirm = (pref, cloudBackup) => {
         setStoragePreference(pref);
@@ -5343,7 +5374,7 @@ function App() {
         if (cloudBackup) {
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
             const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setShowCloudRestoreModal(true); }
+            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
         }
     };
     const handleOpenStoragePicker = () => { setShowStoragePicker(true); };
@@ -5352,6 +5383,22 @@ function App() {
         if (!svc || !svc.isConfigured()) { setSyncStatus('not_configured'); return; }
         try { await svc.requestToken(); setReconnectBannerDismissed(true); setSyncStatus('idle'); handleDataUpdate(); } catch (_) {}
     };
+    const handleCloudGateConnect = async () => {
+        const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
+        if (!svc || !svc.isConfigured()) { setCloudSyncGate('idle'); return; }
+        setCloudGateConnecting(true); setCloudGateError('');
+        try {
+            await svc.requestToken();
+            setCloudSyncGate('checking');
+            const cloudBackup = await SyncService.download();
+            if (!cloudBackup) { setCloudSyncGate('idle'); return; }
+            const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
+            else { setCloudSyncGate('idle'); }
+        } catch { setCloudGateConnecting(false); setCloudGateError('Connection failed — check pop-up permissions and try again.'); }
+    };
+    const handleCloudGateSkip = () => { setCloudSyncGate('idle'); setCloudGateError(''); };
 
     const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
 
@@ -5385,6 +5432,23 @@ function App() {
     if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
     if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} />;
+    if (cloudSyncGate === 'checking') return (
+        <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)'}}>
+            <div className="spinner-border text-white mb-3" style={{width:'3rem',height:'3rem'}}></div>
+            <div className="text-white fw-semibold">Checking cloud backup…</div>
+            <div className="text-white mt-1" style={{opacity:0.7,fontSize:'0.83rem'}}>{storagePreference === 'gdrive' ? 'Google Drive' : 'OneDrive'}</div>
+        </div>
+    );
+    if (cloudSyncGate === 'reconnect-prompt') return (
+        <CloudReconnectGate provider={storagePreference} connecting={cloudGateConnecting} error={cloudGateError} onConnect={handleCloudGateConnect} onSkip={handleCloudGateSkip} />
+    );
+    if (cloudSyncGate === 'restore-prompt' && cloudRestoreData) return (
+        <CloudRestoreModal
+            backupData={cloudRestoreData}
+            onRestore={() => { setCloudSyncGate('idle'); window.location.reload(); }}
+            onKeepLocal={() => { setCloudRestoreData(null); setCloudSyncGate('idle'); handleDataUpdate(); }}
+        />
+    );
 
     const showLocalDeviceBanner = storagePreference === 'local'
         && localStorage.getItem('financeApp_storagePickerConfirmed') === 'true'
@@ -5448,13 +5512,6 @@ function App() {
             )}
             <div className="app-content">{renderScreen()}</div>
             <Navigation currentScreen={currentScreen} onScreenChange={setCurrentScreen} />
-            {showCloudRestoreModal && cloudRestoreData && (
-                <CloudRestoreModal
-                    backupData={cloudRestoreData}
-                    onRestore={() => { setShowCloudRestoreModal(false); window.location.reload(); }}
-                    onKeepLocal={() => { setShowCloudRestoreModal(false); setCloudRestoreData(null); handleDataUpdate(); }}
-                />
-            )}
         </div>
     );
 }
