@@ -3081,6 +3081,17 @@ function RecurringList({ onUpdate }) {
     );
 }
 
+const AuthUtils = {
+    async hashPassword(password) {
+        const data = new TextEncoder().encode(password);
+        const buf = await crypto.subtle.digest('SHA-256', data);
+        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+    async verifyPassword(password, hash) {
+        return (await this.hashPassword(password)) === hash;
+    }
+};
+
 function RegistrationScreen({ onRegister, onLogin }) {
     const [activeTab, setActiveTab] = useState('register');
     const [formData, setFormData] = useState({ displayName: '', email: '', password: '', confirmPassword: '' });
@@ -3125,7 +3136,8 @@ function RegistrationScreen({ onRegister, onLogin }) {
         if (Object.keys(errs).length > 0) { setErrors(errs); return; }
         setIsSubmitting(true);
         try {
-            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), password: formData.password, authProvider: 'email', createdAt: new Date().toISOString() };
+            const passwordHash = await AuthUtils.hashPassword(formData.password);
+            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), passwordHash, authProvider: 'email', createdAt: new Date().toISOString() };
             localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
             localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
             localStorage.removeItem('financeApp_failCount');
@@ -3138,11 +3150,19 @@ function RegistrationScreen({ onRegister, onLogin }) {
 
     const showOauthToast = () => { setOauthToast('OAuth coming soon — use email registration'); setTimeout(() => setOauthToast(''), 3000); };
 
-    const handleSignIn = (ev) => {
+    const handleSignIn = async (ev) => {
         ev.preventDefault();
         if (lockedOut) return;
         const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
-        if (!stored || stored.email !== signEmail.trim().toLowerCase() || stored.password !== signPw) {
+        // Auto-migrate plain-text password accounts on first login
+        if (stored && stored.password && !stored.passwordHash) {
+            stored.passwordHash = await AuthUtils.hashPassword(stored.password);
+            delete stored.password;
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+        }
+        const emailMatch = stored && stored.email === signEmail.trim().toLowerCase();
+        const passwordMatch = emailMatch && await AuthUtils.verifyPassword(signPw, stored.passwordHash);
+        if (!emailMatch || !passwordMatch) {
             const newCount = failCount + 1;
             setFailCount(newCount);
             localStorage.setItem('financeApp_failCount', String(newCount));
@@ -3525,13 +3545,21 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
         setNameSaving(false);
     };
 
-    const handleChangePw = () => {
+    const handleChangePw = async () => {
         setPwError(''); setPwSuccess('');
         const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}'); } catch (_) { return {}; } })();
-        if (stored.password !== currPw) { setPwError('Current password is incorrect.'); return; }
+        // Auto-migrate plain-text password if still present
+        if (stored.password && !stored.passwordHash) {
+            stored.passwordHash = await AuthUtils.hashPassword(stored.password);
+            delete stored.password;
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+        }
+        const currentOk = await AuthUtils.verifyPassword(currPw, stored.passwordHash || '');
+        if (!currentOk) { setPwError('Current password is incorrect.'); return; }
         if (!newPw || newPw.length < 8) { setPwError('New password must be at least 8 characters.'); return; }
         if (newPw !== confirmPw) { setPwError('New passwords do not match.'); return; }
-        stored.password = newPw;
+        stored.passwordHash = await AuthUtils.hashPassword(newPw);
+        delete stored.password;
         localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
         setCurrPw(''); setNewPw(''); setConfirmPw('');
         setPwSuccess('Password changed successfully.');
