@@ -636,6 +636,15 @@ class DataService {
             localStorage.setItem('financeApp_lastSaveTime', new Date().toISOString());
         } catch (e) { /* silently ignore storage errors */ }
     }
+    static hasDataChangedSinceLastBackup() {
+        try {
+            const last = JSON.parse(localStorage.getItem('financeApp_latestBackup') || 'null');
+            if (!last) return true;
+            const current = this.createBackup();
+            const keys = ['expenses', 'income', 'categories', 'goals', 'bills', 'recurring', 'debts', 'networth'];
+            return keys.some(k => JSON.stringify(current.data[k]) !== JSON.stringify(last.data[k]));
+        } catch (_) { return true; }
+    }
     static getDebts() { return JSON.parse(localStorage.getItem('financeApp_debts') || '[]'); }
     static saveDebts(d) { localStorage.setItem('financeApp_debts', JSON.stringify(d)); }
     static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person }) {
@@ -4697,13 +4706,15 @@ function App() {
         const loadData = async () => {
             try {
                 await DataService.processRecurringSchedules();
-                const lastBackup = localStorage.getItem('financeApp_lastAutoBackup');
                 const todayStr = new Date().toISOString().split('T')[0];
                 const appSettings = await DataService.getSettings();
-                if (appSettings.autoBackupEnabled !== false && lastBackup !== todayStr) {
-                    DataService.downloadBackup();
-                    localStorage.setItem('financeApp_lastAutoBackup', todayStr);
-                    DataService.recordBackupEntry('auto-backup-' + todayStr + '.json');
+                if (appSettings.autoBackupEnabled !== false && DataService.hasDataChangedSinceLastBackup()) {
+                    const lastAutoBackup = localStorage.getItem('financeApp_lastAutoBackup');
+                    if (lastAutoBackup !== todayStr) {
+                        DataService.downloadBackup();
+                        localStorage.setItem('financeApp_lastAutoBackup', todayStr);
+                        DataService.recordBackupEntry('auto-backup-' + todayStr + '.json');
+                    }
                 }
                 const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
                     DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
