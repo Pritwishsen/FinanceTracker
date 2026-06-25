@@ -19,7 +19,7 @@ description: How Firebase Auth is wired into the single-file CDN app, and the du
 
 ## Firestore schema
 - `users/{uid}` document: `{ displayName, storagePreference: 'local', createdAt }`.
-- `storagePreference` is written to `localStorage` as `financeApp_storagePreference` on sign-in (for Task #2 Storage Picker).
+- `storagePreference` is written to `localStorage` as `financeApp_storagePreference` on sign-in (for the Storage Picker screen downstream).
 - NO financial data ever touches Firestore.
 
 ## Migration path

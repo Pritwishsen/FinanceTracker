@@ -3276,8 +3276,14 @@ function RegistrationScreen({ onRegister, onLogin }) {
                 if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
                     // Attempt migration: check if a localStorage account exists with matching credentials
                     const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
-                    if (stored && stored.email === signEmail.trim().toLowerCase() && stored.passwordHash) {
-                        const localOk = await AuthUtils.verifyPassword(signPw, stored.passwordHash);
+                    if (stored && stored.email === signEmail.trim().toLowerCase()) {
+                        // Support both legacy plaintext password and hashed password
+                        if (stored.password && !stored.passwordHash) {
+                            stored.passwordHash = await AuthUtils.hashPassword(stored.password);
+                            delete stored.password;
+                            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+                        }
+                        const localOk = stored.passwordHash && await AuthUtils.verifyPassword(signPw, stored.passwordHash);
                         if (localOk) {
                             try {
                                 const fbUser = await AuthUtils.register(stored.email, signPw, stored.displayName || stored.email);

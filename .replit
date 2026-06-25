@@ -28,8 +28,8 @@ args = "node serve.js"
 waitForPort = 5000
 
 [deployment]
-run = ["sh", "-c", "python3 -m http.server 5000"]
-deploymentTarget = "static"
+run = ["node", "serve.js"]
+deploymentTarget = "autoscale"
 publicDir = "."
 
 [[ports]]
