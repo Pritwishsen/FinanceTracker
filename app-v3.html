@@ -1832,7 +1832,7 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency }) {
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen }) {
     const [saveMessage, setSaveMessage] = useState('');
     const [people, setPeople] = useState([]);
     const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
@@ -2230,6 +2230,38 @@ function SettingsScreen({ onCurrencyChange, currentCurrency }) {
                     </div>
                 </div>
             )}
+
+            <hr style={{margin: '1.5rem 0'}} />
+            <div style={{marginBottom: '1rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
+                    <i className="fas fa-cloud me-2"></i>Storage
+                </h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
+                    Where your financial data is backed up
+                </p>
+                {(() => {
+                    const pref = localStorage.getItem('financeApp_storagePreference') || 'local';
+                    const info = {
+                        gdrive:   { icon: 'fab fa-google-drive', label: 'Google Drive', sub: 'Syncing to Google Drive',  color: '#4285F4' },
+                        onedrive: { icon: 'fab fa-microsoft',    label: 'OneDrive',      sub: 'Syncing to OneDrive',      color: '#0078D4' },
+                        local:    { icon: 'fas fa-mobile-alt',   label: 'Local only',    sub: 'Data stored on this device only', color: '#6c757d' }
+                    }[pref] || { icon: 'fas fa-mobile-alt', label: 'Local only', sub: 'Data stored on this device only', color: '#6c757d' };
+                    return (
+                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.75rem 1rem',background:'#f8f9fa',borderRadius:'10px',border:'1px solid #e9ecef'}}>
+                            <div className="d-flex align-items-center gap-3">
+                                <i className={info.icon} style={{fontSize:'1.5rem',color:info.color,width:'24px',textAlign:'center'}}></i>
+                                <div>
+                                    <div style={{fontWeight:'600',fontSize:'0.95rem'}}>{info.label}</div>
+                                    <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                                </div>
+                            </div>
+                            <button className="btn btn-sm btn-outline-primary" onClick={() => onStoragePickerOpen && onStoragePickerOpen()}>
+                                Switch
+                            </button>
+                        </div>
+                    );
+                })()}
+            </div>
         </div>
     );
 }
@@ -3168,6 +3200,72 @@ const AuthUtils = {
         return map.hasOwnProperty(code) ? map[code] : { field: null, message: 'An error occurred. Please try again.' };
     }
 };
+
+function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
+    const providers = [
+        { id: 'gdrive',    icon: 'fab fa-google-drive', label: 'Google Drive', color: '#4285F4', bgColor: '#e8f0fe', sub: 'Save to Google Drive' },
+        { id: 'onedrive',  icon: 'fab fa-microsoft',    label: 'OneDrive',     color: '#0078D4', bgColor: '#e6f2fb', sub: 'Save to OneDrive' },
+        { id: 'local',     icon: 'fas fa-mobile-alt',   label: 'Local only',   color: '#6c757d', bgColor: '#f0f0f0', sub: 'This device only' }
+    ];
+    const [selected, setSelected] = React.useState(initialPreference || null);
+    const [saving, setSaving] = React.useState(false);
+
+    const handleConfirm = async () => {
+        if (!selected || saving) return;
+        setSaving(true);
+        if (window.__firebaseReady && currentUser && currentUser.uid) {
+            try { await window.__firebaseDb.collection('users').doc(currentUser.uid).update({ storagePreference: selected }); } catch (_) {}
+        }
+        localStorage.setItem('financeApp_storagePreference', selected);
+        localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
+        setSaving(false);
+        onConfirm(selected);
+    };
+
+    return (
+        <div style={{position:'fixed',inset:0,zIndex:9999,background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'1.5rem',overflowY:'auto'}}>
+            <div style={{width:'100%',maxWidth:'460px'}}>
+                <div className="text-center text-white mb-4">
+                    <div style={{fontSize:'2.5rem',marginBottom:'0.5rem'}}><i className="fas fa-cloud-upload-alt"></i></div>
+                    <h3 className="fw-bold mb-1">Where should your backup live?</h3>
+                    <p style={{opacity:0.85,fontSize:'0.92rem',margin:0}}>Choose where your financial data is backed up. You can change this later in Settings.</p>
+                </div>
+                <div className="d-flex flex-column gap-3 mb-3">
+                    {providers.map(p => (
+                        <div key={p.id} onClick={() => setSelected(p.id)} style={{borderRadius:'14px',border:selected===p.id?'2.5px solid #fff':'2.5px solid transparent',background:selected===p.id?'#fff':'rgba(255,255,255,0.15)',padding:'1rem 1.2rem',cursor:'pointer',transition:'all 0.15s'}}>
+                            <div className="d-flex align-items-center gap-3">
+                                <div style={{width:'44px',height:'44px',borderRadius:'12px',background:selected===p.id?p.bgColor:'rgba(255,255,255,0.25)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                                    <i className={p.icon} style={{fontSize:'1.4rem',color:selected===p.id?p.color:'#fff'}}></i>
+                                </div>
+                                <div style={{flex:1}}>
+                                    <div style={{fontWeight:700,fontSize:'1rem',color:selected===p.id?'#1a1a2e':'#fff'}}>{p.label}</div>
+                                    <div style={{fontSize:'0.78rem',color:selected===p.id?'#555':'rgba(255,255,255,0.75)',marginTop:'1px'}}>{p.sub}</div>
+                                </div>
+                                {selected===p.id && <i className="fas fa-check-circle" style={{color:'#4a6cf7',fontSize:'1.2rem',flexShrink:0}}></i>}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                {selected === 'local' && (
+                    <div className="alert alert-warning d-flex gap-2 py-2 mb-3" style={{borderRadius:'10px',fontSize:'0.83rem'}}>
+                        <i className="fas fa-exclamation-triangle mt-1 flex-shrink-0"></i>
+                        <span>Your data is only available on this device. If you log in elsewhere, you'll see an empty app unless you import a backup.</span>
+                    </div>
+                )}
+                {(selected === 'gdrive' || selected === 'onedrive') && (
+                    <div className="alert d-flex gap-2 py-2 mb-3" style={{borderRadius:'10px',fontSize:'0.83rem',background:'rgba(255,255,255,0.9)',border:'none',color:'#0c4a6e'}}>
+                        <i className="fas fa-info-circle mt-1 flex-shrink-0"></i>
+                        <span>Your backup file will be saved to a folder called <strong>FinanceTracker</strong> in your {selected==='gdrive'?'Google Drive':'OneDrive'}. Only you can access it.</span>
+                    </div>
+                )}
+                <button className="btn w-100 fw-semibold py-3" onClick={handleConfirm} disabled={!selected || saving}
+                    style={{borderRadius:'12px',background:selected?'#fff':'rgba(255,255,255,0.4)',color:selected?'#4a6cf7':'rgba(255,255,255,0.6)',border:'none',fontSize:'1rem',transition:'all 0.15s'}}>
+                    {saving ? <><span className="spinner-border spinner-border-sm me-2"></span>Saving…</> : 'Confirm'}
+                </button>
+            </div>
+        </div>
+    );
+}
 
 function RegistrationScreen({ onRegister, onLogin }) {
     const [activeTab, setActiveTab] = useState('register');
@@ -4879,6 +4977,9 @@ function App() {
         } catch (_) { return null; }
     });
     const [authLoading, setAuthLoading] = useState(() => !!window.__firebaseReady);
+    const [storagePreference, setStoragePreference] = useState(() => localStorage.getItem('financeApp_storagePreference') || '');
+    const [showStoragePicker, setShowStoragePicker] = useState(false);
+    const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(false);
 
     useEffect(() => {
         if (!window.__firebaseReady) return;
@@ -4901,6 +5002,21 @@ function App() {
         });
         return () => unsubscribe();
     }, []);
+
+    useEffect(() => {
+        if (!currentUser) return;
+        const pref = localStorage.getItem('financeApp_storagePreference') || '';
+        const confirmed = localStorage.getItem('financeApp_storagePickerConfirmed') === 'true';
+        setStoragePreference(pref);
+        if (pref === 'gdrive' || pref === 'onedrive') {
+            localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
+            setShowStoragePicker(false);
+        } else if (!confirmed) {
+            setShowStoragePicker(true);
+        } else {
+            setShowStoragePicker(false);
+        }
+    }, [currentUser ? currentUser.uid : null]);
 
     useEffect(() => {
         const loadData = async () => {
@@ -4952,7 +5068,9 @@ function App() {
     };
 
     const handleRegister = (user) => { setCurrentUser(user); };
-    const handleLogout = () => { setCurrentUser(null); };
+    const handleLogout = () => { setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false); };
+    const handleStorageConfirm = (pref) => { setStoragePreference(pref); setShowStoragePicker(false); };
+    const handleOpenStoragePicker = () => { setShowStoragePicker(true); };
 
     const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
 
@@ -4970,7 +5088,7 @@ function App() {
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} />;
+            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
@@ -4985,6 +5103,12 @@ function App() {
     );
     if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
+    if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} />;
+
+    const showLocalDeviceBanner = storagePreference === 'local'
+        && localStorage.getItem('financeApp_storagePickerConfirmed') === 'true'
+        && !localStorage.getItem('financeApp_latestBackup')
+        && !localDeviceBannerDismissed;
 
     return (
         <div className="mobile-app">
@@ -5005,6 +5129,17 @@ function App() {
                 <div className="alert alert-info" style={{margin: '0 1rem 0.5rem', fontSize: '0.85rem', cursor: 'pointer'}} onClick={() => setCurrentScreen('bills')}>
                     <i className="fas fa-clock me-2"></i>
                     ⏰ {billsDueSoon.length} bill{billsDueSoon.length !== 1 ? 's' : ''} due soon — {billsDueSoon.map(b => b.name).join(', ')}
+                </div>
+            )}
+            {showLocalDeviceBanner && (
+                <div className="alert alert-warning d-flex gap-2 align-items-start" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px'}}>
+                    <i className="fas fa-exclamation-triangle mt-1 flex-shrink-0"></i>
+                    <div style={{flex:1}}>
+                        Your data is stored locally on another device.{' '}
+                        <button className="btn btn-link btn-sm p-0 fw-semibold" style={{verticalAlign:'baseline',fontSize:'0.83rem'}} onClick={() => setCurrentScreen('settings')}>Import a backup</button>{' '}
+                        to restore it here, or switch your storage in Settings.
+                    </div>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setLocalDeviceBannerDismissed(true)}></button>
                 </div>
             )}
             <div className="app-content">{renderScreen()}</div>
