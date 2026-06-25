@@ -46,6 +46,11 @@
     })();
     </script>
 
+    <!-- Google Identity Services (Drive OAuth — loaded async; ready by the time user clicks auth) -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <!-- MSAL.js v2 (OneDrive OAuth) -->
+    <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" async defer></script>
+
     <script type="text/babel">
 const { useState, useEffect, useMemo } = React;
 
@@ -194,6 +199,198 @@ const ValidationUtils = {
     }
 };
 window.ValidationUtils = ValidationUtils;
+
+// ── Google Drive OAuth + REST API ──────────────────────────────────────────
+const GDriveService = {
+    SCOPES: 'https://www.googleapis.com/auth/drive.file',
+    FOLDER: 'FinanceTracker Backups',
+    FILE: 'financetracker-data.json',
+    get clientId() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.googleClientId) || ''; },
+    isConfigured() { return !!this.clientId; },
+    getToken() { return sessionStorage.getItem('ftGdToken'); },
+    isTokenValid() { const e = sessionStorage.getItem('ftGdExp'); return !!(this.getToken() && e && Date.now() < +e); },
+    _storeToken(t, sec) { sessionStorage.setItem('ftGdToken', t); sessionStorage.setItem('ftGdExp', String(Date.now() + ((sec||3600)-60)*1000)); },
+    clearToken() { ['ftGdToken','ftGdExp'].forEach(k => sessionStorage.removeItem(k)); localStorage.removeItem('ftGdFileId'); },
+    requestToken() {
+        return new Promise((resolve, reject) => {
+            if (!this.isConfigured()) { reject(new Error('not_configured')); return; }
+            if (!window.google || !window.google.accounts) { reject(new Error('gis_not_loaded')); return; }
+            const client = window.google.accounts.oauth2.initTokenClient({
+                client_id: this.clientId, scope: this.SCOPES,
+                callback: resp => { if (resp.error) { reject(new Error(resp.error)); return; } this._storeToken(resp.access_token, resp.expires_in); resolve(resp.access_token); }
+            });
+            client.requestAccessToken();
+        });
+    },
+    async _tok() { if (this.isTokenValid()) return this.getToken(); return this.requestToken(); },
+    async _folder(tok) {
+        const q = encodeURIComponent(`name='${this.FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${tok}` } });
+        if (!r.ok) throw new Error('gdrive_folder:' + r.status);
+        const { files } = await r.json();
+        if (files && files.length) return files[0].id;
+        const cr = await fetch('https://www.googleapis.com/drive/v3/files', {
+            method: 'POST', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: this.FOLDER, mimeType: 'application/vnd.google-apps.folder' })
+        });
+        if (!cr.ok) throw new Error('gdrive_mkdir:' + cr.status);
+        return (await cr.json()).id;
+    },
+    async _doForm(method, url, meta, body) {
+        const tok = await this._tok();
+        const form = new FormData();
+        form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+        form.append('file', new Blob([body], { type: 'application/json' }));
+        return { tok, res: await fetch(url, { method, headers: { Authorization: `Bearer ${tok}` }, body: form }) };
+    },
+    async upload(json) {
+        const tok = await this._tok();
+        const fid = await this._folder(tok);
+        const body = JSON.stringify(json);
+        const cached = localStorage.getItem('ftGdFileId');
+        if (cached) {
+            const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, {}, body);
+            if (res.status === 404) { localStorage.removeItem('ftGdFileId'); return this.upload(json); }
+            if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+            return;
+        }
+        const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
+        const sr = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${tok}` } });
+        const { files } = await sr.json();
+        if (files && files.length) {
+            localStorage.setItem('ftGdFileId', files[0].id);
+            const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
+            if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+        } else {
+            const { res } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
+            if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+            const f = await res.json(); if (f.id) localStorage.setItem('ftGdFileId', f.id);
+        }
+    },
+    async download() {
+        const tok = await this._tok();
+        const fid = await this._folder(tok);
+        let fileId = localStorage.getItem('ftGdFileId');
+        if (!fileId) {
+            const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
+            const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${tok}` } });
+            if (!r.ok) return null;
+            const { files } = await r.json();
+            if (!files || !files.length) return null;
+            fileId = files[0].id; localStorage.setItem('ftGdFileId', fileId);
+        }
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${tok}` } });
+        if (r.status === 404) { localStorage.removeItem('ftGdFileId'); return null; }
+        if (!r.ok) throw new Error('gdrive_download:' + r.status);
+        return r.json();
+    }
+};
+
+// ── Microsoft OneDrive (Graph API via MSAL.js v2) ──────────────────────────
+const OneDriveService = {
+    get clientId() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.msClientId) || ''; },
+    SCOPES: ['Files.ReadWrite.AppFolder', 'User.Read'],
+    FILE: 'financetracker-data.json',
+    _app: null, _account: null,
+    isConfigured() { return !!this.clientId; },
+    isTokenValid() { const a = this._getApp(); return !!(a && a.getAllAccounts().length > 0); },
+    _getApp() {
+        if (!window.msal || !this.clientId) return null;
+        if (!this._app) {
+            try { this._app = new window.msal.PublicClientApplication({ auth: { clientId: this.clientId, redirectUri: window.location.origin } }); } catch { return null; }
+        }
+        return this._app;
+    },
+    async requestToken() {
+        const app = this._getApp();
+        if (!app) throw new Error('not_configured');
+        const r = await app.acquireTokenPopup({ scopes: this.SCOPES });
+        this._account = r.account; return r.accessToken;
+    },
+    async _tok() {
+        const app = this._getApp();
+        if (!app) throw new Error('not_configured');
+        const accounts = app.getAllAccounts();
+        if (accounts.length) {
+            try { const r = await app.acquireTokenSilent({ scopes: this.SCOPES, account: accounts[0] }); this._account = r.account; return r.accessToken; } catch {}
+        }
+        return this.requestToken();
+    },
+    clearToken() { this._account = null; this._app = null; },
+    async upload(json) {
+        const tok = await this._tok();
+        const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`, {
+            method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body: JSON.stringify(json)
+        });
+        if (!r.ok) throw new Error('onedrive_upload:' + r.status);
+    },
+    async download() {
+        const tok = await this._tok();
+        const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`, { headers: { Authorization: `Bearer ${tok}` } });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error('onedrive_download:' + r.status);
+        return r.json();
+    }
+};
+
+// ── Unified SyncService ────────────────────────────────────────────────────
+const SyncService = {
+    pref() { return localStorage.getItem('financeApp_storagePreference') || 'local'; },
+    isCloudEnabled() { const p = this.pref(); return p === 'gdrive' || p === 'onedrive'; },
+    svc() { const p = this.pref(); if (p === 'gdrive') return GDriveService; if (p === 'onedrive') return OneDriveService; return null; },
+    async upload(json) {
+        const s = this.svc(); if (!s) return { status: 'local' };
+        if (!s.isConfigured()) return { status: 'not_configured' };
+        // For GDrive, only upload if we already have a session token (no popup mid-update)
+        if (s === GDriveService && !GDriveService.isTokenValid()) return { status: 'reconnect-needed' };
+        try {
+            await s.upload(json);
+            const now = new Date().toISOString();
+            localStorage.setItem('financeApp_lastCloudSync', now);
+            return { status: 'success', syncedAt: now };
+        } catch (err) {
+            const m = err.message || '';
+            if (m.includes('popup') || m.includes('interaction_required') || m.includes('not_configured') || m.includes('gis_not_loaded')) return { status: 'reconnect-needed' };
+            return { status: 'error' };
+        }
+    },
+    async download() { const s = this.svc(); if (!s || !s.isConfigured()) return null; return s.download(); }
+};
+
+// ── Cloud Restore Modal ────────────────────────────────────────────────────
+function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
+    const [restoring, setRestoring] = React.useState(false);
+    const exp = (backupData.data && backupData.data.expenses && backupData.data.expenses.length) || 0;
+    const inc = (backupData.data && backupData.data.income && backupData.data.income.length) || 0;
+    const dateStr = backupData.createdAt ? new Date(backupData.createdAt).toLocaleString() : 'Unknown date';
+    const handleRestore = () => {
+        setRestoring(true);
+        try { DataService.restoreBackup(backupData); } catch (e) { console.error(e); }
+        onRestore();
+    };
+    return (
+        <div style={{position:'fixed',inset:0,zIndex:9998,background:'rgba(0,0,0,0.72)',display:'flex',alignItems:'center',justifyContent:'center',padding:'1rem'}}>
+            <div style={{background:'#fff',borderRadius:'16px',padding:'1.5rem',maxWidth:'400px',width:'100%',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+                <div className="text-center mb-3">
+                    <div style={{fontSize:'2.5rem',marginBottom:'0.5rem',color:'#4a6cf7'}}><i className="fas fa-cloud-download-alt"></i></div>
+                    <h4 className="fw-bold mb-1">Cloud Backup Found</h4>
+                    <p className="text-muted mb-0" style={{fontSize:'0.88rem'}}>A newer backup was found in your cloud storage.</p>
+                </div>
+                <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'10px',padding:'0.75rem',marginBottom:'1.25rem'}}>
+                    <div style={{fontSize:'0.82rem',color:'#166534',fontWeight:'600',marginBottom:'2px'}}><i className="fas fa-calendar-alt me-2"></i>{dateStr}</div>
+                    <div style={{fontSize:'0.8rem',color:'#15803d'}}>{exp} expense{exp!==1?'s':''} · {inc} income record{inc!==1?'s':''}</div>
+                </div>
+                <div className="d-grid gap-2">
+                    <button className="btn btn-primary" onClick={handleRestore} disabled={restoring}>
+                        {restoring ? <><span className="spinner-border spinner-border-sm me-2"></span>Restoring…</> : <><i className="fas fa-cloud-download-alt me-2"></i>Use Cloud Backup</>}
+                    </button>
+                    <button className="btn btn-outline-secondary" onClick={onKeepLocal} disabled={restoring}><i className="fas fa-mobile-alt me-2"></i>Keep This Device's Data</button>
+                </div>
+                <p className="text-muted text-center mt-2 mb-0" style={{fontSize:'0.72rem'}}>Restoring will reload the app with cloud data</p>
+            </div>
+        </div>
+    );
+}
 
 class DataService {
     static data = { expenses: [], income: [], settings: { currency: 'GBP' }, categories: [] };
@@ -3203,24 +3400,46 @@ const AuthUtils = {
 
 function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
     const providers = [
-        { id: 'gdrive',    icon: 'fab fa-google-drive', label: 'Google Drive', color: '#4285F4', bgColor: '#e8f0fe', sub: 'Save to Google Drive' },
-        { id: 'onedrive',  icon: 'fab fa-microsoft',    label: 'OneDrive',     color: '#0078D4', bgColor: '#e6f2fb', sub: 'Save to OneDrive' },
-        { id: 'local',     icon: 'fas fa-mobile-alt',   label: 'Local only',   color: '#6c757d', bgColor: '#f0f0f0', sub: 'This device only' }
+        { id: 'gdrive',   icon: 'fab fa-google-drive', label: 'Google Drive', color: '#4285F4', bgColor: '#e8f0fe', sub: 'Save to Google Drive' },
+        { id: 'onedrive', icon: 'fab fa-microsoft',    label: 'OneDrive',     color: '#0078D4', bgColor: '#e6f2fb', sub: 'Save to OneDrive' },
+        { id: 'local',    icon: 'fas fa-mobile-alt',   label: 'Local only',   color: '#6c757d', bgColor: '#f0f0f0', sub: 'This device only' }
     ];
     const [selected, setSelected] = React.useState(initialPreference || null);
     const [saving, setSaving] = React.useState(false);
+    const [oauthStep, setOauthStep] = React.useState(null); // null | 'connecting' | 'downloading' | 'done' | 'error'
 
     const handleConfirm = async () => {
         if (!selected || saving) return;
         setSaving(true);
+        setOauthStep(null);
+
+        // OAuth FIRST while user gesture is still fresh (required for popup)
+        let cloudBackup = null;
+        if (selected === 'gdrive' || selected === 'onedrive') {
+            const svc = selected === 'gdrive' ? GDriveService : OneDriveService;
+            if (svc.isConfigured()) {
+                try {
+                    setOauthStep('connecting');
+                    await svc.requestToken();
+                    setOauthStep('downloading');
+                    cloudBackup = await svc.download();
+                    setOauthStep('done');
+                } catch (_) {
+                    setOauthStep('error');
+                }
+            }
+        }
+
         if (window.__firebaseReady && currentUser && currentUser.uid) {
             try { await window.__firebaseDb.collection('users').doc(currentUser.uid).update({ storagePreference: selected }); } catch (_) {}
         }
         localStorage.setItem('financeApp_storagePreference', selected);
         localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
         setSaving(false);
-        onConfirm(selected);
+        onConfirm(selected, cloudBackup);
     };
+
+    const isCloud = selected === 'gdrive' || selected === 'onedrive';
 
     return (
         <div style={{position:'fixed',inset:0,zIndex:9999,background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'1.5rem',overflowY:'auto'}}>
@@ -3232,7 +3451,8 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
                 </div>
                 <div className="d-flex flex-column gap-3 mb-3">
                     {providers.map(p => (
-                        <div key={p.id} onClick={() => setSelected(p.id)} style={{borderRadius:'14px',border:selected===p.id?'2.5px solid #fff':'2.5px solid transparent',background:selected===p.id?'#fff':'rgba(255,255,255,0.15)',padding:'1rem 1.2rem',cursor:'pointer',transition:'all 0.15s'}}>
+                        <div key={p.id} onClick={() => { if (!saving) { setSelected(p.id); setOauthStep(null); } }}
+                            style={{borderRadius:'14px',border:selected===p.id?'2.5px solid #fff':'2.5px solid transparent',background:selected===p.id?'#fff':'rgba(255,255,255,0.15)',padding:'1rem 1.2rem',cursor:saving?'default':'pointer',transition:'all 0.15s',opacity:saving&&selected!==p.id?0.5:1}}>
                             <div className="d-flex align-items-center gap-3">
                                 <div style={{width:'44px',height:'44px',borderRadius:'12px',background:selected===p.id?p.bgColor:'rgba(255,255,255,0.25)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
                                     <i className={p.icon} style={{fontSize:'1.4rem',color:selected===p.id?p.color:'#fff'}}></i>
@@ -3252,15 +3472,27 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
                         <span>Your data is only available on this device. If you log in elsewhere, you'll see an empty app unless you import a backup.</span>
                     </div>
                 )}
-                {(selected === 'gdrive' || selected === 'onedrive') && (
+                {isCloud && !oauthStep && (
                     <div className="alert d-flex gap-2 py-2 mb-3" style={{borderRadius:'10px',fontSize:'0.83rem',background:'rgba(255,255,255,0.9)',border:'none',color:'#0c4a6e'}}>
                         <i className="fas fa-info-circle mt-1 flex-shrink-0"></i>
-                        <span>Your backup file will be saved to a folder called <strong>FinanceTracker</strong> in your {selected==='gdrive'?'Google Drive':'OneDrive'}. Only you can access it.</span>
+                        <span>Your backup will be saved to <strong>FinanceTracker Backups</strong> in your {selected==='gdrive'?'Google Drive':'OneDrive'}. Only you can access it.</span>
+                    </div>
+                )}
+                {isCloud && oauthStep && (
+                    <div className={'alert d-flex gap-2 py-2 mb-3 ' + (oauthStep==='error'?'alert-warning':'alert-info')} style={{borderRadius:'10px',fontSize:'0.83rem'}}>
+                        {oauthStep==='connecting' && <><span className="spinner-border spinner-border-sm me-2 flex-shrink-0" style={{marginTop:'1px'}}></span><span>Connecting to {selected==='gdrive'?'Google Drive':'OneDrive'}…</span></>}
+                        {oauthStep==='downloading' && <><span className="spinner-border spinner-border-sm me-2 flex-shrink-0" style={{marginTop:'1px'}}></span><span>Checking for existing backup…</span></>}
+                        {oauthStep==='done' && <><i className="fas fa-check-circle me-2 flex-shrink-0" style={{color:'#198754',marginTop:'1px'}}></i><span>Connected! Proceeding…</span></>}
+                        {oauthStep==='error' && <><i className="fas fa-exclamation-triangle me-2 flex-shrink-0" style={{marginTop:'1px'}}></i><span>Couldn't connect — you can re-connect later in Settings.</span></>}
                     </div>
                 )}
                 <button className="btn w-100 fw-semibold py-3" onClick={handleConfirm} disabled={!selected || saving}
                     style={{borderRadius:'12px',background:selected?'#fff':'rgba(255,255,255,0.4)',color:selected?'#4a6cf7':'rgba(255,255,255,0.6)',border:'none',fontSize:'1rem',transition:'all 0.15s'}}>
-                    {saving ? <><span className="spinner-border spinner-border-sm me-2"></span>Saving…</> : 'Confirm'}
+                    {saving
+                        ? (oauthStep==='connecting'||oauthStep==='downloading'
+                            ? <><span className="spinner-border spinner-border-sm me-2"></span>{oauthStep==='connecting'?'Connecting…':'Checking backup…'}</>
+                            : <><span className="spinner-border spinner-border-sm me-2"></span>Saving…</>)
+                        : 'Confirm'}
                 </button>
             </div>
         </div>
@@ -4980,6 +5212,11 @@ function App() {
     const [storagePreference, setStoragePreference] = useState(() => localStorage.getItem('financeApp_storagePreference') || '');
     const [showStoragePicker, setShowStoragePicker] = useState(false);
     const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(false);
+    const [syncStatus, setSyncStatus] = useState('idle');
+    const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
+    const [cloudRestoreData, setCloudRestoreData] = useState(null);
+    const [showCloudRestoreModal, setShowCloudRestoreModal] = useState(false);
+    const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
 
     useEffect(() => {
         if (!window.__firebaseReady) return;
@@ -5011,6 +5248,20 @@ function App() {
         if (pref === 'gdrive' || pref === 'onedrive') {
             localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
             setShowStoragePicker(false);
+            const lastSync = localStorage.getItem('financeApp_lastCloudSync');
+            if (lastSync) { setLastSyncTime(lastSync); setSyncStatus('synced'); }
+            // Cloud restore check — only if we have an active session token (no unexpected popups)
+            if (confirmed) {
+                const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
+                if (svc.isConfigured() && svc.isTokenValid()) {
+                    SyncService.download().then(cloudBackup => {
+                        if (!cloudBackup) return;
+                        const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                        const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                        if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setShowCloudRestoreModal(true); }
+                    }).catch(() => {});
+                }
+            }
         } else if (!confirmed) {
             setShowStoragePicker(true);
         } else {
@@ -5064,13 +5315,43 @@ function App() {
             const todayStr = new Date().toISOString().split('T')[0];
             setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
             DataService.saveLatestBackup();
+            if (SyncService.isCloudEnabled()) {
+                setSyncStatus('syncing');
+                try {
+                    const result = await SyncService.upload(DataService.createBackup());
+                    if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                    else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
+                    else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
+                } catch (_) { setSyncStatus('error'); }
+            }
         } catch (error) { console.error('Error updating data:', error); }
     };
 
     const handleRegister = (user) => { setCurrentUser(user); };
-    const handleLogout = () => { setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false); };
-    const handleStorageConfirm = (pref) => { setStoragePreference(pref); setShowStoragePicker(false); };
+    const handleLogout = () => {
+        const pref = localStorage.getItem('financeApp_storagePreference') || '';
+        if (pref === 'gdrive') GDriveService.clearToken();
+        else if (pref === 'onedrive') OneDriveService.clearToken();
+        setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false);
+        setSyncStatus('idle'); setReconnectBannerDismissed(false);
+    };
+    const handleStorageConfirm = (pref, cloudBackup) => {
+        setStoragePreference(pref);
+        setShowStoragePicker(false);
+        setSyncStatus('idle');
+        setReconnectBannerDismissed(false);
+        if (cloudBackup) {
+            const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setShowCloudRestoreModal(true); }
+        }
+    };
     const handleOpenStoragePicker = () => { setShowStoragePicker(true); };
+    const handleReconnect = async () => {
+        const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
+        if (!svc || !svc.isConfigured()) { setSyncStatus('not_configured'); return; }
+        try { await svc.requestToken(); setReconnectBannerDismissed(true); setSyncStatus('idle'); handleDataUpdate(); } catch (_) {}
+    };
 
     const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
 
@@ -5114,7 +5395,18 @@ function App() {
         <div className="mobile-app">
             <div className="app-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <h1 style={{margin:0}}><i className="fas fa-wallet"></i> Personal Finance</h1>
-                <button className="btn btn-sm btn-outline-light" onClick={() => setCurrentScreen('profile')} title="My Profile"><i className="fas fa-user-circle"></i></button>
+                <div style={{display:'flex',alignItems:'center',gap:'0.5rem'}}>
+                    {(storagePreference === 'gdrive' || storagePreference === 'onedrive') && (
+                        <span style={{cursor:'default'}} title={syncStatus==='synced'?'Synced '+(lastSyncTime?new Date(lastSyncTime).toLocaleTimeString():''):syncStatus==='syncing'?'Syncing…':syncStatus==='reconnect-needed'?'Re-connect required':syncStatus==='error'?'Sync error':'Cloud sync'}>
+                            {syncStatus==='syncing' && <i className="fas fa-spinner fa-spin" style={{color:'rgba(255,255,255,0.9)',fontSize:'0.85rem'}}></i>}
+                            {syncStatus==='synced' && <i className="fas fa-cloud" style={{color:'#86efac',fontSize:'0.85rem'}}></i>}
+                            {syncStatus==='reconnect-needed' && <i className="fas fa-exclamation-triangle" style={{color:'#fcd34d',fontSize:'0.85rem'}}></i>}
+                            {syncStatus==='error' && <i className="fas fa-exclamation-circle" style={{color:'#fca5a5',fontSize:'0.85rem'}}></i>}
+                            {(syncStatus==='idle'||syncStatus==='not_configured') && <i className="fas fa-cloud" style={{color:'rgba(255,255,255,0.35)',fontSize:'0.85rem'}}></i>}
+                        </span>
+                    )}
+                    <button className="btn btn-sm btn-outline-light" onClick={() => setCurrentScreen('profile')} title="My Profile"><i className="fas fa-user-circle"></i></button>
+                </div>
             </div>
             {budgetAlerts.map((alert, i) => (
                 <div key={i} className={'alert ' + (alert.type === 'over' ? 'alert-danger' : 'alert-warning')} style={{margin: '0.5rem 1rem', fontSize: '0.85rem'}}>
@@ -5131,6 +5423,18 @@ function App() {
                     ⏰ {billsDueSoon.length} bill{billsDueSoon.length !== 1 ? 's' : ''} due soon — {billsDueSoon.map(b => b.name).join(', ')}
                 </div>
             )}
+            {syncStatus === 'reconnect-needed' && !reconnectBannerDismissed && (
+                <div className="alert d-flex gap-2 align-items-center" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px',background:'#fff3cd',border:'1px solid #ffc107',color:'#664d03'}}>
+                    <i className="fas fa-exclamation-triangle flex-shrink-0"></i>
+                    <div style={{flex:1}}>
+                        <strong>Cloud sync disconnected</strong> — your data isn't backing up.{' '}
+                        <button className="btn btn-link btn-sm p-0 fw-semibold" style={{verticalAlign:'baseline',fontSize:'0.83rem',color:'#664d03'}} onClick={handleReconnect}>
+                            Re-connect {storagePreference === 'gdrive' ? 'Google Drive' : 'OneDrive'}
+                        </button>
+                    </div>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setReconnectBannerDismissed(true)}></button>
+                </div>
+            )}
             {showLocalDeviceBanner && (
                 <div className="alert alert-warning d-flex gap-2 align-items-start" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px'}}>
                     <i className="fas fa-exclamation-triangle mt-1 flex-shrink-0"></i>
@@ -5144,6 +5448,13 @@ function App() {
             )}
             <div className="app-content">{renderScreen()}</div>
             <Navigation currentScreen={currentScreen} onScreenChange={setCurrentScreen} />
+            {showCloudRestoreModal && cloudRestoreData && (
+                <CloudRestoreModal
+                    backupData={cloudRestoreData}
+                    onRestore={() => { setShowCloudRestoreModal(false); window.location.reload(); }}
+                    onKeepLocal={() => { setShowCloudRestoreModal(false); setCloudRestoreData(null); handleDataUpdate(); }}
+                />
+            )}
         </div>
     );
 }

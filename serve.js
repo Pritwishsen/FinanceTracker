@@ -45,7 +45,11 @@ function serveAppHtml(res) {
     messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '',
     appId: process.env.FIREBASE_APP_ID || ''
   };
-  var configScript = '<script>window.FIREBASE_CONFIG = ' + JSON.stringify(firebaseConfig) + ';</script>\n    ';
+  var oauthConfig = {
+    googleClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    msClientId: process.env.MICROSOFT_CLIENT_ID || ''
+  };
+  var configScript = '<script>window.FIREBASE_CONFIG = ' + JSON.stringify(firebaseConfig) + '; window.__OAUTH_CONFIG = ' + JSON.stringify(oauthConfig) + ';</script>\n    ';
   fs.readFile(path.join(ROOT, 'app-v3.html'), function(err, data) {
     if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
