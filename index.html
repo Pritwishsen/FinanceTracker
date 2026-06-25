@@ -24,7 +24,28 @@
     <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
-    
+
+    <!-- Firebase SDK (compat v10) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+    <script>
+    (function() {
+        var cfg = window.FIREBASE_CONFIG;
+        window.__firebaseReady = false;
+        window.__firebaseAuth = null;
+        window.__firebaseDb = null;
+        if (cfg && cfg.apiKey) {
+            try {
+                firebase.initializeApp(cfg);
+                window.__firebaseAuth = firebase.auth();
+                window.__firebaseDb = firebase.firestore();
+                window.__firebaseReady = true;
+            } catch(e) { console.warn('Firebase init failed:', e.message); }
+        }
+    })();
+    </script>
+
     <script type="text/babel">
 const { useState, useEffect, useMemo } = React;
 
@@ -3091,6 +3112,7 @@ function RecurringList({ onUpdate }) {
 }
 
 const AuthUtils = {
+    get firebaseReady() { return !!window.__firebaseReady; },
     async hashPassword(password) {
         const data = new TextEncoder().encode(password);
         const buf = await crypto.subtle.digest('SHA-256', data);
@@ -3098,6 +3120,52 @@ const AuthUtils = {
     },
     async verifyPassword(password, hash) {
         return (await this.hashPassword(password)) === hash;
+    },
+    async register(email, password, displayName) {
+        const cred = await window.__firebaseAuth.createUserWithEmailAndPassword(email, password);
+        await cred.user.updateProfile({ displayName });
+        await window.__firebaseDb.collection('users').doc(cred.user.uid).set({
+            displayName,
+            storagePreference: 'local',
+            createdAt: new Date().toISOString()
+        });
+        return cred.user;
+    },
+    async signIn(email, password) {
+        const cred = await window.__firebaseAuth.signInWithEmailAndPassword(email, password);
+        const doc = await window.__firebaseDb.collection('users').doc(cred.user.uid).get();
+        if (doc.exists) {
+            localStorage.setItem('financeApp_storagePreference', doc.data().storagePreference || 'local');
+        } else {
+            await window.__firebaseDb.collection('users').doc(cred.user.uid).set({
+                displayName: cred.user.displayName || email,
+                storagePreference: 'local',
+                createdAt: new Date().toISOString()
+            });
+            localStorage.setItem('financeApp_storagePreference', 'local');
+        }
+        return cred.user;
+    },
+    async signOut() {
+        if (window.__firebaseReady) await window.__firebaseAuth.signOut();
+        localStorage.removeItem('financeApp_session_expiry');
+        sessionStorage.removeItem('financeApp_session_active');
+    },
+    async sendPasswordReset(email) {
+        await window.__firebaseAuth.sendPasswordResetEmail(email);
+    },
+    mapFirebaseError(code) {
+        const map = {
+            'auth/email-already-in-use': { field: 'email', message: 'An account with this email already exists. Please sign in instead.' },
+            'auth/invalid-email': { field: 'email', message: 'Please enter a valid email address.' },
+            'auth/weak-password': { field: 'password', message: 'Password must be at least 6 characters.' },
+            'auth/user-not-found': null,
+            'auth/wrong-password': { field: null, message: 'Incorrect email or password.' },
+            'auth/invalid-credential': { field: null, message: 'Incorrect email or password.' },
+            'auth/too-many-requests': { field: null, message: 'Too many failed attempts. Please try again later.' },
+            'auth/requires-recent-login': { field: null, message: 'Please sign out and sign in again before changing your password.' }
+        };
+        return map.hasOwnProperty(code) ? map[code] : { field: null, message: 'An error occurred. Please try again.' };
     }
 };
 
@@ -3145,21 +3213,40 @@ function RegistrationScreen({ onRegister, onLogin }) {
         if (Object.keys(errs).length > 0) { setErrors(errs); return; }
         setIsSubmitting(true);
         try {
-            const existing = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
-            if (existing && existing.email === formData.email.trim().toLowerCase()) {
-                setErrors({ email: 'An account with this email already exists. Please sign in instead.' });
-                setIsSubmitting(false); return;
+            if (AuthUtils.firebaseReady) {
+                const fbUser = await AuthUtils.register(formData.email.trim().toLowerCase(), formData.password, formData.displayName.trim());
+                const user = { id: fbUser.uid, uid: fbUser.uid, displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), authProvider: 'firebase', createdAt: new Date().toISOString() };
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+                await DataService.updateSettings({ displayName: user.displayName });
+                try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {}
+                onRegister(user);
+            } else {
+                const existing = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                if (existing && existing.email === formData.email.trim().toLowerCase()) {
+                    setErrors({ email: 'An account with this email already exists. Please sign in instead.' });
+                    setIsSubmitting(false); return;
+                }
+                const passwordHash = await AuthUtils.hashPassword(formData.password);
+                const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), passwordHash, authProvider: 'email', createdAt: new Date().toISOString() };
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+                localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+                localStorage.removeItem('financeApp_failCount');
+                localStorage.removeItem('financeApp_failLockUntil');
+                await DataService.updateSettings({ displayName: user.displayName });
+                try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {}
+                onRegister(user);
             }
-            const passwordHash = await AuthUtils.hashPassword(formData.password);
-            const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), passwordHash, authProvider: 'email', createdAt: new Date().toISOString() };
-            localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
-            localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
-            localStorage.removeItem('financeApp_failCount');
-            localStorage.removeItem('financeApp_failLockUntil');
-            await DataService.updateSettings({ displayName: user.displayName });
-            try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {}
-            onRegister(user);
-        } catch (err) { setErrors({ general: 'Registration failed. Please try again.' }); setIsSubmitting(false); }
+        } catch (err) {
+            if (AuthUtils.firebaseReady && err.code) {
+                const mapped = AuthUtils.mapFirebaseError(err.code);
+                if (mapped && mapped.field) setErrors({ [mapped.field]: mapped.message });
+                else if (mapped) setErrors({ general: mapped.message });
+                else setErrors({ general: 'Registration failed. Please try again.' });
+            } else {
+                setErrors({ general: 'Registration failed. Please try again.' });
+            }
+            setIsSubmitting(false);
+        }
     };
 
     const showOauthToast = () => { setOauthToast('OAuth coming soon — use email registration'); setTimeout(() => setOauthToast(''), 3000); };
@@ -3167,45 +3254,102 @@ function RegistrationScreen({ onRegister, onLogin }) {
     const handleSignIn = async (ev) => {
         ev.preventDefault();
         if (lockedOut) return;
-        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
-        // Auto-migrate plain-text password accounts on first login
-        if (stored && stored.password && !stored.passwordHash) {
-            stored.passwordHash = await AuthUtils.hashPassword(stored.password);
-            delete stored.password;
-            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
-        }
-        const emailMatch = stored && stored.email === signEmail.trim().toLowerCase();
-        const passwordMatch = emailMatch && await AuthUtils.verifyPassword(signPw, stored.passwordHash);
-        if (!emailMatch || !passwordMatch) {
-            const newCount = failCount + 1;
-            setFailCount(newCount);
-            localStorage.setItem('financeApp_failCount', String(newCount));
-            if (newCount >= 5) {
-                const until = Date.now() + 15 * 60 * 1000;
-                localStorage.setItem('financeApp_failLockUntil', String(until));
-                setLockedOut(true);
-                setSignError('Too many failed attempts. Please try again in 15 minutes.');
-            } else {
-                setSignError('Incorrect email or password.');
+        if (AuthUtils.firebaseReady) {
+            try {
+                const fbUser = await AuthUtils.signIn(signEmail.trim().toLowerCase(), signPw);
+                localStorage.removeItem('financeApp_failCount');
+                localStorage.removeItem('financeApp_failLockUntil');
+                const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                const user = {
+                    id: fbUser.uid, uid: fbUser.uid,
+                    displayName: fbUser.displayName || (storedUser && storedUser.displayName) || signEmail.trim(),
+                    email: fbUser.email,
+                    authProvider: 'firebase',
+                    createdAt: (storedUser && storedUser.createdAt) || new Date().toISOString()
+                };
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+                const people = DataService.getPeople();
+                const match = people.find(p => p.name === user.displayName && p.systemManaged);
+                if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
+                (onLogin || onRegister)(user);
+            } catch (err) {
+                if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
+                    // Attempt migration: check if a localStorage account exists with matching credentials
+                    const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                    if (stored && stored.email === signEmail.trim().toLowerCase() && stored.passwordHash) {
+                        const localOk = await AuthUtils.verifyPassword(signPw, stored.passwordHash);
+                        if (localOk) {
+                            try {
+                                const fbUser = await AuthUtils.register(stored.email, signPw, stored.displayName || stored.email);
+                                const user = { ...stored, id: fbUser.uid, uid: fbUser.uid, authProvider: 'firebase' };
+                                delete user.passwordHash; delete user.password;
+                                localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+                                localStorage.removeItem('financeApp_failCount');
+                                localStorage.removeItem('financeApp_failLockUntil');
+                                (onLogin || onRegister)(user);
+                                return;
+                            } catch (migrErr) { /* fall through to error */ }
+                        }
+                    }
+                }
+                const mapped = AuthUtils.mapFirebaseError(err.code);
+                const msg = mapped ? mapped.message : 'Incorrect email or password.';
+                const newCount = failCount + 1;
+                setFailCount(newCount);
+                localStorage.setItem('financeApp_failCount', String(newCount));
+                if (newCount >= 5) {
+                    const until = Date.now() + 15 * 60 * 1000;
+                    localStorage.setItem('financeApp_failLockUntil', String(until));
+                    setLockedOut(true);
+                    setSignError('Too many failed attempts. Please try again in 15 minutes.');
+                } else {
+                    setSignError(msg || 'Incorrect email or password.');
+                }
             }
-            return;
-        }
-        localStorage.removeItem('financeApp_failCount');
-        localStorage.removeItem('financeApp_failLockUntil');
-        if (signRemember) {
-            localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
         } else {
-            sessionStorage.setItem('financeApp_session_active', 'true');
+            const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+            if (stored && stored.password && !stored.passwordHash) {
+                stored.passwordHash = await AuthUtils.hashPassword(stored.password);
+                delete stored.password;
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+            }
+            const emailMatch = stored && stored.email === signEmail.trim().toLowerCase();
+            const passwordMatch = emailMatch && await AuthUtils.verifyPassword(signPw, stored.passwordHash);
+            if (!emailMatch || !passwordMatch) {
+                const newCount = failCount + 1;
+                setFailCount(newCount);
+                localStorage.setItem('financeApp_failCount', String(newCount));
+                if (newCount >= 5) {
+                    const until = Date.now() + 15 * 60 * 1000;
+                    localStorage.setItem('financeApp_failLockUntil', String(until));
+                    setLockedOut(true);
+                    setSignError('Too many failed attempts. Please try again in 15 minutes.');
+                } else {
+                    setSignError('Incorrect email or password.');
+                }
+                return;
+            }
+            localStorage.removeItem('financeApp_failCount');
+            localStorage.removeItem('financeApp_failLockUntil');
+            if (signRemember) {
+                localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+            } else {
+                sessionStorage.setItem('financeApp_session_active', 'true');
+            }
+            const people = DataService.getPeople();
+            const match = people.find(p => p.name === stored.displayName && p.systemManaged);
+            if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
+            (onLogin || onRegister)(stored);
         }
-        const people = DataService.getPeople();
-        const match = people.find(p => p.name === stored.displayName && p.systemManaged);
-        if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
-        (onLogin || onRegister)(stored);
     };
 
-    const handleForgotPw = () => {
-        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
-        console.log('[ForgotPW] Reset requested for:', forgotEmail.trim().toLowerCase(), '| match:', stored && stored.email === forgotEmail.trim().toLowerCase());
+    const handleForgotPw = async () => {
+        if (AuthUtils.firebaseReady) {
+            try { await AuthUtils.sendPasswordReset(forgotEmail.trim().toLowerCase()); } catch (_) {}
+        } else {
+            const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+            console.log('[ForgotPW] Reset requested for:', forgotEmail.trim().toLowerCase(), '| match:', stored && stored.email === forgotEmail.trim().toLowerCase());
+        }
         setForgotSent(true);
     };
 
@@ -3561,28 +3705,49 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
 
     const handleChangePw = async () => {
         setPwError(''); setPwSuccess('');
-        const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}'); } catch (_) { return {}; } })();
-        // Auto-migrate plain-text password if still present
-        if (stored.password && !stored.passwordHash) {
-            stored.passwordHash = await AuthUtils.hashPassword(stored.password);
-            delete stored.password;
-            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
-        }
-        const currentOk = await AuthUtils.verifyPassword(currPw, stored.passwordHash || '');
-        if (!currentOk) { setPwError('Current password is incorrect.'); return; }
         if (!newPw || newPw.length < 8) { setPwError('New password must be at least 8 characters.'); return; }
         if (newPw !== confirmPw) { setPwError('New passwords do not match.'); return; }
-        stored.passwordHash = await AuthUtils.hashPassword(newPw);
-        delete stored.password;
-        localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
-        setCurrPw(''); setNewPw(''); setConfirmPw('');
-        setPwSuccess('Password changed successfully.');
-        setTimeout(() => setPwSuccess(''), 4000);
+        if (AuthUtils.firebaseReady) {
+            try {
+                const fbUser = window.__firebaseAuth.currentUser;
+                if (!fbUser) { setPwError('Session expired. Please sign out and sign in again.'); return; }
+                const { EmailAuthProvider } = firebase.auth;
+                const credential = EmailAuthProvider.credential(fbUser.email, currPw);
+                await fbUser.reauthenticateWithCredential(credential);
+                await fbUser.updatePassword(newPw);
+                setCurrPw(''); setNewPw(''); setConfirmPw('');
+                setPwSuccess('Password changed successfully.');
+                setTimeout(() => setPwSuccess(''), 4000);
+            } catch (err) {
+                const mapped = AuthUtils.mapFirebaseError(err.code);
+                if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+                    setPwError('Current password is incorrect.');
+                } else if (mapped) {
+                    setPwError(mapped.message);
+                } else {
+                    setPwError('Failed to change password. Please try again.');
+                }
+            }
+        } else {
+            const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}'); } catch (_) { return {}; } })();
+            if (stored.password && !stored.passwordHash) {
+                stored.passwordHash = await AuthUtils.hashPassword(stored.password);
+                delete stored.password;
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+            }
+            const currentOk = await AuthUtils.verifyPassword(currPw, stored.passwordHash || '');
+            if (!currentOk) { setPwError('Current password is incorrect.'); return; }
+            stored.passwordHash = await AuthUtils.hashPassword(newPw);
+            delete stored.password;
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+            setCurrPw(''); setNewPw(''); setConfirmPw('');
+            setPwSuccess('Password changed successfully.');
+            setTimeout(() => setPwSuccess(''), 4000);
+        }
     };
 
-    const handleLogoutConfirm = () => {
-        localStorage.removeItem('financeApp_session_expiry');
-        sessionStorage.removeItem('financeApp_session_active');
+    const handleLogoutConfirm = async () => {
+        await AuthUtils.signOut();
         onLogout();
     };
 
@@ -4697,6 +4862,7 @@ function App() {
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
     const [expensesInitPaidBy, setExpensesInitPaidBy] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
+        if (window.__firebaseReady) return null;
         try {
             const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
             const sessionActive = sessionStorage.getItem('financeApp_session_active') === 'true';
@@ -4706,6 +4872,29 @@ function App() {
             return null;
         } catch (_) { return null; }
     });
+    const [authLoading, setAuthLoading] = useState(() => !!window.__firebaseReady);
+
+    useEffect(() => {
+        if (!window.__firebaseReady) return;
+        const unsubscribe = window.__firebaseAuth.onAuthStateChanged(fbUser => {
+            if (fbUser) {
+                const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                const user = {
+                    id: fbUser.uid, uid: fbUser.uid,
+                    displayName: fbUser.displayName || (stored && stored.displayName) || fbUser.email,
+                    email: fbUser.email,
+                    authProvider: 'firebase',
+                    createdAt: (stored && stored.createdAt) || new Date().toISOString()
+                };
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+                setCurrentUser(user);
+            } else {
+                setCurrentUser(null);
+            }
+            setAuthLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
 
     useEffect(() => {
         const loadData = async () => {
@@ -4782,6 +4971,12 @@ function App() {
         }
     };
 
+    if (authLoading) return (
+        <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)'}}>
+            <div className="spinner-border text-white mb-3" style={{width:'3rem',height:'3rem'}}></div>
+            <div className="text-white fw-semibold">Signing you in…</div>
+        </div>
+    );
     if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
 

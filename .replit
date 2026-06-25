@@ -19,13 +19,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "npx serve -l 5000 --no-clipboard -c serve.json"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node serve.js"
+waitForPort = 5000
 
 [deployment]
 run = ["sh", "-c", "python3 -m http.server 5000"]
@@ -35,10 +35,6 @@ publicDir = "."
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 5904
-externalPort = 3000
 
 [agent]
 expertMode = true

@@ -1,1 +1,2 @@
 - [CDN version pinning](cdn-version-pinning.md) — single-file CDN React app; pin every CDN dep (esp. @babel/standalone) or auto-upgrades break it with misleading errors.
+- [Firebase Auth integration](firebase-auth-integration.md) — Firebase config injected server-side via serve.js; app gracefully falls back to localStorage auth when secrets absent.

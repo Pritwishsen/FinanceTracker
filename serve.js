@@ -36,11 +36,39 @@ function serveFile(filePath, res) {
   });
 }
 
+function serveAppHtml(res) {
+  var firebaseConfig = {
+    apiKey: process.env.FIREBASE_API_KEY || '',
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN || '',
+    projectId: process.env.FIREBASE_PROJECT_ID || '',
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '',
+    appId: process.env.FIREBASE_APP_ID || ''
+  };
+  var configScript = '<script>window.FIREBASE_CONFIG = ' + JSON.stringify(firebaseConfig) + ';</script>\n    ';
+  fs.readFile(path.join(ROOT, 'app-v3.html'), function(err, data) {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    var html = data.toString().replace('<head>', '<head>\n    ' + configScript);
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.end(html);
+  });
+}
+
 var server = http.createServer(function(req, res) {
   var urlPath = req.url.split('?')[0];
 
-  if (urlPath === '/' || urlPath === '/index.html') {
-    urlPath = '/app-v3.html';
+  if (urlPath === '/' || urlPath === '/index.html' || urlPath === '/app-v3.html') {
+    serveAppHtml(res);
+    return;
   }
 
   if (urlPath === '/__health') {
@@ -67,6 +95,8 @@ server.on('error', function(err) {
 
 server.listen(PORT, '0.0.0.0', function() {
   console.log('Server listening on port ' + PORT);
+  var firebaseConfigured = !!(process.env.FIREBASE_API_KEY);
+  console.log('Firebase configured:', firebaseConfigured);
 });
 
 process.on('SIGTERM', function() {
