@@ -933,6 +933,16 @@ class DataService {
         localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
     }
     static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
+    static clearAllUserData() {
+        // Wipe every financeApp_* key and cloud file-ID cache from localStorage
+        Object.keys(localStorage)
+            .filter(k => k.startsWith('financeApp_'))
+            .forEach(k => localStorage.removeItem(k));
+        localStorage.removeItem('ftGdFileId');
+        // Reset in-memory DataService state so the next user starts fresh
+        this.data = { expenses: [], income: [], settings: { currency: 'GBP' }, categories: [] };
+        this.isInitialized = false;
+    }
 }
 window.DataService = DataService;
 
@@ -5314,6 +5324,10 @@ function App() {
         const unsubscribe = window.__firebaseAuth.onAuthStateChanged(fbUser => {
             if (fbUser) {
                 const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                // If a different user's data is sitting in localStorage, wipe it before loading
+                if (stored && stored.uid && stored.uid !== fbUser.uid) {
+                    DataService.clearAllUserData();
+                }
                 const user = {
                     id: fbUser.uid, uid: fbUser.uid,
                     displayName: fbUser.displayName || (stored && stored.displayName) || fbUser.email,
@@ -5443,9 +5457,12 @@ function App() {
         const pref = localStorage.getItem('financeApp_storagePreference') || '';
         if (pref === 'gdrive') GDriveService.clearToken();
         else if (pref === 'onedrive') OneDriveService.clearToken();
+        // Wipe all financial data so the next user on this device starts with a clean slate
+        DataService.clearAllUserData();
         setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false);
         setSyncStatus('idle'); setReconnectBannerDismissed(false);
         setCloudSyncGate('idle'); setCloudGateConnecting(false); setCloudGateError('');
+        setExpenses([]); setIncome([]); setCategories([]); setPeople([]);
     };
     const handleStorageConfirm = (pref, cloudBackup) => {
         setStoragePreference(pref);
