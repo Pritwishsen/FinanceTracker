@@ -2121,7 +2121,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     };
 
     const handleConfirmRestore = () => {
-        try { DataService.restoreBackup(restoreFile); window.location.reload(); }
+        try {
+            DataService.restoreBackup(restoreFile);
+            localStorage.setItem('financeApp_skipCloudRestoreCheck', 'true');
+            window.location.reload();
+        }
         catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); }
     };
 
@@ -5313,6 +5317,21 @@ function App() {
             const lastSync = localStorage.getItem('financeApp_lastCloudSync');
             if (lastSync) { setLastSyncTime(lastSync); setSyncStatus('synced'); }
             // Cloud restore/reconnect gate — blocks main app until check is resolved
+            const skipCloudCheck = localStorage.getItem('financeApp_skipCloudRestoreCheck') === 'true';
+            if (skipCloudCheck) {
+                localStorage.removeItem('financeApp_skipCloudRestoreCheck');
+                setCloudSyncGate('idle');
+                // Upload the manually restored data to cloud so it stays in sync
+                const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
+                if (svc.isConfigured() && svc.isTokenValid()) {
+                    setSyncStatus('syncing');
+                    SyncService.upload(DataService.createBackup()).then(result => {
+                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                        else { setSyncStatus('idle'); }
+                    }).catch(() => { setSyncStatus('idle'); });
+                }
+                return;
+            }
             const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
             if (svc.isConfigured()) {
                 if (svc.isTokenValid()) {
