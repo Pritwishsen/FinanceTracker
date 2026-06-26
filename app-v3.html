@@ -5452,10 +5452,15 @@ function App() {
         setShowStoragePicker(false);
         setSyncStatus('idle');
         setReconnectBannerDismissed(false);
+        let showingRestore = false;
         if (cloudBackup) {
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
             const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
+            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
+        }
+        // Upload local data to cloud immediately after connecting (unless we're showing the restore prompt)
+        if ((pref === 'gdrive' || pref === 'onedrive') && !showingRestore) {
+            handleDataUpdate();
         }
     };
     const handleOpenStoragePicker = () => { setShowStoragePicker(true); };
