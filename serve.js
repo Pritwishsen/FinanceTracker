@@ -36,6 +36,29 @@ function serveFile(filePath, res) {
   });
 }
 
+function serveWithOauthConfig(filePath, res) {
+  var oauthConfig = {
+    googleClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    msClientId: process.env.MICROSOFT_CLIENT_ID || ''
+  };
+  var configScript = '<script>window.__OAUTH_CONFIG = ' + JSON.stringify(oauthConfig) + ';</script>\n  ';
+  fs.readFile(filePath, function(err, data) {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    var html = data.toString().replace('<head>', '<head>\n  ' + configScript);
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.end(html);
+  });
+}
+
 function serveAppHtml(res) {
   var firebaseConfig = {
     apiKey: process.env.FIREBASE_API_KEY || '',
@@ -72,6 +95,11 @@ var server = http.createServer(function(req, res) {
 
   if (urlPath === '/' || urlPath === '/index.html' || urlPath === '/app-v3.html') {
     serveAppHtml(res);
+    return;
+  }
+
+  if (urlPath === '/scripts/cloud-sync-test.html') {
+    serveWithOauthConfig(path.join(ROOT, 'scripts', 'cloud-sync-test.html'), res);
     return;
   }
 

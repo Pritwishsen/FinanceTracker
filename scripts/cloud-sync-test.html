@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud Sync — End-to-End Verification</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- MSAL.js v2 -->
+  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" async defer></script>
+  <style>
+    body { background: #f4f6fb; font-family: system-ui, sans-serif; }
+    .card { border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .step { padding: 0.35rem 0; font-size: 0.9rem; display: flex; align-items: flex-start; gap: 0.6rem; }
+    .step-icon { width: 20px; text-align: center; flex-shrink: 0; margin-top: 2px; }
+    .step-pass  { color: #16a34a; }
+    .step-fail  { color: #dc2626; }
+    .step-pend  { color: #6b7280; }
+    .step-run   { color: #2563eb; }
+    pre { background: #1e293b; color: #e2e8f0; border-radius: 10px; padding: 1rem; font-size: 0.78rem; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    .badge-pass { background:#dcfce7; color:#166534; }
+    .badge-fail { background:#fee2e2; color:#991b1b; }
+    .badge-idle { background:#f3f4f6; color:#374151; }
+    .badge-run  { background:#dbeafe; color:#1d4ed8; }
+    .summary-row { border-radius: 10px; padding: 0.7rem 1rem; margin-bottom: 0.5rem; }
+    #report-section { display:none; }
+  </style>
+</head>
+<body>
+<div class="container py-4" style="max-width:760px">
+
+  <div class="d-flex align-items-center gap-3 mb-4">
+    <div style="font-size:2rem"><i class="fas fa-cloud"></i></div>
+    <div>
+      <h4 class="mb-0 fw-bold">Cloud Sync — End-to-End Verification</h4>
+      <p class="text-muted mb-0" style="font-size:0.85rem">Tests OAuth login, upload, download, and JSON equality for each provider.</p>
+    </div>
+  </div>
+
+  <!-- Config status -->
+  <div class="card mb-3 p-3" id="config-card">
+    <h6 class="fw-semibold mb-2"><i class="fas fa-key me-2"></i>OAuth Configuration</h6>
+    <div id="config-status" class="text-muted" style="font-size:0.85rem">Checking…</div>
+  </div>
+
+  <div class="row g-3 mb-3">
+
+    <!-- Google Drive -->
+    <div class="col-md-6">
+      <div class="card p-3 h-100">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <div class="d-flex align-items-center gap-2">
+            <i class="fab fa-google-drive" style="font-size:1.3rem;color:#4285F4"></i>
+            <strong>Google Drive</strong>
+          </div>
+          <span id="gd-badge" class="badge badge-idle px-2 py-1" style="font-size:0.75rem">Idle</span>
+        </div>
+        <div id="gd-steps" class="mb-3">
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Authenticate with Google</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Upload test payload</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Download from Drive</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Verify JSON equality</span></div>
+        </div>
+        <button id="gd-btn" class="btn btn-primary btn-sm w-100" onclick="runGDrive()">
+          <i class="fab fa-google-drive me-2"></i>Run Google Drive Test
+        </button>
+        <div id="gd-log-wrap" class="mt-2" style="display:none">
+          <pre id="gd-log"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- OneDrive -->
+    <div class="col-md-6">
+      <div class="card p-3 h-100">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <div class="d-flex align-items-center gap-2">
+            <i class="fab fa-microsoft" style="font-size:1.3rem;color:#0078D4"></i>
+            <strong>OneDrive</strong>
+          </div>
+          <span id="od-badge" class="badge badge-idle px-2 py-1" style="font-size:0.75rem">Idle</span>
+        </div>
+        <div id="od-steps" class="mb-3">
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Authenticate with Microsoft</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Upload test payload</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Download from OneDrive</span></div>
+          <div class="step step-pend"><span class="step-icon"><i class="fas fa-circle-dot"></i></span><span>Verify JSON equality</span></div>
+        </div>
+        <button id="od-btn" class="btn btn-primary btn-sm w-100" onclick="runOneDrive()">
+          <i class="fab fa-microsoft me-2"></i>Run OneDrive Test
+        </button>
+        <div id="od-log-wrap" class="mt-2" style="display:none">
+          <pre id="od-log"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Verification Report -->
+  <div class="card p-3" id="report-section">
+    <div class="d-flex align-items-center justify-content-between mb-2">
+      <h6 class="fw-semibold mb-0"><i class="fas fa-clipboard-check me-2"></i>Verification Report</h6>
+      <button class="btn btn-outline-secondary btn-sm" onclick="copyReport()"><i class="fas fa-copy me-1"></i>Copy</button>
+    </div>
+    <div id="report-body"></div>
+    <pre id="report-text" style="display:none"></pre>
+  </div>
+
+</div>
+
+<script>
+// ── Utilities ────────────────────────────────────────────────────────────────
+const gdClientId  = (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.googleClientId) || '';
+const msClientId  = (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.msClientId)     || '';
+
+const TEST_FILE   = 'financetracker-synctest.json';
+const TEST_FOLDER = 'FinanceTracker Backups';
+
+// Results tracking
+const results = { gdrive: null, onedrive: null };
+
+// ── Config card ──────────────────────────────────────────────────────────────
+(function checkConfig() {
+  const el = document.getElementById('config-status');
+  const gdOk = !!gdClientId;
+  const msOk = !!msClientId;
+  el.innerHTML =
+    '<span class="me-3">' + icon(gdOk) + ' Google Client ID: <strong>' + (gdOk ? masked(gdClientId) : 'NOT SET') + '</strong></span>' +
+    '<span>'              + icon(msOk) + ' Microsoft Client ID: <strong>' + (msOk ? masked(msClientId) : 'NOT SET') + '</strong></span>';
+  if (!gdOk) document.getElementById('gd-btn').disabled = true;
+  if (!msOk) document.getElementById('od-btn').disabled = true;
+})();
+
+function icon(ok) { return ok ? '<i class="fas fa-check-circle text-success"></i>' : '<i class="fas fa-times-circle text-danger"></i>'; }
+function masked(s) { return s.substring(0, 8) + '…' + s.substring(s.length - 4); }
+function ts() { return new Date().toISOString(); }
+
+// ── Step helpers ─────────────────────────────────────────────────────────────
+function setStep(prefix, idx, state, label) {
+  const wrap = document.getElementById(prefix + '-steps');
+  const steps = wrap.querySelectorAll('.step');
+  if (idx >= steps.length) return;
+  const s = steps[idx];
+  const classMap = { pass: 'step-pass', fail: 'step-fail', run: 'step-run', pend: 'step-pend' };
+  const iconMap  = {
+    pass: '<i class="fas fa-check-circle"></i>',
+    fail: '<i class="fas fa-times-circle"></i>',
+    run:  '<i class="fas fa-spinner fa-spin"></i>',
+    pend: '<i class="fas fa-circle-dot"></i>'
+  };
+  s.className = 'step ' + (classMap[state] || 'step-pend');
+  s.querySelector('.step-icon').innerHTML = iconMap[state] || iconMap.pend;
+  if (label) s.querySelector('span:last-child').textContent = label;
+}
+
+function setBadge(prefix, state) {
+  const el = document.getElementById(prefix + '-badge');
+  const classMap = { pass: 'badge-pass', fail: 'badge-fail', run: 'badge-run', idle: 'badge-idle' };
+  el.className = 'badge px-2 py-1 ' + (classMap[state] || 'badge-idle');
+  el.style.fontSize = '0.75rem';
+  const labelMap = { pass: '✓ Passed', fail: '✗ Failed', run: 'Running…', idle: 'Idle' };
+  el.textContent = labelMap[state] || state;
+}
+
+function log(prefix, msg) {
+  const wrap = document.getElementById(prefix + '-log-wrap');
+  const el   = document.getElementById(prefix + '-log');
+  wrap.style.display = '';
+  el.textContent += '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Google Drive service (extracted from app-v3.html) ────────────────────────
+const GDriveService = {
+  SCOPES: 'https://www.googleapis.com/auth/drive.file',
+  FOLDER: TEST_FOLDER,
+  FILE:   TEST_FILE,
+  _token: null, _tokenExp: 0,
+  getToken()       { return this._token && Date.now() < this._tokenExp ? this._token : null; },
+  _storeToken(t,s) { this._token = t; this._tokenExp = Date.now() + ((s||3600)-60)*1000; },
+  requestToken() {
+    return new Promise((resolve, reject) => {
+      if (!gdClientId) { reject(new Error('not_configured')); return; }
+      if (!window.google || !window.google.accounts) { reject(new Error('gis_not_loaded')); return; }
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: gdClientId,
+        scope: this.SCOPES,
+        callback: resp => {
+          if (resp.error) { reject(new Error(resp.error)); return; }
+          this._storeToken(resp.access_token, resp.expires_in);
+          resolve(resp.access_token);
+        }
+      });
+      client.requestAccessToken();
+    });
+  },
+  async _tok()   { return this.getToken() || this.requestToken(); },
+  async _folder(tok) {
+    const q = encodeURIComponent(`name='${this.FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers:{ Authorization:`Bearer ${tok}` } });
+    if (!r.ok) throw new Error('gdrive_folder:' + r.status);
+    const { files } = await r.json();
+    if (files && files.length) return files[0].id;
+    const cr = await fetch('https://www.googleapis.com/drive/v3/files', {
+      method:'POST', headers:{ Authorization:`Bearer ${tok}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ name: this.FOLDER, mimeType:'application/vnd.google-apps.folder' })
+    });
+    if (!cr.ok) throw new Error('gdrive_mkdir:' + cr.status);
+    return (await cr.json()).id;
+  },
+  async upload(json) {
+    const tok = await this._tok();
+    const fid = await this._folder(tok);
+    const body = JSON.stringify(json);
+    const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
+    const sr = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers:{ Authorization:`Bearer ${tok}` } });
+    const { files } = await sr.json();
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(files && files.length ? {} : { name: this.FILE, parents:[fid] })], { type:'application/json' }));
+    form.append('file',     new Blob([body], { type:'application/json' }));
+    const method = (files && files.length) ? 'PATCH' : 'POST';
+    const url    = (files && files.length)
+      ? `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`
+      : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+    const res = await fetch(url, { method, headers:{ Authorization:`Bearer ${tok}` }, body: form });
+    if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+    return (await res.json()).id || (files && files[0] && files[0].id);
+  },
+  async download(fileId) {
+    const tok = await this._tok();
+    if (!fileId) {
+      const fid = await this._folder(tok);
+      const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
+      const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers:{ Authorization:`Bearer ${tok}` } });
+      const { files } = await r.json();
+      if (!files || !files.length) return null;
+      fileId = files[0].id;
+    }
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers:{ Authorization:`Bearer ${tok}` } });
+    if (!r.ok) throw new Error('gdrive_download:' + r.status);
+    return r.json();
+  }
+};
+
+// ── OneDrive service (extracted from app-v3.html) ────────────────────────────
+const OneDriveService = {
+  SCOPES: ['Files.ReadWrite.AppFolder'],
+  FILE: TEST_FILE,
+  _app: null, _account: null,
+  _getApp() {
+    if (!window.msal || !msClientId) return null;
+    if (!this._app) {
+      try { this._app = new window.msal.PublicClientApplication({ auth:{ clientId: msClientId, redirectUri: window.location.origin } }); } catch { return null; }
+    }
+    return this._app;
+  },
+  async requestToken() {
+    const app = this._getApp();
+    if (!app) throw new Error('not_configured');
+    const r = await app.acquireTokenPopup({ scopes: this.SCOPES });
+    this._account = r.account; return r.accessToken;
+  },
+  async _tok() {
+    const app = this._getApp();
+    if (!app) throw new Error('not_configured');
+    const accounts = app.getAllAccounts();
+    if (accounts.length) {
+      try { const r = await app.acquireTokenSilent({ scopes: this.SCOPES, account: accounts[0] }); this._account = r.account; return r.accessToken; } catch {}
+    }
+    return this.requestToken();
+  },
+  async upload(json) {
+    const tok = await this._tok();
+    const r = await fetch(
+      `https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`,
+      { method:'PUT', headers:{ Authorization:`Bearer ${tok}`, 'Content-Type':'application/json' }, body: JSON.stringify(json) }
+    );
+    if (!r.ok) throw new Error('onedrive_upload:' + r.status);
+  },
+  async download() {
+    const tok = await this._tok();
+    const r = await fetch(
+      `https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`,
+      { headers:{ Authorization:`Bearer ${tok}` } }
+    );
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('onedrive_download:' + r.status);
+    return r.json();
+  }
+};
+
+// ── Test runner ──────────────────────────────────────────────────────────────
+async function runProvider(prefix, svc, label) {
+  document.getElementById(prefix + '-btn').disabled = true;
+  setBadge(prefix, 'run');
+  log(prefix, 'Starting ' + label + ' E2E verification…');
+
+  const result = { provider: label, startedAt: ts(), steps: [], passed: false, error: null };
+
+  const PAYLOAD = {
+    _syncTest: true,
+    testId: 'e2e-' + Date.now(),
+    timestamp: ts(),
+    marker: 'financetracker-cloud-sync-verification',
+    sampleData: { expenses: [{ id: 'test-1', amount: 99.99, description: 'Verification expense', currency: 'GBP' }] }
+  };
+
+  // Step 0: Authenticate
+  setStep(prefix, 0, 'run', 'Authenticating with ' + label + '…');
+  log(prefix, '→ Requesting OAuth token…');
+  try {
+    await svc.requestToken();
+    setStep(prefix, 0, 'pass', 'Authenticated ✓');
+    log(prefix, '✓ Token obtained');
+    result.steps.push({ name: 'authenticate', status: 'pass' });
+  } catch (e) {
+    setStep(prefix, 0, 'fail', 'Authentication failed: ' + e.message);
+    log(prefix, '✗ Auth error: ' + e.message);
+    result.steps.push({ name: 'authenticate', status: 'fail', error: e.message });
+    result.error = e.message;
+    finish(prefix, label, result, false);
+    return;
+  }
+
+  // Step 1: Upload
+  setStep(prefix, 1, 'run', 'Uploading test payload…');
+  log(prefix, '→ Uploading test payload (testId=' + PAYLOAD.testId + ')…');
+  let uploadedFileId;
+  try {
+    uploadedFileId = await svc.upload(PAYLOAD);
+    setStep(prefix, 1, 'pass', 'Upload succeeded ✓');
+    log(prefix, '✓ Upload OK' + (uploadedFileId ? ' (fileId=' + uploadedFileId + ')' : ''));
+    result.steps.push({ name: 'upload', status: 'pass', fileId: uploadedFileId || null });
+  } catch (e) {
+    setStep(prefix, 1, 'fail', 'Upload failed: ' + e.message);
+    log(prefix, '✗ Upload error: ' + e.message);
+    result.steps.push({ name: 'upload', status: 'fail', error: e.message });
+    result.error = e.message;
+    finish(prefix, label, result, false);
+    return;
+  }
+
+  // Step 2: Download
+  setStep(prefix, 2, 'run', 'Downloading from ' + label + '…');
+  log(prefix, '→ Downloading back from ' + label + '…');
+  let downloaded;
+  try {
+    downloaded = await svc.download(uploadedFileId);
+    if (!downloaded) throw new Error('download returned null');
+    setStep(prefix, 2, 'pass', 'Download succeeded ✓');
+    log(prefix, '✓ Download OK — received testId=' + (downloaded.testId || 'N/A'));
+    result.steps.push({ name: 'download', status: 'pass' });
+  } catch (e) {
+    setStep(prefix, 2, 'fail', 'Download failed: ' + e.message);
+    log(prefix, '✗ Download error: ' + e.message);
+    result.steps.push({ name: 'download', status: 'fail', error: e.message });
+    result.error = e.message;
+    finish(prefix, label, result, false);
+    return;
+  }
+
+  // Step 3: Equality check
+  setStep(prefix, 3, 'run', 'Verifying JSON equality…');
+  log(prefix, '→ Checking round-trip equality…');
+  const uploadedStr   = JSON.stringify(PAYLOAD);
+  const downloadedStr = JSON.stringify(downloaded);
+  const equal = (uploadedStr === downloadedStr);
+  if (equal) {
+    setStep(prefix, 3, 'pass', 'JSON equality verified ✓');
+    log(prefix, '✓ Upload and download match exactly — round-trip PASSED');
+    result.steps.push({ name: 'equality', status: 'pass' });
+    result.passed = true;
+  } else {
+    setStep(prefix, 3, 'fail', 'JSON mismatch — round-trip FAILED');
+    log(prefix, '✗ Mismatch! Uploaded: ' + uploadedStr.substring(0, 200));
+    log(prefix, '✗ Downloaded: ' + downloadedStr.substring(0, 200));
+    result.steps.push({ name: 'equality', status: 'fail', error: 'JSON payload mismatch' });
+    result.error = 'JSON payload did not match after round-trip';
+  }
+
+  finish(prefix, label, result, result.passed);
+}
+
+function finish(prefix, label, result, passed) {
+  result.finishedAt = ts();
+  result.passed     = passed;
+  setBadge(prefix, passed ? 'pass' : 'fail');
+  log(prefix, (passed ? '✓ ' : '✗ ') + label + ' verification ' + (passed ? 'PASSED' : 'FAILED') + ' at ' + result.finishedAt);
+
+  if (prefix === 'gd')  results.gdrive   = result;
+  if (prefix === 'od')  results.onedrive = result;
+
+  if (results.gdrive !== null || results.onedrive !== null) {
+    renderReport();
+  }
+  document.getElementById(prefix + '-btn').disabled = false;
+  document.getElementById(prefix + '-btn').innerHTML = '<i class="fas fa-redo me-2"></i>Re-run Test';
+}
+
+async function runGDrive()  { await runProvider('gd', GDriveService,  'Google Drive'); }
+async function runOneDrive(){ await runProvider('od', OneDriveService, 'OneDrive'); }
+
+// ── Report rendering ─────────────────────────────────────────────────────────
+function renderReport() {
+  const sec  = document.getElementById('report-section');
+  const body = document.getElementById('report-body');
+  sec.style.display = '';
+
+  let html = '';
+  let text = '=== Cloud Sync E2E Verification Report ===\n';
+  text += 'Generated: ' + ts() + '\n\n';
+
+  for (const [key, label] of [['gdrive', 'Google Drive'], ['onedrive', 'OneDrive']]) {
+    const r = results[key];
+    if (!r) continue;
+    const cls = r.passed ? 'alert-success' : 'alert-danger';
+    const ico = r.passed ? '✓' : '✗';
+    html += `<div class="alert ${cls} py-2 px-3 mb-2" style="border-radius:10px;font-size:0.85rem">
+      <strong>${ico} ${label}</strong> — ${r.passed ? 'ALL STEPS PASSED' : 'FAILED: ' + r.error}
+      <div class="text-muted" style="font-size:0.78rem">Started ${r.startedAt} · Finished ${r.finishedAt}</div>
+      <ul class="mb-0 mt-1">`;
+    text += `--- ${label} ---\n`;
+    text += `Result: ${r.passed ? 'PASS' : 'FAIL'}\n`;
+    text += `Started:  ${r.startedAt}\n`;
+    text += `Finished: ${r.finishedAt}\n`;
+    for (const step of r.steps) {
+      const si = step.status === 'pass' ? '✓' : '✗';
+      html += `<li>${si} ${step.name}${step.error ? ': ' + step.error : ''}</li>`;
+      text += `  ${si} ${step.name}${step.error ? ': ' + step.error : ''}\n`;
+    }
+    html += '</ul></div>';
+    text += '\n';
+  }
+
+  const both = results.gdrive && results.onedrive;
+  if (both) {
+    const allPass = results.gdrive.passed && results.onedrive.passed;
+    html = `<div class="alert ${allPass ? 'alert-success' : 'alert-warning'} fw-semibold py-2 px-3 mb-2" style="border-radius:10px">
+      ${allPass ? '✓ Both providers passed end-to-end verification' : '⚠ One or more providers failed — see details below'}
+    </div>` + html;
+    text = (allPass ? '✓ OVERALL: PASS\n' : '⚠ OVERALL: PARTIAL/FAIL\n') + text;
+  }
+
+  body.innerHTML = html;
+  document.getElementById('report-text').textContent = text;
+}
+
+function copyReport() {
+  const txt = document.getElementById('report-text').textContent;
+  navigator.clipboard.writeText(txt).then(() => {
+    const btn = document.querySelector('[onclick="copyReport()"]');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-check me-1"></i>Copied!';
+    setTimeout(() => { btn.innerHTML = orig; }, 1800);
+  });
+}
+</script>
+</body>
+</html>
