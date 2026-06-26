@@ -2473,29 +2473,54 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     }[pref] || { icon: 'fas fa-mobile-alt', label: 'Local only', sub: 'Data stored on this device only', color: '#6c757d' };
                     const isSyncing = syncStatus === 'syncing';
                     const isReconnectNeeded = syncStatus === 'reconnect-needed';
-                    const lastSynced = lastSyncTime ? new Date(lastSyncTime).toLocaleString() : null;
+                    const isConnected = isCloud && syncStatus !== 'reconnect-needed' && syncStatus !== 'error';
+                    const formatRelativeTime = (isoString) => {
+                        if (!isoString) return null;
+                        const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+                        if (diff < 10) return 'just now';
+                        if (diff < 60) return diff + ' seconds ago';
+                        if (diff < 3600) { const m = Math.floor(diff / 60); return m + ' minute' + (m !== 1 ? 's' : '') + ' ago'; }
+                        if (diff < 86400) { const h = Math.floor(diff / 3600); return h + ' hour' + (h !== 1 ? 's' : '') + ' ago'; }
+                        const d = Math.floor(diff / 86400);
+                        return d + ' day' + (d !== 1 ? 's' : '') + ' ago';
+                    };
+                    const relativeSync = formatRelativeTime(lastSyncTime);
                     return (
                         <div>
                             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.75rem 1rem',background:'#f8f9fa',borderRadius:'10px',border:'1px solid #e9ecef',marginBottom: isCloud ? '0.75rem' : '0'}}>
                                 <div className="d-flex align-items-center gap-3">
                                     <i className={info.icon} style={{fontSize:'1.5rem',color:info.color,width:'24px',textAlign:'center'}}></i>
                                     <div>
-                                        <div style={{fontWeight:'600',fontSize:'0.95rem'}}>{info.label}</div>
-                                        {isCloud && lastSynced && !isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>
-                                                Last synced: {lastSynced}
+                                        <div className="d-flex align-items-center gap-2" style={{fontWeight:'600',fontSize:'0.95rem'}}>
+                                            {info.label}
+                                            {isCloud && (
+                                                <span style={{
+                                                    display:'inline-flex',alignItems:'center',gap:'4px',
+                                                    fontSize:'0.7rem',fontWeight:'600',padding:'1px 7px',borderRadius:'20px',
+                                                    background: isReconnectNeeded ? '#fff3cd' : isSyncing ? '#cfe2ff' : syncStatus === 'error' ? '#f8d7da' : '#d1e7dd',
+                                                    color: isReconnectNeeded ? '#856404' : isSyncing ? '#084298' : syncStatus === 'error' ? '#842029' : '#0a6640'
+                                                }}>
+                                                    {isSyncing && <i className="fas fa-spinner fa-spin" style={{fontSize:'0.65rem'}}></i>}
+                                                    {!isSyncing && <i className={isReconnectNeeded || syncStatus === 'error' ? 'fas fa-circle-xmark' : 'fas fa-circle-check'} style={{fontSize:'0.65rem'}}></i>}
+                                                    {isSyncing ? 'Syncing…' : isReconnectNeeded ? 'Disconnected' : syncStatus === 'error' ? 'Error' : 'Connected'}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {isCloud && relativeSync && !isReconnectNeeded && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>
+                                                Last synced {relativeSync}
                                             </div>
                                         )}
-                                        {isCloud && !lastSynced && !isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                                        {isCloud && !relativeSync && !isReconnectNeeded && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>{info.sub}</div>
                                         )}
                                         {isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#dc3545',fontWeight:'500'}}>
-                                                <i className="fas fa-exclamation-triangle me-1"></i>Re-connect required
+                                            <div style={{fontSize:'0.78rem',color:'#dc3545',fontWeight:'500',marginTop:'1px'}}>
+                                                <i className="fas fa-exclamation-triangle me-1"></i>Session expired — re-connect to resume syncing
                                             </div>
                                         )}
                                         {!isCloud && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>{info.sub}</div>
                                         )}
                                     </div>
                                 </div>
