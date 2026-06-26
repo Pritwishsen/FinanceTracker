@@ -845,7 +845,8 @@ class DataService {
         const keys = ['expenses', 'income', 'categories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth'];
         const data = {};
         keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
-        return { version: '1.0', createdAt: new Date().toISOString(), data };
+        const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
+        return { version: '1.0', createdAt: new Date().toISOString(), userId: storedUser ? storedUser.uid : null, data };
     }
     static downloadBackup() {
         const backup = this.createBackup();
@@ -5377,6 +5378,9 @@ function App() {
                     setCloudSyncGate('checking');
                     SyncService.download().then(cloudBackup => {
                         if (!cloudBackup) { setCloudSyncGate('idle'); return; }
+                        // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
+                        const currentUid = currentUser ? currentUser.uid : null;
+                        if (cloudBackup.userId && currentUid && cloudBackup.userId !== currentUid) { setCloudSyncGate('idle'); return; }
                         const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                         const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                         if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
@@ -5471,9 +5475,14 @@ function App() {
         setReconnectBannerDismissed(false);
         let showingRestore = false;
         if (cloudBackup) {
-            const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
-            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-            if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
+            // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
+            const currentUid = currentUser ? currentUser.uid : null;
+            const backupBelongsHere = !cloudBackup.userId || !currentUid || cloudBackup.userId === currentUid;
+            if (backupBelongsHere) {
+                const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
+            }
         }
         // Upload local data to cloud immediately after connecting (unless we're showing the restore prompt)
         if ((pref === 'gdrive' || pref === 'onedrive') && !showingRestore) {
@@ -5502,9 +5511,12 @@ function App() {
         setCloudGateConnecting(true); setCloudGateError('');
         try {
             await svc.requestToken();
+            setCloudGateConnecting(false); // OAuth complete — clear spinner before transition
             setCloudSyncGate('checking');
             const cloudBackup = await SyncService.download();
             if (!cloudBackup) { setCloudSyncGate('idle'); return; }
+            // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
+            if (cloudBackup.userId && currentUser && cloudBackup.userId !== currentUser.uid) { setCloudSyncGate('idle'); return; }
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
             const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
             if (cloudTime > localTime + 60000) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
