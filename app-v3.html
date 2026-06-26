@@ -2052,7 +2052,7 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen }) {
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect }) {
     const [saveMessage, setSaveMessage] = useState('');
     const [people, setPeople] = useState([]);
     const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
@@ -2460,24 +2460,61 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     Where your financial data is backed up
                 </p>
                 {(() => {
-                    const pref = localStorage.getItem('financeApp_storagePreference') || 'local';
+                    const pref = storagePref || localStorage.getItem('financeApp_storagePreference') || 'local';
+                    const isCloud = pref === 'gdrive' || pref === 'onedrive';
                     const info = {
                         gdrive:   { icon: 'fab fa-google-drive', label: 'Google Drive', sub: 'Syncing to Google Drive',  color: '#4285F4' },
                         onedrive: { icon: 'fab fa-microsoft',    label: 'OneDrive',      sub: 'Syncing to OneDrive',      color: '#0078D4' },
                         local:    { icon: 'fas fa-mobile-alt',   label: 'Local only',    sub: 'Data stored on this device only', color: '#6c757d' }
                     }[pref] || { icon: 'fas fa-mobile-alt', label: 'Local only', sub: 'Data stored on this device only', color: '#6c757d' };
+                    const isSyncing = syncStatus === 'syncing';
+                    const isReconnectNeeded = syncStatus === 'reconnect-needed';
+                    const lastSynced = lastSyncTime ? new Date(lastSyncTime).toLocaleString() : null;
                     return (
-                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.75rem 1rem',background:'#f8f9fa',borderRadius:'10px',border:'1px solid #e9ecef'}}>
-                            <div className="d-flex align-items-center gap-3">
-                                <i className={info.icon} style={{fontSize:'1.5rem',color:info.color,width:'24px',textAlign:'center'}}></i>
-                                <div>
-                                    <div style={{fontWeight:'600',fontSize:'0.95rem'}}>{info.label}</div>
-                                    <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                        <div>
+                            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.75rem 1rem',background:'#f8f9fa',borderRadius:'10px',border:'1px solid #e9ecef',marginBottom: isCloud ? '0.75rem' : '0'}}>
+                                <div className="d-flex align-items-center gap-3">
+                                    <i className={info.icon} style={{fontSize:'1.5rem',color:info.color,width:'24px',textAlign:'center'}}></i>
+                                    <div>
+                                        <div style={{fontWeight:'600',fontSize:'0.95rem'}}>{info.label}</div>
+                                        {isCloud && lastSynced && !isReconnectNeeded && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>
+                                                Last synced: {lastSynced}
+                                            </div>
+                                        )}
+                                        {isCloud && !lastSynced && !isReconnectNeeded && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                                        )}
+                                        {isReconnectNeeded && (
+                                            <div style={{fontSize:'0.78rem',color:'#dc3545',fontWeight:'500'}}>
+                                                <i className="fas fa-exclamation-triangle me-1"></i>Re-connect required
+                                            </div>
+                                        )}
+                                        {!isCloud && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d'}}>{info.sub}</div>
+                                        )}
+                                    </div>
                                 </div>
+                                <button className="btn btn-sm btn-outline-primary" onClick={() => onStoragePickerOpen && onStoragePickerOpen()}>
+                                    Switch
+                                </button>
                             </div>
-                            <button className="btn btn-sm btn-outline-primary" onClick={() => onStoragePickerOpen && onStoragePickerOpen()}>
-                                Switch
-                            </button>
+                            {isCloud && (
+                                <div className="d-flex gap-2">
+                                    {isReconnectNeeded ? (
+                                        <button className="btn btn-sm btn-warning flex-grow-1" onClick={() => onReconnect && onReconnect()}>
+                                            <i className="fas fa-plug me-1"></i>Re-connect {pref === 'gdrive' ? 'Google Drive' : 'OneDrive'}
+                                        </button>
+                                    ) : (
+                                        <button className="btn btn-sm btn-outline-secondary flex-grow-1" onClick={() => onSyncNow && onSyncNow()} disabled={isSyncing}>
+                                            {isSyncing
+                                                ? <><i className="fas fa-spinner fa-spin me-1"></i>Syncing…</>
+                                                : <><i className="fas fa-sync-alt me-1"></i>Sync now</>
+                                            }
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     );
                 })()}
@@ -5383,6 +5420,16 @@ function App() {
         if (!svc || !svc.isConfigured()) { setSyncStatus('not_configured'); return; }
         try { await svc.requestToken(); setReconnectBannerDismissed(true); setSyncStatus('idle'); handleDataUpdate(); } catch (_) {}
     };
+    const handleSyncNow = async () => {
+        if (!SyncService.isCloudEnabled()) return;
+        setSyncStatus('syncing');
+        try {
+            const result = await SyncService.upload(DataService.createBackup());
+            if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+            else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
+            else { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
+        } catch (_) { setSyncStatus('error'); }
+    };
     const handleCloudGateConnect = async () => {
         const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
         if (!svc || !svc.isConfigured()) { setCloudSyncGate('idle'); return; }
@@ -5416,7 +5463,7 @@ function App() {
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} />;
+            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
