@@ -842,7 +842,7 @@ class DataService {
         if (changed) this.saveRecurring(schedules);
     }
     static createBackup() {
-        const keys = ['expenses', 'income', 'categories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth'];
+        const keys = ['expenses', 'income', 'categories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings'];
         const data = {};
         keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
         const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
@@ -888,7 +888,7 @@ class DataService {
             const last = JSON.parse(localStorage.getItem('financeApp_latestBackup') || 'null');
             if (!last) return true;
             const current = this.createBackup();
-            const keys = ['expenses', 'income', 'categories', 'goals', 'bills', 'recurring', 'debts', 'networth'];
+            const keys = ['expenses', 'income', 'categories', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings'];
             return keys.some(k => JSON.stringify(current.data[k]) !== JSON.stringify(last.data[k]));
         } catch (_) { return true; }
     }
