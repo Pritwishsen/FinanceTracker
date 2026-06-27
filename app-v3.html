@@ -5485,13 +5485,19 @@ function App() {
             setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
             DataService.saveLatestBackup();
             if (SyncService.isCloudEnabled()) {
-                setSyncStatus('syncing');
-                try {
-                    const result = await SyncService.upload(DataService.createBackup());
-                    if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
-                    else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
-                    else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
-                } catch (_) { setSyncStatus('error'); }
+                // Guard: skip auto-upload if financeApp_lastSaveTime is absent — it means data was
+                // just wiped (logout/clear) and we haven't done any real saves yet this session.
+                // Uploading here would overwrite the cloud backup with empty data.
+                const hasSavedLocally = !!localStorage.getItem('financeApp_lastSaveTime');
+                if (hasSavedLocally) {
+                    setSyncStatus('syncing');
+                    try {
+                        const result = await SyncService.upload(DataService.createBackup());
+                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                        else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
+                        else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
+                    } catch (_) { setSyncStatus('error'); }
+                }
             }
         } catch (error) { console.error('Error updating data:', error); }
     };
@@ -5549,12 +5555,54 @@ function App() {
     const handleReconnect = async () => {
         const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
         if (!svc || !svc.isConfigured()) { setSyncStatus('not_configured'); return; }
-        try { await svc.requestToken(); setReconnectBannerDismissed(true); setSyncStatus('idle'); handleDataUpdate(); } catch (_) {}
+        try {
+            await svc.requestToken();
+            // After re-connecting, check if cloud has newer data and offer restore
+            setSyncStatus('syncing');
+            try {
+                const cloudBackup = await SyncService.download();
+                if (cloudBackup) {
+                    const ownBackup = !cloudBackup.userId || !currentUser || cloudBackup.userId === currentUser.uid;
+                    if (ownBackup) {
+                        const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                        const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                        if (cloudTime > localTime + 60000) {
+                            setCloudRestoreData(cloudBackup);
+                            setCloudSyncGate('restore-prompt');
+                            setSyncStatus('idle');
+                            return;
+                        }
+                    }
+                }
+            } catch (_) {}
+            setReconnectBannerDismissed(true);
+            setSyncStatus('idle');
+            handleDataUpdate();
+        } catch (_) { setSyncStatus('reconnect-needed'); }
     };
     const handleSyncNow = async () => {
         if (!SyncService.isCloudEnabled()) return;
+        const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
+        // If no valid token, show reconnect instead of trying (and failing with session-expired)
+        if (!svc || !svc.isTokenValid()) { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); return; }
         setSyncStatus('syncing');
         try {
+            // Download-first: if cloud is newer than local, offer restore instead of overwriting
+            const cloudBackup = await SyncService.download();
+            if (cloudBackup) {
+                const ownBackup = !cloudBackup.userId || !currentUser || cloudBackup.userId === currentUser.uid;
+                if (ownBackup) {
+                    const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                    const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                    if (cloudTime > localTime + 60000) {
+                        setSyncStatus('idle');
+                        setCloudRestoreData(cloudBackup);
+                        setCloudSyncGate('restore-prompt');
+                        return;
+                    }
+                }
+            }
+            // Local is up to date — upload it
             const result = await SyncService.upload(DataService.createBackup());
             if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
             else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
