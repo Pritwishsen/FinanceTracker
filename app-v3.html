@@ -5406,12 +5406,14 @@ function App() {
                 }
             }
         } else if (!confirmed) {
+            // skipCount = logins remaining before re-prompt (2 on first skip → hides on login 1 & 2 → shows on login 3)
             const skipCount = parseInt(localStorage.getItem('financeApp_storagePickerSkipCount') || '0', 10);
             if (skipCount > 0) {
-                // Still inside the skip window — decrement counter, let user into app without prompting
+                // Still inside the skip window — decrement and let user in without prompting
                 localStorage.setItem('financeApp_storagePickerSkipCount', String(skipCount - 1));
                 setShowStoragePicker(false);
             } else {
+                // Skip window exhausted (or never skipped) — show the picker
                 setShowStoragePicker(true);
             }
         } else {
@@ -5578,7 +5580,7 @@ function App() {
     );
     if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
-    if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} onSkip={() => { localStorage.setItem('financeApp_storagePickerSkipCount', '3'); setShowStoragePicker(false); }} />;
+    if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} onSkip={() => { localStorage.setItem('financeApp_storagePickerSkipCount', '2'); setShowStoragePicker(false); }} />;
     if (cloudSyncGate === 'checking') return (
         <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)'}}>
             <div className="spinner-border text-white mb-3" style={{width:'3rem',height:'3rem'}}></div>
