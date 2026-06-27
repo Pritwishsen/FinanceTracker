@@ -5338,7 +5338,7 @@ function App() {
 
     useEffect(() => {
         if (!window.__firebaseReady) return;
-        const unsubscribe = window.__firebaseAuth.onAuthStateChanged(fbUser => {
+        const unsubscribe = window.__firebaseAuth.onAuthStateChanged(async (fbUser) => {
             if (fbUser) {
                 const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
                 // If a different user's data is sitting in localStorage, wipe it before loading
@@ -5353,25 +5353,22 @@ function App() {
                     createdAt: (stored && stored.createdAt) || new Date().toISOString()
                 };
                 localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
-                setCurrentUser(user);
-                // Fire-and-forget: restore storage preference from Firestore.
-                // Updates localStorage and React state directly so the picker
-                // is dismissed even if it briefly appeared before Firestore responded.
-                // Any storagePreference in Firestore counts as confirmed (migrates legacy docs).
-                ;(async () => {
-                    try {
-                        const doc = await window.__firebaseDb.collection('users').doc(fbUser.uid).get();
-                        if (doc.exists) {
-                            const pref = doc.data().storagePreference;
-                            if (pref) {
-                                localStorage.setItem('financeApp_storagePreference', pref);
-                                localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
-                                setStoragePreference(pref);
-                                setShowStoragePicker(false);
-                            }
+                // Read storagePreference from Firestore BEFORE calling setCurrentUser so that
+                // localStorage is already populated when the storage-gate useEffect runs.
+                // This ensures the storage picker is never shown to returning users regardless
+                // of which auth method they used (email/password, Google OAuth, or any future
+                // provider) — not just email/password which had a prior synchronous read.
+                try {
+                    const doc = await window.__firebaseDb.collection('users').doc(fbUser.uid).get();
+                    if (doc.exists) {
+                        const pref = doc.data().storagePreference;
+                        if (pref) {
+                            localStorage.setItem('financeApp_storagePreference', pref);
+                            localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
                         }
-                    } catch (_) {}
-                })();
+                    }
+                } catch (_) {}
+                setCurrentUser(user);
             } else {
                 setCurrentUser(null);
             }
