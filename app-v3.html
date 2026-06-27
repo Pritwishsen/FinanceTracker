@@ -5483,12 +5483,12 @@ function App() {
             } else { setBudgetAlerts([]); }
             const todayStr = new Date().toISOString().split('T')[0];
             setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
+            // Guard: check BEFORE saveLatestBackup() sets financeApp_lastSaveTime, so that
+            // a freshly-wiped device (just logged in, no local data yet) doesn't overwrite
+            // the cloud backup with empty data.
+            const hasSavedLocally = !!localStorage.getItem('financeApp_lastSaveTime');
             DataService.saveLatestBackup();
             if (SyncService.isCloudEnabled()) {
-                // Guard: skip auto-upload if financeApp_lastSaveTime is absent — it means data was
-                // just wiped (logout/clear) and we haven't done any real saves yet this session.
-                // Uploading here would overwrite the cloud backup with empty data.
-                const hasSavedLocally = !!localStorage.getItem('financeApp_lastSaveTime');
                 if (hasSavedLocally) {
                     setSyncStatus('syncing');
                     try {
@@ -5674,7 +5674,16 @@ function App() {
     if (cloudSyncGate === 'restore-prompt' && cloudRestoreData) return (
         <CloudRestoreModal
             backupData={cloudRestoreData}
-            onRestore={() => { localStorage.setItem('financeApp_skipCloudRestoreCheck', 'true'); setCloudSyncGate('idle'); window.location.reload(); }}
+            onRestore={async () => {
+                // Restore in-place — no page reload needed.
+                // DataService.restoreBackup() was already called inside CloudRestoreModal
+                // before onRestore fires; force a cache-bust so handleDataUpdate re-reads
+                // the freshly restored localStorage values instead of stale in-memory data.
+                DataService.isInitialized = false;
+                setCloudRestoreData(null);
+                setCloudSyncGate('idle');
+                await handleDataUpdate();
+            }}
             onKeepLocal={() => { setCloudRestoreData(null); setCloudSyncGate('idle'); handleDataUpdate(); }}
         />
     );
