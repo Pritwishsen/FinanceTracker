@@ -3469,7 +3469,9 @@ const AuthUtils = {
         const cred = await window.__firebaseAuth.signInWithEmailAndPassword(email, password);
         const doc = await window.__firebaseDb.collection('users').doc(cred.user.uid).get();
         if (doc.exists) {
-            localStorage.setItem('financeApp_storagePreference', doc.data().storagePreference || 'local');
+            const pref = doc.data().storagePreference || 'local';
+            localStorage.setItem('financeApp_storagePreference', pref);
+            if (pref) localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
         } else {
             await window.__firebaseDb.collection('users').doc(cred.user.uid).set({
                 displayName: cred.user.displayName || email,
@@ -3536,7 +3538,7 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
         }
 
         if (window.__firebaseReady && currentUser && currentUser.uid) {
-            try { await window.__firebaseDb.collection('users').doc(currentUser.uid).update({ storagePreference: selected }); } catch (_) {}
+            try { await window.__firebaseDb.collection('users').doc(currentUser.uid).update({ storagePreference: selected, pickerConfirmed: true }); } catch (_) {}
         }
         localStorage.setItem('financeApp_storagePreference', selected);
         localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
@@ -5352,6 +5354,24 @@ function App() {
                 };
                 localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
                 setCurrentUser(user);
+                // Fire-and-forget: restore storage preference from Firestore.
+                // Updates localStorage and React state directly so the picker
+                // is dismissed even if it briefly appeared before Firestore responded.
+                // Any storagePreference in Firestore counts as confirmed (migrates legacy docs).
+                ;(async () => {
+                    try {
+                        const doc = await window.__firebaseDb.collection('users').doc(fbUser.uid).get();
+                        if (doc.exists) {
+                            const pref = doc.data().storagePreference;
+                            if (pref) {
+                                localStorage.setItem('financeApp_storagePreference', pref);
+                                localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
+                                setStoragePreference(pref);
+                                setShowStoragePicker(false);
+                            }
+                        }
+                    } catch (_) {}
+                })();
             } else {
                 setCurrentUser(null);
             }
@@ -5491,7 +5511,22 @@ function App() {
         setCloudSyncGate('idle'); setCloudGateConnecting(false); setCloudGateError('');
         setExpenses([]); setIncome([]); setCategories([]); setPeople([]);
     };
-    const handleStorageConfirm = (pref, cloudBackup) => {
+    const handleStorageConfirm = async (pref, cloudBackup) => {
+        // Provider migration: switching from one cloud provider to another
+        const oldPref = storagePreference;
+        const isOldCloud = oldPref === 'gdrive' || oldPref === 'onedrive';
+        const isNewCloud = pref === 'gdrive' || pref === 'onedrive';
+        if (isOldCloud && isNewCloud && oldPref !== pref) {
+            try {
+                const oldSvc = oldPref === 'gdrive' ? GDriveService : OneDriveService;
+                if (oldSvc.isConfigured() && oldSvc.isTokenValid()) {
+                    const oldBackup = await oldSvc.download();
+                    if (oldBackup) {
+                        DataService.restoreBackup(oldBackup);
+                    }
+                }
+            } catch (_) {}
+        }
         setStoragePreference(pref);
         setShowStoragePicker(false);
         setSyncStatus('idle');
