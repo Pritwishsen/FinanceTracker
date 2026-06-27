@@ -243,6 +243,23 @@ const GDriveService = {
         form.append('file', new Blob([body], { type: 'application/json' }));
         return { tok, res: await fetch(url, { method, headers: { Authorization: `Bearer ${tok}` }, body: form }) };
     },
+    _histName() {
+        const n = new Date(); const p = x => String(x).padStart(2,'0');
+        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}.json`;
+    },
+    async _pruneGdHistory(tok, fid) {
+        try {
+            const q = encodeURIComponent(`'${fid}' in parents and name contains 'financetracker-20' and trashed=false`);
+            const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&orderBy=name desc`, { headers: { Authorization: `Bearer ${tok}` } });
+            if (!r.ok) return;
+            const { files } = await r.json();
+            if (files && files.length > 5) {
+                for (const f of files.slice(5)) {
+                    await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
+                }
+            }
+        } catch (_) {}
+    },
     async upload(json) {
         const tok = await this._tok();
         const fid = await this._folder(tok);
@@ -252,20 +269,25 @@ const GDriveService = {
             const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, {}, body);
             if (res.status === 404) { localStorage.removeItem('ftGdFileId'); return this.upload(json); }
             if (!res.ok) throw new Error('gdrive_upload:' + res.status);
-            return;
-        }
-        const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
-        const sr = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${tok}` } });
-        const { files } = await sr.json();
-        if (files && files.length) {
-            localStorage.setItem('ftGdFileId', files[0].id);
-            const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
-            if (!res.ok) throw new Error('gdrive_upload:' + res.status);
         } else {
-            const { res } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
-            if (!res.ok) throw new Error('gdrive_upload:' + res.status);
-            const f = await res.json(); if (f.id) localStorage.setItem('ftGdFileId', f.id);
+            const q = encodeURIComponent(`'${fid}' in parents and name='${this.FILE}' and trashed=false`);
+            const sr = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${tok}` } });
+            const { files } = await sr.json();
+            if (files && files.length) {
+                localStorage.setItem('ftGdFileId', files[0].id);
+                const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
+                if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+            } else {
+                const { res } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
+                if (!res.ok) throw new Error('gdrive_upload:' + res.status);
+                const f = await res.json(); if (f.id) localStorage.setItem('ftGdFileId', f.id);
+            }
         }
+        // versioned snapshot — best-effort, never fails the main upload
+        try {
+            const { res: sr } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this._histName(), parents: [fid] }, body);
+            if (sr.ok) this._pruneGdHistory(tok, fid);
+        } catch (_) {}
     },
     async download() {
         const tok = await this._tok();
@@ -281,6 +303,21 @@ const GDriveService = {
         }
         const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${tok}` } });
         if (r.status === 404) { localStorage.removeItem('ftGdFileId'); return null; }
+        if (!r.ok) throw new Error('gdrive_download:' + r.status);
+        return r.json();
+    },
+    async listHistory() {
+        const tok = await this._tok();
+        const fid = await this._folder(tok);
+        const q = encodeURIComponent(`'${fid}' in parents and name contains 'financetracker-20' and trashed=false`);
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,size)&orderBy=name desc`, { headers: { Authorization: `Bearer ${tok}` } });
+        if (!r.ok) return [];
+        const { files } = await r.json();
+        return (files || []).map(f => ({ id: f.id, name: f.name, size: f.size }));
+    },
+    async downloadById(fileId) {
+        const tok = await this._tok();
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${tok}` } });
         if (!r.ok) throw new Error('gdrive_download:' + r.status);
         return r.json();
     }
@@ -317,17 +354,55 @@ const OneDriveService = {
         return this.requestToken();
     },
     clearToken() { this._account = null; this._app = null; },
+    _histName() {
+        const n = new Date(); const p = x => String(x).padStart(2,'0');
+        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}.json`;
+    },
+    async _pruneOdHistory(tok) {
+        try {
+            const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot/children`, { headers: { Authorization: `Bearer ${tok}` } });
+            if (!r.ok) return;
+            const { value } = await r.json();
+            const hist = (value || []).filter(f => /^financetracker-\d{4}/.test(f.name)).sort((a,b) => b.name.localeCompare(a.name));
+            if (hist.length > 5) {
+                for (const f of hist.slice(5)) {
+                    await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
+                }
+            }
+        } catch (_) {}
+    },
     async upload(json) {
         const tok = await this._tok();
+        const body = JSON.stringify(json);
         const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`, {
-            method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body: JSON.stringify(json)
+            method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body
         });
         if (!r.ok) throw new Error('onedrive_upload:' + r.status);
+        // versioned snapshot — best-effort
+        try {
+            const sr = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this._histName())}:/content`, {
+                method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' }, body
+            });
+            if (sr.ok) this._pruneOdHistory(tok);
+        } catch (_) {}
     },
     async download() {
         const tok = await this._tok();
         const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot:/${encodeURIComponent(this.FILE)}:/content`, { headers: { Authorization: `Bearer ${tok}` } });
         if (r.status === 404) return null;
+        if (!r.ok) throw new Error('onedrive_download:' + r.status);
+        return r.json();
+    },
+    async listHistory() {
+        const tok = await this._tok();
+        const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/special/approot/children`, { headers: { Authorization: `Bearer ${tok}` } });
+        if (!r.ok) return [];
+        const { value } = await r.json();
+        return (value || []).filter(f => /^financetracker-\d{4}/.test(f.name)).sort((a,b) => b.name.localeCompare(a.name)).map(f => ({ id: f.id, name: f.name, size: f.size }));
+    },
+    async downloadById(fileId) {
+        const tok = await this._tok();
+        const r = await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`, { headers: { Authorization: `Bearer ${tok}` } });
         if (!r.ok) throw new Error('onedrive_download:' + r.status);
         return r.json();
     }
@@ -354,7 +429,9 @@ const SyncService = {
             return { status: 'error' };
         }
     },
-    async download() { const s = this.svc(); if (!s || !s.isConfigured()) return null; return s.download(); }
+    async download() { const s = this.svc(); if (!s || !s.isConfigured()) return null; return s.download(); },
+    async listHistory() { const s = this.svc(); if (!s || !s.isConfigured()) return []; try { return await s.listHistory(); } catch (_) { return []; } },
+    async downloadVersion(id) { const s = this.svc(); if (!s) return null; return s.downloadById(id); }
 };
 
 // ── Cloud Restore Modal ────────────────────────────────────────────────────
@@ -387,6 +464,101 @@ function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
                     <button className="btn btn-outline-secondary" onClick={onKeepLocal} disabled={restoring}><i className="fas fa-mobile-alt me-2"></i>Keep This Device's Data</button>
                 </div>
                 <p className="text-muted text-center mt-2 mb-0" style={{fontSize:'0.72rem'}}>Restoring will reload the app with cloud data</p>
+            </div>
+        </div>
+    );
+}
+
+// ── Cloud History Modal ────────────────────────────────────────────────────
+function CloudHistoryModal({ onClose, onRestored }) {
+    const [loading, setLoading] = React.useState(true);
+    const [snapshots, setSnapshots] = React.useState([]);
+    const [error, setError] = React.useState('');
+    const [restoring, setRestoring] = React.useState(null); // id of snapshot being restored
+    const [confirmed, setConfirmed] = React.useState(null); // snapshot awaiting confirm
+
+    React.useEffect(() => {
+        SyncService.listHistory().then(files => { setSnapshots(files); setLoading(false); })
+            .catch(e => { setError('Could not load history: ' + e.message); setLoading(false); });
+    }, []);
+
+    const parseName = (name) => {
+        // financetracker-2026-06-27-1430.json
+        const m = name.match(/financetracker-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})\.json/);
+        if (!m) return null;
+        return new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5]));
+    };
+
+    const doRestore = async (snap) => {
+        setConfirmed(null);
+        setRestoring(snap.id);
+        try {
+            const data = await SyncService.downloadVersion(snap.id);
+            if (!data) throw new Error('Empty response');
+            DataService.restoreBackup(data);
+            onRestored();
+        } catch (e) {
+            setError('Restore failed: ' + e.message);
+            setRestoring(null);
+        }
+    };
+
+    return (
+        <div style={{position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,0.72)',display:'flex',alignItems:'center',justifyContent:'center',padding:'1rem'}}>
+            <div style={{background:'#fff',borderRadius:'16px',padding:'1.5rem',maxWidth:'420px',width:'100%',boxShadow:'0 20px 60px rgba(0,0,0,0.3)',maxHeight:'80vh',display:'flex',flexDirection:'column'}}>
+                <div className="d-flex align-items-center justify-content-between mb-3">
+                    <div>
+                        <h5 className="fw-bold mb-0"><i className="fas fa-history me-2 text-primary"></i>Version History</h5>
+                        <div style={{fontSize:'0.78rem',color:'#6c757d'}}>Last 5 cloud snapshots</div>
+                    </div>
+                    <button className="btn btn-sm btn-outline-secondary" onClick={onClose}><i className="fas fa-times"></i></button>
+                </div>
+
+                {loading && <div className="text-center py-4"><span className="spinner-border spinner-border-sm me-2"></span>Loading snapshots…</div>}
+                {error && <div className="alert alert-danger py-2 mb-0" style={{fontSize:'0.85rem'}}><i className="fas fa-exclamation-circle me-1"></i>{error}</div>}
+
+                {!loading && !error && snapshots.length === 0 && (
+                    <div className="text-center py-4 text-muted">
+                        <i className="fas fa-cloud" style={{fontSize:'2rem',opacity:0.3,marginBottom:'0.5rem',display:'block'}}></i>
+                        No snapshots yet. They appear after your next sync.
+                    </div>
+                )}
+
+                {!loading && snapshots.length > 0 && (
+                    <div style={{overflowY:'auto',flex:1}}>
+                        {snapshots.map((snap, i) => {
+                            const date = parseName(snap.name);
+                            const isRestoring = restoring === snap.id;
+                            const isConfirming = confirmed && confirmed.id === snap.id;
+                            return (
+                                <div key={snap.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.65rem 0.75rem',background: i===0 ? '#f0fdf4' : '#f8f9fa',borderRadius:'10px',marginBottom:'0.5rem',border: i===0 ? '1px solid #bbf7d0' : '1px solid #e9ecef'}}>
+                                    <div>
+                                        {i === 0 && <span style={{fontSize:'0.65rem',fontWeight:'700',background:'#16a34a',color:'#fff',borderRadius:'4px',padding:'1px 5px',marginRight:'6px'}}>LATEST</span>}
+                                        <div style={{fontWeight:'600',fontSize:'0.88rem',display:'inline'}}>
+                                            {date ? date.toLocaleDateString([], {day:'numeric',month:'short',year:'numeric'}) : snap.name}
+                                        </div>
+                                        {date && <div style={{fontSize:'0.75rem',color:'#6c757d'}}>{date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} UTC</div>}
+                                    </div>
+                                    <div>
+                                        {isConfirming ? (
+                                            <div className="d-flex gap-1">
+                                                <button className="btn btn-danger btn-sm" style={{fontSize:'0.75rem'}} onClick={() => doRestore(snap)} disabled={!!restoring}>Restore</button>
+                                                <button className="btn btn-outline-secondary btn-sm" style={{fontSize:'0.75rem'}} onClick={() => setConfirmed(null)}>Cancel</button>
+                                            </div>
+                                        ) : (
+                                            <button className="btn btn-sm btn-outline-primary" style={{fontSize:'0.75rem'}} onClick={() => setConfirmed(snap)} disabled={!!restoring}>
+                                                {isRestoring ? <span className="spinner-border spinner-border-sm"></span> : <><i className="fas fa-undo me-1"></i>Restore</>}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+                <div className="mt-3 pt-2" style={{borderTop:'1px solid #e9ecef',fontSize:'0.72rem',color:'#9ca3af',textAlign:'center'}}>
+                    Snapshots are saved automatically on every sync · max 5 kept
+                </div>
             </div>
         </div>
     );
@@ -2068,7 +2240,7 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect }) {
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory }) {
     const [saveMessage, setSaveMessage] = useState('');
     const [people, setPeople] = useState([]);
     const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
@@ -2556,6 +2728,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                                 ? <><i className="fas fa-spinner fa-spin me-1"></i>Syncing…</>
                                                 : <><i className="fas fa-sync-alt me-1"></i>Sync now</>
                                             }
+                                        </button>
+                                    )}
+                                    {isConnected && (
+                                        <button className="btn btn-sm btn-outline-secondary" title="Version history" onClick={() => onViewHistory && onViewHistory()} style={{flexShrink:0}}>
+                                            <i className="fas fa-history"></i>
                                         </button>
                                     )}
                                 </div>
@@ -5334,6 +5511,7 @@ function App() {
     const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
     const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
     const [cloudRestoreData, setCloudRestoreData] = useState(null);
+    const [showCloudHistory, setShowCloudHistory] = useState(false);
     const [cloudGateConnecting, setCloudGateConnecting] = useState(false);
     const [cloudGateError, setCloudGateError] = useState('');
     const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
@@ -5648,7 +5826,7 @@ function App() {
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} />;
+            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
@@ -5755,6 +5933,16 @@ function App() {
             )}
             <div className="app-content">{renderScreen()}</div>
             <Navigation currentScreen={currentScreen} onScreenChange={setCurrentScreen} />
+            {showCloudHistory && (
+                <CloudHistoryModal
+                    onClose={() => setShowCloudHistory(false)}
+                    onRestored={() => {
+                        setShowCloudHistory(false);
+                        DataService.isInitialized = false;
+                        handleDataUpdate();
+                    }}
+                />
+            )}
         </div>
     );
 }
