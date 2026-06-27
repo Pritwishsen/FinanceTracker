@@ -5327,7 +5327,9 @@ function App() {
     const [authLoading, setAuthLoading] = useState(() => !!window.__firebaseReady);
     const [storagePreference, setStoragePreference] = useState(() => localStorage.getItem('financeApp_storagePreference') || '');
     const [showStoragePicker, setShowStoragePicker] = useState(false);
-    const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(false);
+    const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(
+        () => localStorage.getItem('financeApp_localBannerDismissed') === new Date().toISOString().split('T')[0]
+    );
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
     const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
@@ -5444,7 +5446,8 @@ function App() {
                 await DataService.processRecurringSchedules();
                 const todayStr = new Date().toISOString().split('T')[0];
                 const appSettings = await DataService.getSettings();
-                if (appSettings.autoBackupEnabled !== false && DataService.hasDataChangedSinceLastBackup()) {
+                const hasData = DataService.data.expenses.length > 0 || DataService.data.income.length > 0;
+                if (appSettings.autoBackupEnabled !== false && hasData && DataService.hasDataChangedSinceLastBackup()) {
                     const lastAutoBackup = localStorage.getItem('financeApp_lastAutoBackup');
                     if (lastAutoBackup !== todayStr) {
                         DataService.downloadBackup();
@@ -5688,9 +5691,11 @@ function App() {
         />
     );
 
+    const hasLocalData = expenses.length > 0 || income.length > 0;
     const showLocalDeviceBanner = storagePreference === 'local'
         && localStorage.getItem('financeApp_storagePickerConfirmed') === 'true'
         && !localStorage.getItem('financeApp_latestBackup')
+        && hasLocalData
         && !localDeviceBannerDismissed;
 
     return (
@@ -5745,7 +5750,7 @@ function App() {
                         <button className="btn btn-link btn-sm p-0 fw-semibold" style={{verticalAlign:'baseline',fontSize:'0.83rem'}} onClick={() => setCurrentScreen('settings')}>Import a backup</button>{' '}
                         to restore it here, or switch your storage in Settings.
                     </div>
-                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setLocalDeviceBannerDismissed(true)}></button>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => { localStorage.setItem('financeApp_localBannerDismissed', new Date().toISOString().split('T')[0]); setLocalDeviceBannerDismissed(true); }}></button>
                 </div>
             )}
             <div className="app-content">{renderScreen()}</div>
