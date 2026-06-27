@@ -1,0 +1,19 @@
+Bug 1 — Main culprit: the 60-second tolerance defeats itself (L5629)
+What happens step by step:
+
+User has data, adds expenses → handleDataUpdate → saveLatestBackup() stamps financeApp_lastSaveTime = NOW → SyncService.upload pushes backup to Drive with createdAt = NOW
+User logs out → clearAllUserData() wipes everything including financeApp_lastSaveTime
+User logs back in → token expired → reconnect-prompt shown → user clicks Connect
+handleCloudGateConnect runs: cloudTime = backup.createdAt (from step 1, call it T), localTime = localStorage.getItem('financeApp_lastSaveTime') → null → 0
+cloudTime (T) > 0 + 60000 → TRUE → restore prompt shown ✓
+
+BUT: DataService.restoreBackup() (L869) stamps financeApp_lastSaveTime = backupData.createdAt — the cloud file's own timestamp, not NOW. So after the very first restore, lastSaveTime = T. Then handleDataUpdate fires → saveLatestBackup → lastSaveTime = NOW (≈T+1s). Upload → Drive file createdAt = NOW.
+On the next login: cloudTime ≈ T+1s, localTime is wiped → 0 again. Still works... unless saveLatestBackup is called between login and the reconnect click. It is — the initial loadData useEffect doesn't call it, but if the user had any prior session where they added data and handleDataUpdate was called, lastSaveTime was stamped with something very close to the Drive file's createdAt. After clearAllUserData wipes it, it's 0, so it should still work.
+The real failure mode: after the first successful restore, restoreBackup at L869 sets lastSaveTime = cloudBackup.createdAt (the old timestamp), then handleDataUpdate immediately calls saveLatestBackup → lastSaveTime = NOW. Then upload stamps createdAt = NOW. These two timestamps are within milliseconds of each other. On the next reconnect: cloudTime - localTime < 60000 → restore prompt skipped. The 60-second window was supposed to prevent spurious prompts but it's exactly wide enough to swallow the legitimate case.
+Fix at L5629 (same line in all 5 places where this comparison occurs: L5419, L5549, L5571, L5599, L5629):
+javascript// REMOVE the +60000 everywhere. Change every occurrence of:
+if (cloudTime > localTime + 60000) {
+
+// TO:
+if (cloudTime > localTime) {
+The 60-second tolerance is unnecessary — localTime is wiped on logout so any cloud backup will always be newer than 0. The only false-positive this prevents is when upload and restore happen in the same second on the same device, which is a non-issue.
