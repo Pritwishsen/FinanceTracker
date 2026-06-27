@@ -3503,7 +3503,7 @@ const AuthUtils = {
     }
 };
 
-function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
+function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip }) {
     const providers = [
         { id: 'gdrive',   icon: 'fab fa-google-drive', label: 'Google Drive', color: '#4285F4', bgColor: '#e8f0fe', sub: 'Save to Google Drive' },
         { id: 'onedrive', icon: 'fab fa-microsoft',    label: 'OneDrive',     color: '#0078D4', bgColor: '#e6f2fb', sub: 'Save to OneDrive' },
@@ -3540,6 +3540,7 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
         }
         localStorage.setItem('financeApp_storagePreference', selected);
         localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
+        localStorage.removeItem('financeApp_storagePickerSkipCount');
         setSaving(false);
         onConfirm(selected, cloudBackup);
     };
@@ -3599,6 +3600,14 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm }) {
                             : <><span className="spinner-border spinner-border-sm me-2"></span>Saving…</>)
                         : 'Confirm'}
                 </button>
+                {onSkip && (
+                    <div className="text-center mt-3">
+                        <button onClick={onSkip} disabled={saving}
+                            style={{background:'none',border:'none',color:'rgba(255,255,255,0.65)',fontSize:'0.85rem',cursor:saving?'default':'pointer',textDecoration:'underline',padding:'0.25rem 0.5rem'}}>
+                            Maybe later — remind me next time
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -5397,7 +5406,14 @@ function App() {
                 }
             }
         } else if (!confirmed) {
-            setShowStoragePicker(true);
+            const skipCount = parseInt(localStorage.getItem('financeApp_storagePickerSkipCount') || '0', 10);
+            if (skipCount > 0) {
+                // Still inside the skip window — decrement counter, let user into app without prompting
+                localStorage.setItem('financeApp_storagePickerSkipCount', String(skipCount - 1));
+                setShowStoragePicker(false);
+            } else {
+                setShowStoragePicker(true);
+            }
         } else {
             setShowStoragePicker(false);
         }
@@ -5478,6 +5494,7 @@ function App() {
         setShowStoragePicker(false);
         setSyncStatus('idle');
         setReconnectBannerDismissed(false);
+        localStorage.removeItem('financeApp_storagePickerSkipCount');
         let showingRestore = false;
         if (cloudBackup) {
             // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
@@ -5561,7 +5578,7 @@ function App() {
     );
     if (!currentUser) return <RegistrationScreen onRegister={handleRegister} onLogin={handleRegister} />;
     if (!currentUser.displayName) return <DisplayNamePrompt onRegister={handleRegister} />;
-    if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} />;
+    if (showStoragePicker) return <StoragePickerModal currentUser={currentUser} initialPreference={storagePreference || 'local'} onConfirm={handleStorageConfirm} onSkip={() => { localStorage.setItem('financeApp_storagePickerSkipCount', '3'); setShowStoragePicker(false); }} />;
     if (cloudSyncGate === 'checking') return (
         <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)'}}>
             <div className="spinner-border text-white mb-3" style={{width:'3rem',height:'3rem'}}></div>
