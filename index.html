@@ -1462,6 +1462,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
     const [duplicateDateError, setDuplicateDateError] = useState('');
     const [filterTags, setFilterTags] = useState([]);
+    const [visibleCount, setVisibleCount] = useState(50);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
 
@@ -1477,6 +1478,10 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         if (filterTags.length > 0) filtered = filtered.filter(e => filterTags.every(ft => (e.tags || []).includes(ft)));
         return filtered;
     }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags]);
+
+    useEffect(() => { setVisibleCount(50); }, [filteredExpenses]);
+
+    const visibleExpenses = filteredExpenses.slice(0, visibleCount);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
@@ -1564,7 +1569,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 {filteredExpenses.length === 0 ? (
                     <div className="empty-state"><i className="fas fa-receipt fa-3x"></i><h4>No expenses found</h4><p>{expenses.length === 0 ? "Start by adding your first expense!" : "Try adjusting your filters or search term."}</p></div>
                 ) : (
-                    filteredExpenses.map(expense => (
+                    visibleExpenses.map(expense => (
                         <div key={expense.id} className="expense-item">
                             <div className="expense-main">
                                 <div className="expense-info">
@@ -1592,6 +1597,13 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                     ))
                 )}
             </div>
+            {visibleCount < filteredExpenses.length && (
+                <div className="text-center py-3">
+                    <button className="btn btn-outline-primary" onClick={() => setVisibleCount(c => c + 50)}>
+                        <i className="fas fa-chevron-down me-2"></i>Load more ({filteredExpenses.length - visibleCount} remaining)
+                    </button>
+                </div>
+            )}
             {duplicatingExpense && (
                 <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
                     <div className="modal-dialog modal-dialog-centered">
