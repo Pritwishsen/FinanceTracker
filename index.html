@@ -1466,8 +1466,16 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [filterTags, setFilterTags] = useState([]);
     const [visibleCount, setVisibleCount] = useState(50);
     const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
+    const [openMenuId, setOpenMenuId] = useState(null);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
+
+    useEffect(() => {
+        if (!openMenuId) return;
+        const close = () => setOpenMenuId(null);
+        document.addEventListener('click', close);
+        return () => document.removeEventListener('click', close);
+    }, [openMenuId]);
 
     const filteredExpenses = useMemo(() => {
         let filtered = expenses;
@@ -1500,6 +1508,12 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         DataService.addExpense(newRecord); onUpdate(); setDuplicatingExpense(null);
     };
     const getCategoryName = (categoryId) => { const category = categories.find(cat => cat.id === categoryId); return category ? category.name : 'Unknown Category'; };
+    const getCategoryColor = (name) => {
+        const palette = ['#4a6cf7','#e67e22','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e91e63','#00bcd4','#ff5722','#607d8b'];
+        let h = 0;
+        for (let i = 0; i < (name||'').length; i++) h = (h * 31 + (name||'').charCodeAt(i)) & 0xffff;
+        return palette[h % palette.length];
+    };
     const selectedCategory = categories.find(cat => cat.id === parseInt(filterCategory));
     const expensesByCurrency = filteredExpenses.reduce((acc, expense) => { const currency = expense.currency || 'USD'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += expense.amount; acc[currency].count += 1; return acc; }, {});
 
@@ -1577,32 +1591,46 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 {filteredExpenses.length === 0 ? (
                     <div className="empty-state"><i className="fas fa-receipt fa-3x"></i><h4>No expenses found</h4><p>{expenses.length === 0 ? "Start by adding your first expense!" : "Try adjusting your filters or search term."}</p></div>
                 ) : (
-                    visibleExpenses.map(expense => (
+                    visibleExpenses.map(expense => {
+                        const catName = getCategoryName(expense.categoryId);
+                        const metaParts = [catName, expense.subcategory, ValidationUtils.formatDate(expense.date)];
+                        if (expense.paidBy) metaParts.push(expense.paidBy);
+                        return (
                         <div key={expense.id} className="expense-item">
-                            <div className="expense-main">
-                                <div className="expense-info">
-                                    <div className="expense-description">
-                                        {expense.isSplitRecord && <span className="badge bg-info me-1" style={{fontSize:'0.7em'}}><i className="fas fa-users me-1"></i>Split</span>}
-                                        {expense.description}
-                                    </div>
-                                    <div className="expense-category"><i className="fas fa-tag"></i>{getCategoryName(expense.categoryId)} - {expense.subcategory}</div>
-                                    {expense.paidBy && (<div className="expense-paid-by"><i className="fas fa-user"></i>Paid by: {expense.paidBy}</div>)}
-                                    <div className="expense-date"><i className="fas fa-calendar"></i>{ValidationUtils.formatDate(expense.date)}</div>
-                                    {expense.tags && expense.tags.length > 0 && (
-                                        <div className="expense-tags" style={{marginTop:'3px'}}>
-                                            {expense.tags.map(tag => <span key={tag} className="badge bg-secondary me-1" style={{fontSize:'0.7rem'}}>{tag}</span>)}
+                            <div className="expense-avatar" style={{background: getCategoryColor(catName)}}>
+                                {catName.charAt(0).toUpperCase()}
+                            </div>
+                            <div className="expense-info">
+                                <div className="expense-description">
+                                    {expense.isSplitRecord && <span className="badge bg-info me-1" style={{fontSize:'0.65em'}}><i className="fas fa-users me-1"></i>Split</span>}
+                                    {expense.description}
+                                </div>
+                                <div className="expense-meta">
+                                    {metaParts.join(' · ')}
+                                    {expense.tags && expense.tags.map(tag => (
+                                        <span key={tag} className="expense-tag-pill">{tag}</span>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="expense-right">
+                                <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}</div>
+                                <div className="expense-menu-wrap">
+                                    <button className="expense-menu-btn" title="Actions"
+                                        onClick={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === expense.id ? null : expense.id); }}>
+                                        <i className="fas fa-ellipsis-v"></i>
+                                    </button>
+                                    {openMenuId === expense.id && (
+                                        <div className="expense-menu-dropdown">
+                                            <button onClick={() => { setEditingExpense(expense); setOpenMenuId(null); }}><i className="fas fa-edit"></i>Edit</button>
+                                            <button onClick={() => { handleDuplicateExpense(expense); setOpenMenuId(null); }}><i className="fas fa-copy"></i>Duplicate</button>
+                                            <button className="danger" onClick={() => { setShowDeleteConfirm(expense.id); setOpenMenuId(null); }}><i className="fas fa-trash"></i>Delete</button>
                                         </div>
                                     )}
                                 </div>
-                                <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}</div>
-                            </div>
-                            <div className="expense-actions">
-                                <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingExpense(expense)} title="Edit"><i className="fas fa-edit"></i></button>
-                                <button className="btn btn-sm btn-outline-success" onClick={() => handleDuplicateExpense(expense)} title="Duplicate"><i className="fas fa-copy"></i></button>
-                                <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(expense.id)} title="Delete"><i className="fas fa-trash"></i></button>
                             </div>
                         </div>
-                    ))
+                        );
+                    })
                 )}
             </div>
             {visibleCount < filteredExpenses.length && (
