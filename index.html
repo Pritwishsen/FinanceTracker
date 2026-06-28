@@ -727,6 +727,8 @@ class DataService {
         if (index !== -1) { const deleted = this.data.expenses.splice(index, 1)[0]; this.saveExpenses(); return deleted; }
         return null;
     }
+    static clearAllExpenses() { this.data.expenses = []; this.saveExpenses(); }
+    static clearAllIncome() { this.data.income = []; this.saveIncome(); }
     static async getExpensesByCategory(categoryId, subcategory = null) {
         await this.initialize();
         return this.data.expenses.filter(expense => {
@@ -1463,6 +1465,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [duplicateDateError, setDuplicateDateError] = useState('');
     const [filterTags, setFilterTags] = useState([]);
     const [visibleCount, setVisibleCount] = useState(50);
+    const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
 
@@ -1508,6 +1511,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         <div className="screen">
             <div className="screen-header">
                 <h2>Expense History</h2>
+                {expenses.length > 0 && (
+                    <button className="btn btn-sm btn-outline-danger" onClick={() => setShowClearAllConfirm(true)} title="Delete all expenses">
+                        <i className="fas fa-trash-alt me-1"></i>Clear All
+                    </button>
+                )}
                 <div className="expense-totals">
                     {Object.keys(expensesByCurrency).length === 1 ? (
                         <div className="expense-total">Total: {ValidationUtils.formatCurrency(Object.values(expensesByCurrency)[0].total, Object.keys(expensesByCurrency)[0])}</div>
@@ -1646,6 +1654,27 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
                                 <button type="button" className="btn btn-danger" onClick={() => handleDeleteExpense(showDeleteConfirm)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showClearAllConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header border-danger">
+                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Expenses?</h5>
+                            </div>
+                            <div className="modal-body">
+                                <p>You are about to permanently delete <strong>all {expenses.length} expense{expenses.length !== 1 ? 's' : ''}</strong>.</p>
+                                <p className="text-danger mb-0"><strong>This cannot be undone.</strong></p>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearAllConfirm(false)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearAllExpenses(); setShowClearAllConfirm(false); onUpdate(); }}>
+                                    <i className="fas fa-trash-alt me-1"></i>Delete All
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -1837,6 +1866,7 @@ function IncomeForm({ income, onUpdate }) {
     const [showSuccess, setShowSuccess] = useState(false);
     const [editingIncome, setEditingIncome] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+    const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
@@ -1943,7 +1973,14 @@ function IncomeForm({ income, onUpdate }) {
                 </form>
             </div>
             <div className="income-history">
-                <h5>Income History</h5>
+                <div className="d-flex align-items-center justify-content-between mb-2">
+                    <h5 className="mb-0">Income History</h5>
+                    {income.length > 0 && (
+                        <button className="btn btn-sm btn-outline-danger" onClick={() => setShowClearAllConfirm(true)} title="Delete all income">
+                            <i className="fas fa-trash-alt me-1"></i>Clear All
+                        </button>
+                    )}
+                </div>
                 {income.length === 0 ? (
                     <div className="empty-state"><i className="fas fa-piggy-bank fa-3x"></i><h4>No income recorded</h4><p>Start by adding your first income entry!</p></div>
                 ) : (
@@ -1978,6 +2015,27 @@ function IncomeForm({ income, onUpdate }) {
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
                                 <button type="button" className="btn btn-danger" onClick={() => handleDelete(showDeleteConfirm)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showClearAllConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header border-danger">
+                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Income?</h5>
+                            </div>
+                            <div className="modal-body">
+                                <p>You are about to permanently delete <strong>all {income.length} income record{income.length !== 1 ? 's' : ''}</strong>.</p>
+                                <p className="text-danger mb-0"><strong>This cannot be undone.</strong></p>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearAllConfirm(false)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearAllIncome(); setShowClearAllConfirm(false); onUpdate(); }}>
+                                    <i className="fas fa-trash-alt me-1"></i>Delete All
+                                </button>
                             </div>
                         </div>
                     </div>
