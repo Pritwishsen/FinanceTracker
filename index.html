@@ -3715,9 +3715,14 @@ const AuthUtils = {
             'auth/account-exists-with-different-credential': { field: null, message: 'An account already exists with this email. Enter your password to link the accounts.' },
             'auth/popup-closed-by-user': null,
             'auth/cancelled-popup-request': null,
-            'auth/popup-blocked': { field: null, message: 'Sign-in popup was blocked. Please allow popups for this site and try again.' }
+            'auth/popup-blocked': { field: null, message: 'Sign-in popup was blocked. Please allow popups for this site and try again.' },
+            'auth/unauthorized-domain': { field: null, message: 'This domain is not authorised for sign-in. Please add it to Firebase Console → Authentication → Settings → Authorised domains.' },
+            'auth/operation-not-allowed': { field: null, message: 'This sign-in method is not enabled. Please enable it in Firebase Console → Authentication → Sign-in method.' },
+            'auth/network-request-failed': { field: null, message: 'Network error. Please check your connection and try again.' },
+            'auth/internal-error': { field: null, message: 'An internal error occurred. Please try again.' },
+            'auth/user-disabled': { field: null, message: 'This account has been disabled. Please contact support.' }
         };
-        return map.hasOwnProperty(code) ? map[code] : { field: null, message: 'An error occurred. Please try again.' };
+        return map.hasOwnProperty(code) ? map[code] : { field: null, message: `Sign-in failed (${code || 'unknown error'}). Please try again.` };
     }
 };
 
@@ -3934,6 +3939,7 @@ function RegistrationScreen({ onRegister, onLogin }) {
             else if (user.displayName) { try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {} }
             (onLogin || onRegister)(user);
         } catch (err) {
+            console.error('[Social sign-in error]', err.code, err.message, err);
             if (err.code === 'auth/account-exists-with-different-credential') {
                 setLinkModal({ email: err.email, credential: err.credential, providerName: provider === 'google' ? 'Google' : 'Facebook' });
             } else if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
