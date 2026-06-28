@@ -2845,17 +2845,18 @@ function BulkUpload({ categories, onUpdate }) {
 
     const parseDate = (val) => {
         if (!val) return null;
-        let d;
+        let year, month, day;
         if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
-            d = new Date(val + 'T00:00:00');
+            [year, month, day] = val.split('-').map(Number);
         } else if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(val)) {
             const parts = val.split(/[\/\-]/);
-            d = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
+            day = Number(parts[0]); month = Number(parts[1]); year = Number(parts[2]);
         } else {
             return null;
         }
-        if (isNaN(d.getTime())) return null;
-        return d.toISOString().split('T')[0];
+        if (!year || !month || !day || month < 1 || month > 12 || day < 1 || day > 31) return null;
+        const pad = n => String(n).padStart(2, '0');
+        return `${year}-${pad(month)}-${pad(day)}`;
     };
 
     const handleFileSelect = (e) => {
