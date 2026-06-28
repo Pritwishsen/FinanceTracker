@@ -3667,6 +3667,41 @@ const AuthUtils = {
     async sendPasswordReset(email) {
         await window.__firebaseAuth.sendPasswordResetEmail(email);
     },
+    async _loadUserPref(user) {
+        const doc = await window.__firebaseDb.collection('users').doc(user.uid).get();
+        if (doc.exists) {
+            const pref = doc.data().storagePreference || 'local';
+            localStorage.setItem('financeApp_storagePreference', pref);
+            if (pref) localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
+        } else {
+            await window.__firebaseDb.collection('users').doc(user.uid).set({
+                displayName: user.displayName || user.email,
+                storagePreference: 'local',
+                createdAt: new Date().toISOString()
+            });
+            localStorage.setItem('financeApp_storagePreference', 'local');
+        }
+    },
+    async signInWithGoogle() {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.addScope('email');
+        const cred = await window.__firebaseAuth.signInWithPopup(provider);
+        await this._loadUserPref(cred.user);
+        return cred.user;
+    },
+    async signInWithFacebook() {
+        const provider = new firebase.auth.FacebookAuthProvider();
+        provider.addScope('email');
+        const cred = await window.__firebaseAuth.signInWithPopup(provider);
+        await this._loadUserPref(cred.user);
+        return cred.user;
+    },
+    async linkSocialCredential(email, password, pendingCredential) {
+        const cred = await window.__firebaseAuth.signInWithEmailAndPassword(email, password);
+        await cred.user.linkWithCredential(pendingCredential);
+        await this._loadUserPref(cred.user);
+        return cred.user;
+    },
     mapFirebaseError(code) {
         const map = {
             'auth/email-already-in-use': { field: 'email', message: 'An account with this email already exists. Please sign in instead.' },
@@ -3676,7 +3711,11 @@ const AuthUtils = {
             'auth/wrong-password': { field: null, message: 'Incorrect email or password.' },
             'auth/invalid-credential': { field: null, message: 'Incorrect email or password.' },
             'auth/too-many-requests': { field: null, message: 'Too many failed attempts. Please try again later.' },
-            'auth/requires-recent-login': { field: null, message: 'Please sign out and sign in again before changing your password.' }
+            'auth/requires-recent-login': { field: null, message: 'Please sign out and sign in again before changing your password.' },
+            'auth/account-exists-with-different-credential': { field: null, message: 'An account already exists with this email. Enter your password to link the accounts.' },
+            'auth/popup-closed-by-user': null,
+            'auth/cancelled-popup-request': null,
+            'auth/popup-blocked': { field: null, message: 'Sign-in popup was blocked. Please allow popups for this site and try again.' }
         };
         return map.hasOwnProperty(code) ? map[code] : { field: null, message: 'An error occurred. Please try again.' };
     }
@@ -3799,7 +3838,13 @@ function RegistrationScreen({ onRegister, onLogin }) {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
-    const [oauthToast, setOauthToast] = useState('');
+    const [socialLoading, setSocialLoading] = useState(null);
+    const [socialError, setSocialError] = useState('');
+    const [linkModal, setLinkModal] = useState(null);
+    const [linkPw, setLinkPw] = useState('');
+    const [linkShowPw, setLinkShowPw] = useState(false);
+    const [linkError, setLinkError] = useState('');
+    const [linkLoading, setLinkLoading] = useState(false);
     const [signEmail, setSignEmail] = useState('');
     const [signPw, setSignPw] = useState('');
     const [signShowPw, setSignShowPw] = useState(false);
@@ -3872,7 +3917,53 @@ function RegistrationScreen({ onRegister, onLogin }) {
         }
     };
 
-    const showOauthToast = () => { setOauthToast('OAuth coming soon — use email registration'); setTimeout(() => setOauthToast(''), 3000); };
+    const handleSocialSignIn = async (provider) => {
+        if (!AuthUtils.firebaseReady) { setSocialError('Sign-in not available. Please use email and password.'); return; }
+        setSocialLoading(provider);
+        setSocialError('');
+        try {
+            const fbUser = provider === 'google' ? await AuthUtils.signInWithGoogle() : await AuthUtils.signInWithFacebook();
+            localStorage.removeItem('financeApp_failCount');
+            localStorage.removeItem('financeApp_failLockUntil');
+            const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+            const user = { id: fbUser.uid, uid: fbUser.uid, displayName: fbUser.displayName || (storedUser && storedUser.displayName) || fbUser.email, email: fbUser.email, authProvider: 'firebase', createdAt: (storedUser && storedUser.createdAt) || new Date().toISOString() };
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+            const people = DataService.getPeople();
+            const match = people.find(p => p.name === user.displayName && p.systemManaged);
+            if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
+            else if (user.displayName) { try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {} }
+            (onLogin || onRegister)(user);
+        } catch (err) {
+            if (err.code === 'auth/account-exists-with-different-credential') {
+                setLinkModal({ email: err.email, credential: err.credential, providerName: provider === 'google' ? 'Google' : 'Facebook' });
+            } else if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
+                const mapped = AuthUtils.mapFirebaseError(err.code);
+                setSocialError(mapped ? mapped.message : 'Sign-in failed. Please try again.');
+            }
+        } finally {
+            setSocialLoading(null);
+        }
+    };
+
+    const handleLinkAccounts = async () => {
+        if (!linkModal) return;
+        setLinkLoading(true);
+        setLinkError('');
+        try {
+            const fbUser = await AuthUtils.linkSocialCredential(linkModal.email, linkPw, linkModal.credential);
+            const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+            const user = { id: fbUser.uid, uid: fbUser.uid, displayName: fbUser.displayName || (storedUser && storedUser.displayName) || fbUser.email, email: fbUser.email, authProvider: 'firebase', createdAt: (storedUser && storedUser.createdAt) || new Date().toISOString() };
+            localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
+            setLinkModal(null);
+            setLinkPw('');
+            (onLogin || onRegister)(user);
+        } catch (err) {
+            const mapped = AuthUtils.mapFirebaseError(err.code);
+            setLinkError(mapped ? mapped.message : 'Incorrect password. Please try again.');
+        } finally {
+            setLinkLoading(false);
+        }
+    };
 
     const handleSignIn = async (ev) => {
         ev.preventDefault();
@@ -4036,9 +4127,14 @@ function RegistrationScreen({ onRegister, onLogin }) {
                                     {isSubmitting ? <><span className="spinner-border spinner-border-sm me-2"></span>Creating...</> : 'Create Account'}
                                 </button>
                                 <div className="d-flex align-items-center my-3"><hr className="flex-grow-1 m-0" /><span className="px-2 text-muted small">or</span><hr className="flex-grow-1 m-0" /></div>
+                                {socialError && <div className="alert alert-danger py-2 small mb-2">{socialError}</div>}
                                 <div className="d-grid gap-2">
-                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
-                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={() => handleSocialSignIn('google')} disabled={!!socialLoading} style={btnRounded}>
+                                        {socialLoading === 'google' ? <><span className="spinner-border spinner-border-sm me-2"></span>Connecting...</> : <><i className="fab fa-google me-2" style={{color:'#4285F4'}}></i>Continue with Google</>}
+                                    </button>
+                                    <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={() => handleSocialSignIn('facebook')} disabled={!!socialLoading} style={btnRounded}>
+                                        {socialLoading === 'facebook' ? <><span className="spinner-border spinner-border-sm me-2"></span>Connecting...</> : <><i className="fab fa-facebook me-2" style={{color:'#1877F2'}}></i>Continue with Facebook</>}
+                                    </button>
                                 </div>
                                 <p className="text-center small text-muted mt-3 mb-0">Already have an account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('signin')}>Sign in</button></p>
                             </form>
@@ -4068,9 +4164,14 @@ function RegistrationScreen({ onRegister, onLogin }) {
                                         </div>
                                         <button type="submit" className="btn btn-primary w-100 fw-semibold py-2 mb-3" disabled={lockedOut} style={{...gradientBtn, ...btnRounded}}>Sign In</button>
                                         <div className="d-flex align-items-center my-3"><hr className="flex-grow-1 m-0" /><span className="px-2 text-muted small">or</span><hr className="flex-grow-1 m-0" /></div>
+                                        {socialError && <div className="alert alert-danger py-2 small mb-2">{socialError}</div>}
                                         <div className="d-grid gap-2">
-                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-google me-2" style={{color: '#4285F4'}}></i>Continue with Google</button>
-                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={showOauthToast} style={btnRounded}><i className="fab fa-facebook me-2" style={{color: '#1877F2'}}></i>Continue with Facebook</button>
+                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={() => handleSocialSignIn('google')} disabled={!!socialLoading} style={btnRounded}>
+                                                {socialLoading === 'google' ? <><span className="spinner-border spinner-border-sm me-2"></span>Connecting...</> : <><i className="fab fa-google me-2" style={{color:'#4285F4'}}></i>Continue with Google</>}
+                                            </button>
+                                            <button type="button" className="btn btn-outline-secondary fw-semibold" onClick={() => handleSocialSignIn('facebook')} disabled={!!socialLoading} style={btnRounded}>
+                                                {socialLoading === 'facebook' ? <><span className="spinner-border spinner-border-sm me-2"></span>Connecting...</> : <><i className="fab fa-facebook me-2" style={{color:'#1877F2'}}></i>Continue with Facebook</>}
+                                            </button>
                                         </div>
                                         <p className="text-center small text-muted mt-3 mb-0">No account? <button type="button" className="btn btn-link btn-sm p-0" onClick={() => setActiveTab('register')}>Create one</button></p>
                                     </form>
@@ -4094,9 +4195,35 @@ function RegistrationScreen({ onRegister, onLogin }) {
                     </div>
                 </div>
             </div>
-            {oauthToast && (
-                <div style={{position: 'fixed', bottom: '2rem', left: '50%', transform: 'translateX(-50%)', background: '#333', color: '#fff', padding: '0.75rem 1.5rem', borderRadius: '8px', zIndex: 9999, fontSize: '0.9rem', whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(0,0,0,0.3)'}}>
-                    <i className="fas fa-info-circle me-2"></i>{oauthToast}
+            {linkModal && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9999}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content" style={{borderRadius: '16px', border: 'none'}}>
+                            <div className="modal-header border-0 pb-1">
+                                <h5 className="modal-title fw-semibold"><i className="fas fa-link me-2 text-primary"></i>Link Your Accounts</h5>
+                                <button type="button" className="btn-close" onClick={() => { setLinkModal(null); setLinkPw(''); setLinkError(''); }} disabled={linkLoading}></button>
+                            </div>
+                            <div className="modal-body pt-1">
+                                <p className="text-muted small mb-3">
+                                    An account already exists for <strong>{linkModal.email}</strong>. Enter your current password to link your <strong>{linkModal.providerName}</strong> account — all your data will be preserved.
+                                </p>
+                                {linkError && <div className="alert alert-danger py-2 small mb-3">{linkError}</div>}
+                                <div className="mb-1">
+                                    <label className="form-label fw-semibold small">Current Password</label>
+                                    <div className="input-group">
+                                        <input type={linkShowPw ? 'text' : 'password'} className="form-control" placeholder="Your existing password" value={linkPw} onChange={e => { setLinkPw(e.target.value); setLinkError(''); }} autoComplete="current-password" onKeyDown={e => { if (e.key === 'Enter' && linkPw) handleLinkAccounts(); }} />
+                                        <button type="button" className="btn btn-outline-secondary" onClick={() => setLinkShowPw(v => !v)} tabIndex={-1}><i className={'fas fa-' + (linkShowPw ? 'eye-slash' : 'eye')}></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="modal-footer border-0 pt-0">
+                                <button className="btn btn-secondary btn-sm" onClick={() => { setLinkModal(null); setLinkPw(''); setLinkError(''); }} disabled={linkLoading}>Cancel</button>
+                                <button className="btn btn-primary fw-semibold btn-sm" onClick={handleLinkAccounts} disabled={linkLoading || !linkPw} style={{background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none', borderRadius: '8px'}}>
+                                    {linkLoading ? <><span className="spinner-border spinner-border-sm me-2"></span>Linking...</> : <><i className="fas fa-link me-2"></i>Link &amp; Sign In</>}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
