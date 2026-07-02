@@ -435,14 +435,33 @@ const SyncService = {
 };
 
 // ── Cloud Restore Modal ────────────────────────────────────────────────────
-function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
+function CloudRestoreModal({ backupData, currentUser, onRestore, onKeepLocal }) {
     const [restoring, setRestoring] = React.useState(false);
+    const [restoreError, setRestoreError] = React.useState('');
+    // TOFU: unsigned backup requires explicit user acknowledgement before restoring
+    const isUnsigned = !backupData.backupSignature;
+    const [tofuConfirmed, setTofuConfirmed] = React.useState(!isUnsigned);
     const exp = (backupData.data && backupData.data.expenses && backupData.data.expenses.length) || 0;
     const inc = (backupData.data && backupData.data.income && backupData.data.income.length) || 0;
     const dateStr = backupData.createdAt ? new Date(backupData.createdAt).toLocaleString() : 'Unknown date';
-    const handleRestore = () => {
+    const handleRestore = async () => {
+        if (!tofuConfirmed) return;
         setRestoring(true);
-        try { DataService.restoreBackup(backupData); } catch (e) { console.error(e); }
+        setRestoreError('');
+        try {
+            // Re-validate ownership and signature before restoring (prevents TOCTOU bypass)
+            if (!isBackupOwnedByCurrentUser(backupData, currentUser)) {
+                setRestoreError('This backup does not belong to your account.');
+                setRestoring(false); return;
+            }
+            const sigResult = await verifyBackupSignature(backupData, currentUser);
+            // For TOFU flow: if the user confirmed, allow requiresConfirmation; block tampered
+            if (!isSignatureAcceptable(sigResult) || sigResult.tampered) {
+                setRestoreError('Backup integrity check failed — restore blocked.');
+                setRestoring(false); return;
+            }
+            DataService.restoreBackup(backupData);
+        } catch (e) { console.error(e); }
         onRestore();
     };
     return (
@@ -457,8 +476,19 @@ function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
                     <div style={{fontSize:'0.82rem',color:'#166534',fontWeight:'600',marginBottom:'2px'}}><i className="fas fa-calendar-alt me-2"></i>{dateStr}</div>
                     <div style={{fontSize:'0.8rem',color:'#15803d'}}>{exp} expense{exp!==1?'s':''} · {inc} income record{inc!==1?'s':''}</div>
                 </div>
+                {isUnsigned && (
+                    <div className="alert alert-warning py-2 mb-2" style={{fontSize:'0.82rem'}}>
+                        <i className="fas fa-exclamation-triangle me-2"></i>
+                        <strong>No integrity signature.</strong> This backup was created before cryptographic signing was enabled (or the signature was removed). Verify you trust its source before restoring.
+                        <div className="form-check mt-2 mb-0">
+                            <input className="form-check-input" type="checkbox" id="tofuCheckbox" checked={tofuConfirmed} onChange={e => setTofuConfirmed(e.target.checked)} />
+                            <label className="form-check-label" htmlFor="tofuCheckbox" style={{fontSize:'0.78rem'}}>I understand and want to restore this unsigned backup</label>
+                        </div>
+                    </div>
+                )}
+                {restoreError && <div className="alert alert-danger py-2 mb-2" style={{fontSize:'0.82rem'}}><i className="fas fa-shield-alt me-2"></i>{restoreError}</div>}
                 <div className="d-grid gap-2">
-                    <button className="btn btn-primary" onClick={handleRestore} disabled={restoring}>
+                    <button className="btn btn-primary" onClick={handleRestore} disabled={restoring || !tofuConfirmed}>
                         {restoring ? <><span className="spinner-border spinner-border-sm me-2"></span>Restoring…</> : <><i className="fas fa-cloud-download-alt me-2"></i>Use Cloud Backup</>}
                     </button>
                     <button className="btn btn-outline-secondary" onClick={onKeepLocal} disabled={restoring}><i className="fas fa-mobile-alt me-2"></i>Keep This Device's Data</button>
@@ -470,7 +500,7 @@ function CloudRestoreModal({ backupData, onRestore, onKeepLocal }) {
 }
 
 // ── Cloud History Modal ────────────────────────────────────────────────────
-function CloudHistoryModal({ onClose, onRestored }) {
+function CloudHistoryModal({ onClose, onRestored, currentUser }) {
     const [loading, setLoading] = React.useState(true);
     const [snapshots, setSnapshots] = React.useState([]);
     const [error, setError] = React.useState('');
@@ -495,6 +525,16 @@ function CloudHistoryModal({ onClose, onRestored }) {
         try {
             const data = await SyncService.downloadVersion(snap.id);
             if (!data) throw new Error('Empty response');
+            // Fail-closed: reject snapshots that don't belong to the current user
+            if (!isBackupOwnedByCurrentUser(data, currentUser)) {
+                throw new Error('This snapshot belongs to a different account and cannot be restored.');
+            }
+            // Reject if signature is missing, requires confirmation, or is invalid.
+            // CloudHistoryModal has no TOFU confirmation UI, so requiresConfirmation is also blocked.
+            const sigResult = await verifyBackupSignature(data, currentUser);
+            if (!isSignatureAcceptable(sigResult) || sigResult.requiresConfirmation) {
+                throw new Error('This snapshot failed integrity verification. Use the main restore flow to restore unsigned backups.');
+            }
             DataService.restoreBackup(data);
             onRestored();
         } catch (e) {
@@ -1020,7 +1060,7 @@ class DataService {
         const data = {};
         keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
         const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
-        return { version: '1.0', createdAt: new Date().toISOString(), userId: storedUser ? storedUser.uid : null, data };
+        return { version: '1.0', createdAt: new Date().toISOString(), userId: storedUser ? (storedUser.uid || String(storedUser.id) || null) : null, data };
     }
     static downloadBackup() {
         const backup = this.createBackup();
@@ -1125,6 +1165,95 @@ class DataService {
     }
 }
 window.DataService = DataService;
+
+// Fail-closed backup ownership check.
+// Returns true only when the backup is confirmed to belong to the current user.
+// If the user is signed in but the backup carries no userId, it is treated as
+// untrusted and rejected (an attacker can strip/null the field).
+function isBackupOwnedByCurrentUser(backup, currentUser) {
+    const currentUid = currentUser ? (currentUser.uid || String(currentUser.id)) : null;
+    if (!currentUid) return true; // No signed-in user — allow restore
+    if (!backup || !backup.userId) return false; // Signed in but backup has no owner stamp — reject
+    return backup.userId === currentUid;
+}
+
+// ── Backup tamper-evidence (HMAC-SHA256) ──────────────────────────────────────
+// The signing key is stored per-user under a non-financeApp_ prefix so it
+// survives DataService.clearAllUserData() (which only wipes financeApp_* keys).
+// The key is NEVER embedded in the cloud backup, so an attacker with cloud write
+// access cannot forge a valid signature without access to the victim's device.
+function getOrCreateBackupSignKey(userId) {
+    if (!userId) return null;
+    const storageKey = 'ftBsk_' + userId;
+    let key = localStorage.getItem(storageKey);
+    if (!key) {
+        try {
+            const bytes = crypto.getRandomValues(new Uint8Array(32));
+            key = btoa(String.fromCharCode(...bytes));
+            localStorage.setItem(storageKey, key);
+        } catch (_) { return null; }
+    }
+    return key;
+}
+
+async function signBackupForUpload(backup, currentUser) {
+    try {
+        const userId = currentUser ? (currentUser.uid || String(currentUser.id)) : null;
+        const signKey = getOrCreateBackupSignKey(userId);
+        if (!signKey || !backup.data) return backup;
+        const keyBytes = Uint8Array.from(atob(signKey), c => c.charCodeAt(0));
+        const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        const dataBytes = new TextEncoder().encode(JSON.stringify(backup.data));
+        const sig = await crypto.subtle.sign('HMAC', cryptoKey, dataBytes);
+        return { ...backup, backupSignature: btoa(String.fromCharCode(...new Uint8Array(sig))) };
+    } catch (_) { return backup; }
+}
+
+// Returns:
+//   { ok: true }                      — HMAC signature verified ✓ → restore allowed
+//   { ok: false, unverifiable: true } — no local signing key exists (device has never signed
+//                                       a backup, or first-login on a new device) → allow silently
+//   { ok: false, requiresConfirmation } — local key exists but backup carries no signature;
+//                                       could be a legacy pre-signing backup or a stripped sig.
+//                                       Migration policy: require explicit user confirmation
+//                                       (TOFU — trust-on-first-use) before restoring, then sign
+//                                       the next upload to enforce signatures going forward.
+//   { ok: false, tampered: true }     — signature present but HMAC mismatch → ALWAYS reject.
+async function verifyBackupSignature(backup, currentUser) {
+    try {
+        const userId = currentUser ? (currentUser.uid || String(currentUser.id)) : null;
+        const signKey = userId ? localStorage.getItem('ftBsk_' + userId) : null;
+
+        // No local key at all — this device has never signed a backup.
+        // Treat as unverifiable and allow silently (first-use / cross-device fresh install).
+        if (!signKey) return { ok: false, unverifiable: true };
+
+        // Key exists but backup has no signature → TOFU migration policy.
+        // Restore paths that have a modal must ask for explicit user confirmation.
+        // Headless restore paths (no modal) must refuse.
+        if (!backup || !backup.backupSignature) {
+            return { ok: false, requiresConfirmation: true };
+        }
+
+        const keyBytes = Uint8Array.from(atob(signKey), c => c.charCodeAt(0));
+        const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+        const dataBytes = new TextEncoder().encode(JSON.stringify(backup.data));
+        const sigBytes = Uint8Array.from(atob(backup.backupSignature), c => c.charCodeAt(0));
+        const valid = await crypto.subtle.verify('HMAC', cryptoKey, sigBytes, dataBytes);
+        // Signature present and valid → full trust
+        if (valid) return { ok: true };
+        // Signature present but invalid → always reject regardless of user type
+        return { ok: false, tampered: true };
+    } catch (_) { return { ok: false, unverifiable: true }; }
+}
+
+// Returns true when a backup's integrity state allows restore to proceed.
+// ok and unverifiable → allow; requiresConfirmation → allow only via modal TOFU path;
+// tampered → always block.
+// Headless restore paths (no confirmation UI) must check !sigResult.requiresConfirmation separately.
+function isSignatureAcceptable(sigResult) {
+    return sigResult.ok || sigResult.unverifiable || sigResult.requiresConfirmation;
+}
 
 function computeNextDue(fromDate, frequency) {
     const d = new Date(fromDate);
@@ -3998,10 +4127,13 @@ function RegistrationScreen({ onRegister, onLogin }) {
                     setErrors({ email: 'An account with this email already exists. Please sign in instead.' });
                     setIsSubmitting(false); return;
                 }
+                // A different account's data is in storage — wipe it before creating the new account
+                if (existing) { DataService.clearAllUserData(); }
                 const passwordHash = await AuthUtils.hashPassword(formData.password);
                 const user = { id: Date.now(), displayName: formData.displayName.trim(), email: formData.email.trim().toLowerCase(), passwordHash, authProvider: 'email', createdAt: new Date().toISOString() };
                 localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
                 localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+                localStorage.setItem('financeApp_session_uid', String(user.id));
                 localStorage.removeItem('financeApp_failCount');
                 localStorage.removeItem('financeApp_failLockUntil');
                 await DataService.updateSettings({ displayName: user.displayName });
@@ -4158,8 +4290,10 @@ function RegistrationScreen({ onRegister, onLogin }) {
             localStorage.removeItem('financeApp_failLockUntil');
             if (signRemember) {
                 localStorage.setItem('financeApp_session_expiry', String(Date.now() + 30 * 24 * 60 * 60 * 1000));
+                localStorage.setItem('financeApp_session_uid', String(stored.id));
             } else {
                 sessionStorage.setItem('financeApp_session_active', 'true');
+                sessionStorage.setItem('financeApp_session_uid', String(stored.id));
             }
             const people = DataService.getPeople();
             const match = people.find(p => p.name === stored.displayName && p.systemManaged);
@@ -5728,7 +5862,18 @@ function App() {
             const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
             const sessionActive = sessionStorage.getItem('financeApp_session_active') === 'true';
             if (expiry > Date.now() || sessionActive) {
-                return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null');
+                const storedUser = JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null');
+                if (!storedUser) return null;
+                // Session UID binding: prevents accidental data inheritance across different
+                // local accounts (e.g. same device, different users). Note: this is not a
+                // cryptographic anti-spoofing control — all values live in browser-writable
+                // storage and a same-origin attacker with devtools access can bypass it.
+                // Robust identity guarantees require a server-side auth layer (e.g. Firebase).
+                const sessionUid = expiry > Date.now()
+                    ? localStorage.getItem('financeApp_session_uid')
+                    : sessionStorage.getItem('financeApp_session_uid');
+                if (sessionUid !== String(storedUser.id)) return null;
+                return storedUser;
             }
             return null;
         } catch (_) { return null; }
@@ -5808,7 +5953,9 @@ function App() {
                 const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
                 if (svc.isConfigured() && svc.isTokenValid()) {
                     setSyncStatus('syncing');
-                    SyncService.upload(DataService.createBackup()).then(result => {
+                    signBackupForUpload(DataService.createBackup(), currentUser).then(signed =>
+                        SyncService.upload(signed)
+                    ).then(result => {
                         if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
                         else { setSyncStatus('idle'); }
                     }).catch(() => { setSyncStatus('idle'); });
@@ -5821,9 +5968,8 @@ function App() {
                     setCloudSyncGate('checking');
                     SyncService.download().then(cloudBackup => {
                         if (!cloudBackup) { setCloudSyncGate('idle'); return; }
-                        // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
-                        const currentUid = currentUser ? currentUser.uid : null;
-                        if (cloudBackup.userId && currentUid && cloudBackup.userId !== currentUid) { setCloudSyncGate('idle'); return; }
+                        // Fail-closed: reject backups that don't belong to the current user
+                        if (!isBackupOwnedByCurrentUser(cloudBackup, currentUser)) { setCloudSyncGate('idle'); return; }
                         const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                         const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                         if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
@@ -5905,7 +6051,8 @@ function App() {
                 if (hasSavedLocally) {
                     setSyncStatus('syncing');
                     try {
-                        const result = await SyncService.upload(DataService.createBackup());
+                        const signedBackup = await signBackupForUpload(DataService.createBackup(), currentUser);
+                        const result = await SyncService.upload(signedBackup);
                         if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
                         else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
                         else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
@@ -5920,6 +6067,9 @@ function App() {
         const pref = localStorage.getItem('financeApp_storagePreference') || '';
         if (pref === 'gdrive') GDriveService.clearToken();
         else if (pref === 'onedrive') OneDriveService.clearToken();
+        // Clear session integrity token from sessionStorage (localStorage token wiped by clearAllUserData)
+        sessionStorage.removeItem('financeApp_session_uid');
+        sessionStorage.removeItem('financeApp_session_active');
         // Wipe all financial data so the next user on this device starts with a clean slate
         DataService.clearAllUserData();
         setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false);
@@ -5937,8 +6087,10 @@ function App() {
                 const oldSvc = oldPref === 'gdrive' ? GDriveService : OneDriveService;
                 if (oldSvc.isConfigured() && oldSvc.isTokenValid()) {
                     const oldBackup = await oldSvc.download();
-                    if (oldBackup) {
-                        DataService.restoreBackup(oldBackup);
+                    if (oldBackup && isBackupOwnedByCurrentUser(oldBackup, currentUser)) {
+                        const sigResult = await verifyBackupSignature(oldBackup, currentUser);
+                        // Skip auto-migration restore for unsigned backups — no modal here for TOFU
+                        if (isSignatureAcceptable(sigResult) && !sigResult.requiresConfirmation) { DataService.restoreBackup(oldBackup); }
                     }
                 }
             } catch (_) {}
@@ -5949,15 +6101,10 @@ function App() {
         setReconnectBannerDismissed(false);
         localStorage.removeItem('financeApp_storagePickerSkipCount');
         let showingRestore = false;
-        if (cloudBackup) {
-            // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
-            const currentUid = currentUser ? currentUser.uid : null;
-            const backupBelongsHere = !cloudBackup.userId || !currentUid || cloudBackup.userId === currentUid;
-            if (backupBelongsHere) {
-                const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
-                const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-                if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
-            }
+        if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
+            const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+            if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
         }
         // Upload local data to cloud immediately after connecting (unless we're showing the restore prompt)
         if ((pref === 'gdrive' || pref === 'onedrive') && !showingRestore) {
@@ -5974,17 +6121,16 @@ function App() {
             setSyncStatus('syncing');
             try {
                 const cloudBackup = await SyncService.download();
-                if (cloudBackup) {
-                    const ownBackup = !cloudBackup.userId || !currentUser || cloudBackup.userId === currentUser.uid;
-                    if (ownBackup) {
-                        const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
-                        const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-                        if (cloudTime > localTime) {
-                            setCloudRestoreData(cloudBackup);
-                            setCloudSyncGate('restore-prompt');
-                            setSyncStatus('idle');
-                            return;
-                        }
+                if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
+                    const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                    if (!isSignatureAcceptable(sigResult)) throw new Error('Cloud backup integrity check failed — restore blocked.');
+                    const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                    const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                    if (cloudTime > localTime) {
+                        setCloudRestoreData(cloudBackup);
+                        setCloudSyncGate('restore-prompt');
+                        setSyncStatus('idle');
+                        return;
                     }
                 }
             } catch (_) {}
@@ -6002,9 +6148,9 @@ function App() {
         try {
             // Download-first: if cloud is newer than local, offer restore instead of overwriting
             const cloudBackup = await SyncService.download();
-            if (cloudBackup) {
-                const ownBackup = !cloudBackup.userId || !currentUser || cloudBackup.userId === currentUser.uid;
-                if (ownBackup) {
+            if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
+                const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                if (isSignatureAcceptable(sigResult)) {
                     const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                     const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                     if (cloudTime > localTime) {
@@ -6016,7 +6162,8 @@ function App() {
                 }
             }
             // Local is up to date — upload it
-            const result = await SyncService.upload(DataService.createBackup());
+            const signedForSync = await signBackupForUpload(DataService.createBackup(), currentUser);
+            const result = await SyncService.upload(signedForSync);
             if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
             else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
             else { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
@@ -6032,8 +6179,10 @@ function App() {
             setCloudSyncGate('checking');
             const cloudBackup = await SyncService.download();
             if (!cloudBackup) { setCloudSyncGate('idle'); return; }
-            // Ignore backups that belong to a different user (shared Google/OneDrive account scenario)
-            if (cloudBackup.userId && currentUser && cloudBackup.userId !== currentUser.uid) { setCloudSyncGate('idle'); return; }
+            // Fail-closed: reject backups that don't belong to the current user
+            if (!isBackupOwnedByCurrentUser(cloudBackup, currentUser)) { setCloudSyncGate('idle'); return; }
+            const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+            if (!isSignatureAcceptable(sigResult)) { setCloudSyncGate('idle'); return; }
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
             const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
             if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
@@ -6087,6 +6236,7 @@ function App() {
     if (cloudSyncGate === 'restore-prompt' && cloudRestoreData) return (
         <CloudRestoreModal
             backupData={cloudRestoreData}
+            currentUser={currentUser}
             onRestore={async () => {
                 // Restore in-place — no page reload needed.
                 // DataService.restoreBackup() was already called inside CloudRestoreModal
@@ -6173,6 +6323,7 @@ function App() {
                         DataService.isInitialized = false;
                         handleDataUpdate();
                     }}
+                    currentUser={currentUser}
                 />
             )}
         </div>
