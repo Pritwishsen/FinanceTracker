@@ -1084,6 +1084,35 @@ class DataService {
         localStorage.setItem('financeApp_latestBackup', JSON.stringify(backupData));
         return count;
     }
+    static mergeBackups(localBackup, cloudBackup) {
+        // Union two backups by record ID — neither device loses data.
+        // For the same ID, whichever record has the newer createdAt/updatedAt wins.
+        const mergeById = (localArr, cloudArr) => {
+            const a = Array.isArray(localArr) ? localArr : [];
+            const b = Array.isArray(cloudArr) ? cloudArr : [];
+            const map = new Map();
+            for (const item of b) { if (item && item.id != null) map.set(String(item.id), item); }
+            for (const item of a) {
+                if (!item || item.id == null) continue;
+                const key = String(item.id);
+                if (!map.has(key)) { map.set(key, item); }
+                else {
+                    const lt = new Date(item.updatedAt || item.createdAt || 0).getTime();
+                    const ct = new Date(map.get(key).updatedAt || map.get(key).createdAt || 0).getTime();
+                    if (lt >= ct) map.set(key, item);
+                }
+            }
+            return Array.from(map.values());
+        };
+        const ld = (localBackup && localBackup.data) || {};
+        const cd = (cloudBackup && cloudBackup.data) || {};
+        const merged = { ...cd };
+        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
+        // For scalar blobs (settings, notifSettings), prefer the newer backup's version
+        const cloudNewer = new Date(cloudBackup.createdAt || 0) >= new Date(localBackup.createdAt || 0);
+        if (!cloudNewer) { if (ld.settings) merged.settings = ld.settings; if (ld.notifSettings) merged.notifSettings = ld.notifSettings; }
+        return { version: '1.0', createdAt: new Date().toISOString(), userId: cloudBackup.userId, data: merged };
+    }
     static getBackupHistory() { return JSON.parse(localStorage.getItem('financeApp_backupHistory') || '[]'); }
     static recordBackupEntry(filename) {
         const history = this.getBackupHistory();
@@ -5977,8 +6006,25 @@ function App() {
                         if (!isBackupOwnedByCurrentUser(cloudBackup, currentUser)) { setCloudSyncGate('idle'); return; }
                         const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                         const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-                        if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
-                        else { setCloudSyncGate('idle'); }
+                        if (cloudTime > localTime) {
+                            const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
+                            const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
+                            if (localExp.length > 0 || localInc.length > 0) {
+                                // Both devices have data — merge silently so nothing is lost
+                                const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                                DataService.restoreBackup(merged);
+                                DataService.isInitialized = false;
+                                setCloudSyncGate('idle');
+                                signBackupForUpload(merged, currentUser).then(signed => SyncService.upload(signed)).catch(() => {});
+                                Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]).then(([expD, incD, catD, setD]) => {
+                                    setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                                    setPeople(DataService.getPeople());
+                                });
+                            } else {
+                                // Local is empty — just restore from cloud
+                                setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
+                            }
+                        } else { setCloudSyncGate('idle'); }
                     }).catch(() => { setCloudSyncGate('idle'); });
                 } else {
                     // No active session token — prompt user to reconnect before entering app
@@ -6056,9 +6102,32 @@ function App() {
                 if (hasSavedLocally) {
                     setSyncStatus('syncing');
                     try {
-                        const signedBackup = await signBackupForUpload(DataService.createBackup(), currentUser);
+                        // Download-first: merge any changes uploaded by another device
+                        // before writing our snapshot, so neither device loses data.
+                        let backupToUpload = DataService.createBackup();
+                        try {
+                            const cloudBackup = await SyncService.download();
+                            if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
+                                const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                                if (isSignatureAcceptable(sigResult)) {
+                                    const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                                    const lastSync = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
+                                    if (cloudTime > lastSync) {
+                                        // Another device has uploaded since our last sync — merge
+                                        const merged = DataService.mergeBackups(backupToUpload, cloudBackup);
+                                        DataService.restoreBackup(merged);
+                                        DataService.isInitialized = false;
+                                        const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
+                                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                                        setPeople(DataService.getPeople());
+                                        backupToUpload = merged;
+                                    }
+                                }
+                            }
+                        } catch (_) { /* cloud check failed — proceed with local-only upload */ }
+                        const signedBackup = await signBackupForUpload(backupToUpload, currentUser);
                         const result = await SyncService.upload(signedBackup);
-                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt); }
                         else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
                         else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
                     } catch (_) { setSyncStatus('error'); }
@@ -6132,10 +6201,23 @@ function App() {
                     const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                     const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                     if (cloudTime > localTime) {
-                        setCloudRestoreData(cloudBackup);
-                        setCloudSyncGate('restore-prompt');
-                        setSyncStatus('idle');
-                        return;
+                        const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
+                        const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
+                        if (localExp.length > 0 || localInc.length > 0) {
+                            const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                            DataService.restoreBackup(merged);
+                            DataService.isInitialized = false;
+                            const signedM = await signBackupForUpload(merged, currentUser);
+                            await SyncService.upload(signedM);
+                            const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
+                            setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                            setPeople(DataService.getPeople());
+                        } else {
+                            setCloudRestoreData(cloudBackup);
+                            setCloudSyncGate('restore-prompt');
+                            setSyncStatus('idle');
+                            return;
+                        }
                     }
                 }
             } catch (_) {}
@@ -6159,9 +6241,17 @@ function App() {
                     const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
                     const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                     if (cloudTime > localTime) {
-                        setSyncStatus('idle');
-                        setCloudRestoreData(cloudBackup);
-                        setCloudSyncGate('restore-prompt');
+                        // Merge cloud + local instead of replacing either side
+                        const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                        DataService.restoreBackup(merged);
+                        DataService.isInitialized = false;
+                        const signedMerged = await signBackupForUpload(merged, currentUser);
+                        const mergeResult = await SyncService.upload(signedMerged);
+                        if (mergeResult.status === 'success') { setSyncStatus('synced'); setLastSyncTime(mergeResult.syncedAt); localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); }
+                        else { setSyncStatus('idle'); }
+                        const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
+                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                        setPeople(DataService.getPeople());
                         return;
                     }
                 }
@@ -6190,7 +6280,23 @@ function App() {
             if (!isSignatureAcceptable(sigResult)) { setCloudSyncGate('idle'); return; }
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
             const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
-            if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); }
+            if (cloudTime > localTime) {
+                const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
+                const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
+                if (localExp.length > 0 || localInc.length > 0) {
+                    const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                    DataService.restoreBackup(merged);
+                    DataService.isInitialized = false;
+                    setCloudSyncGate('idle');
+                    signBackupForUpload(merged, currentUser).then(signed => SyncService.upload(signed)).catch(() => {});
+                    Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]).then(([expD, incD, catD, setD]) => {
+                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                        setPeople(DataService.getPeople());
+                    });
+                } else {
+                    setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
+                }
+            }
             else { setCloudSyncGate('idle'); }
         } catch { setCloudGateConnecting(false); setCloudGateError('Connection failed — check pop-up permissions and try again.'); }
     };
