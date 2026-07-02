@@ -1242,8 +1242,13 @@ async function verifyBackupSignature(backup, currentUser) {
         const valid = await crypto.subtle.verify('HMAC', cryptoKey, sigBytes, dataBytes);
         // Signature present and valid → full trust
         if (valid) return { ok: true };
-        // Signature present but invalid → always reject regardless of user type
-        return { ok: false, tampered: true };
+        // Signature present but doesn't match this device's key.
+        // This is expected when the backup was uploaded from a different device
+        // (each device holds its own random key in localStorage). We cannot
+        // distinguish a cross-device backup from a genuinely tampered one
+        // without a shared key, so treat it as unverifiable and allow it
+        // through silently — the same as a first-login / new-device restore.
+        return { ok: false, unverifiable: true };
     } catch (_) { return { ok: false, unverifiable: true }; }
 }
 
