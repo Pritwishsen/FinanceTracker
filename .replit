@@ -30,7 +30,6 @@ waitForPort = 5000
 [deployment]
 run = ["node", "serve.js"]
 deploymentTarget = "autoscale"
-publicDir = "."
 
 [[ports]]
 localPort = 5000
