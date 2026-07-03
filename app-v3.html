@@ -203,7 +203,7 @@ window.ValidationUtils = ValidationUtils;
 // ── Google Drive OAuth + REST API ──────────────────────────────────────────
 const GDriveService = {
     SCOPES: 'https://www.googleapis.com/auth/drive.file',
-    FOLDER: 'FinanceTracker Backups',
+    get FOLDER() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.isProduction) ? 'FinanceTracker Backups' : 'FinanceTracker Backups (Dev)'; },
     FILE: 'financetracker-data.json',
     get clientId() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.googleClientId) || ''; },
     isConfigured() { return !!this.clientId; },

@@ -39,7 +39,8 @@ function serveFile(filePath, res) {
 function serveWithOauthConfig(filePath, res) {
   var oauthConfig = {
     googleClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
-    msClientId: process.env.MICROSOFT_CLIENT_ID || ''
+    msClientId: process.env.MICROSOFT_CLIENT_ID || '',
+    isProduction: !!(process.env.REPLIT_DEPLOYMENT)
   };
   var configScript = '<script>window.__OAUTH_CONFIG = ' + JSON.stringify(oauthConfig) + ';</script>\n  ';
   fs.readFile(filePath, function(err, data) {
@@ -70,7 +71,8 @@ function serveAppHtml(res) {
   };
   var oauthConfig = {
     googleClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
-    msClientId: process.env.MICROSOFT_CLIENT_ID || ''
+    msClientId: process.env.MICROSOFT_CLIENT_ID || '',
+    isProduction: !!(process.env.REPLIT_DEPLOYMENT)
   };
   var configScript = '<script>window.FIREBASE_CONFIG = ' + JSON.stringify(firebaseConfig) + '; window.__OAUTH_CONFIG = ' + JSON.stringify(oauthConfig) + ';</script>\n    ';
   fs.readFile(path.join(ROOT, 'app-v3.html'), function(err, data) {
