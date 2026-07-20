@@ -1080,6 +1080,7 @@ class DataService {
         const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(url);
         this.recordBackupEntry(filename);
+        localStorage.setItem('financeApp_latestBackup', JSON.stringify(backup));
         return filename;
     }
     static restoreBackup(backupData) {
@@ -6107,12 +6108,11 @@ function App() {
                 const todayStr = new Date().toISOString().split('T')[0];
                 const appSettings = await DataService.getSettings();
                 const hasData = DataService.data.expenses.length > 0 || DataService.data.income.length > 0;
-                if (appSettings.autoBackupEnabled !== false && hasData && DataService.hasDataChangedSinceLastBackup()) {
+                if (appSettings.autoBackupEnabled !== false && hasData && !SyncService.isCloudEnabled() && DataService.hasDataChangedSinceLastBackup()) {
                     const lastAutoBackup = localStorage.getItem('financeApp_lastAutoBackup');
                     if (lastAutoBackup !== todayStr) {
                         DataService.downloadBackup();
                         localStorage.setItem('financeApp_lastAutoBackup', todayStr);
-                        DataService.recordBackupEntry('auto-backup-' + todayStr + '.json');
                     }
                 }
                 const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
