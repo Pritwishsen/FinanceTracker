@@ -1165,7 +1165,12 @@ class DataService {
         // For scalar blobs (settings, notifSettings), prefer the newer backup's version
         const cloudNewer = new Date(cloudBackup.createdAt || 0) >= new Date(localBackup.createdAt || 0);
         if (!cloudNewer) { if (ld.settings) merged.settings = ld.settings; if (ld.notifSettings) merged.notifSettings = ld.notifSettings; }
-        return { version: '1.0', createdAt: new Date().toISOString(), userId: cloudBackup.userId, data: merged };
+        // Only advance the timestamp if the merge actually added something cloud didn't
+        // already have — otherwise every no-op merge re-stamps "now" and looks newer to
+        // the other device, triggering an unnecessary re-merge on its very next edit.
+        const addedNothingNew = JSON.stringify(merged) === JSON.stringify(cd);
+        const createdAt = addedNothingNew ? (cloudBackup.createdAt || new Date().toISOString()) : new Date().toISOString();
+        return { version: '1.0', createdAt, userId: cloudBackup.userId, data: merged };
     }
     static getBackupHistory() { return JSON.parse(localStorage.getItem('financeApp_backupHistory') || '[]'); }
     static recordBackupEntry(filename) {
