@@ -6007,6 +6007,8 @@ function App() {
     const [cloudGateConnecting, setCloudGateConnecting] = useState(false);
     const [cloudGateError, setCloudGateError] = useState('');
     const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
+    const [syncMergeToast, setSyncMergeToast] = useState('');
+    const showSyncMergeToast = (msg) => { setSyncMergeToast(msg); setTimeout(() => setSyncMergeToast(''), 4500); };
 
     useEffect(() => {
         if (!window.__firebaseReady) return;
@@ -6081,7 +6083,7 @@ function App() {
             if (svc.isConfigured()) {
                 if (svc.isTokenValid()) {
                     setCloudSyncGate('checking');
-                    SyncService.download().then(cloudBackup => {
+                    SyncService.download().then(async cloudBackup => {
                         if (!cloudBackup) { setCloudSyncGate('idle'); return; }
                         // Fail-closed: reject backups that don't belong to the current user
                         if (!isBackupOwnedByCurrentUser(cloudBackup, currentUser)) { setCloudSyncGate('idle'); return; }
@@ -6091,16 +6093,36 @@ function App() {
                             const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                             const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
                             if (localExp.length > 0 || localInc.length > 0) {
-                                // Both devices have data — merge silently so nothing is lost
+                                // This is a headless path with no confirmation UI, so an unsigned
+                                // legacy backup (requiresConfirmation) must not merge silently —
+                                // decline and leave both local and cloud data untouched instead.
+                                const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                                if (!isSignatureAcceptable(sigResult) || sigResult.requiresConfirmation) {
+                                    setCloudSyncGate('idle');
+                                    return;
+                                }
+                                // Both devices have data — merge so nothing is lost, then tell the user
                                 const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
                                 DataService.restoreBackup(merged);
                                 DataService.isInitialized = false;
                                 setCloudSyncGate('idle');
-                                signBackupForUpload(merged, currentUser).then(signed => SyncService.upload(signed)).catch(() => {});
-                                Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]).then(([expD, incD, catD, setD]) => {
-                                    setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                                    setPeople(DataService.getPeople());
-                                });
+                                const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
+                                setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                                setPeople(DataService.getPeople());
+                                showSyncMergeToast('Merged changes from another device');
+                                setSyncStatus('syncing');
+                                try {
+                                    const signed = await signBackupForUpload(merged, currentUser);
+                                    const result = await SyncService.upload(signed);
+                                    if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                                    else {
+                                        setSyncStatus('error');
+                                        showSyncMergeToast('Merged locally, but the upload to the cloud failed — will retry on your next change.');
+                                    }
+                                } catch (_) {
+                                    setSyncStatus('error');
+                                    showSyncMergeToast('Merged locally, but the upload to the cloud failed — will retry on your next change.');
+                                }
                             } else {
                                 // Local is empty — just restore from cloud
                                 setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
@@ -6479,6 +6501,13 @@ function App() {
                 <div className="alert alert-info" style={{margin: '0 1rem 0.5rem', fontSize: '0.85rem', cursor: 'pointer'}} onClick={() => setCurrentScreen('bills')}>
                     <i className="fas fa-clock me-2"></i>
                     ⏰ {billsDueSoon.length} bill{billsDueSoon.length !== 1 ? 's' : ''} due soon — {billsDueSoon.map(b => b.name).join(', ')}
+                </div>
+            )}
+            {syncMergeToast && (
+                <div className="alert d-flex gap-2 align-items-center" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px',background:'#cfe2ff',border:'1px solid #4a6cf7',color:'#084298'}}>
+                    <i className="fas fa-check-circle flex-shrink-0"></i>
+                    <div style={{flex:1}}>{syncMergeToast}</div>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setSyncMergeToast('')}></button>
                 </div>
             )}
             {syncStatus === 'reconnect-needed' && !reconnectBannerDismissed && (
