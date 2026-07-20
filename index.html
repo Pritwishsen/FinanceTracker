@@ -461,7 +461,12 @@ function CloudRestoreModal({ backupData, currentUser, onRestore, onKeepLocal }) 
                 setRestoring(false); return;
             }
             DataService.restoreBackup(backupData);
-        } catch (e) { console.error(e); }
+        } catch (e) {
+            console.error(e);
+            setRestoreError('Restore failed: ' + (e && e.message ? e.message : 'unknown error') + '. Your existing data was not replaced.');
+            setRestoring(false);
+            return;
+        }
         onRestore();
     };
     return (
@@ -690,7 +695,7 @@ class DataService {
         const duplicate = this.data.settings.people.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
         if (duplicate) throw new Error('A person with this name already exists');
         if (isDefault) this.data.settings.people.forEach(p => { p.isDefault = false; });
-        const person = { id: Date.now(), name: trimmed, relationship: (relationship || '').trim(), isDefault: !!isDefault, systemManaged: !!systemManaged };
+        const person = { id: DataService._uniqueId(), name: trimmed, relationship: (relationship || '').trim(), isDefault: !!isDefault, systemManaged: !!systemManaged };
         this.data.settings.people.push(person);
         this.saveSettings();
         return person;
@@ -739,8 +744,12 @@ class DataService {
     }
 
     static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date)); }
-    static _idSeq = 0;
-    static _uniqueId() { return Date.now() * 10000 + (++DataService._idSeq % 10000); }
+    static _lastId = 0;
+    static _uniqueId() {
+        const now = Date.now();
+        DataService._lastId = now > DataService._lastId ? now : DataService._lastId + 1;
+        return DataService._lastId;
+    }
     static async addExpense(expense) {
         await this.initialize();
         const newExpense = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
@@ -780,14 +789,14 @@ class DataService {
     static async getIncome() { await this.initialize(); return [...this.data.income].sort((a, b) => new Date(b.date) - new Date(a.date)); }
     static async addIncome(income) {
         await this.initialize();
-        const newIncome = { id: Date.now(), ...income, createdAt: new Date().toISOString() };
+        const newIncome = { id: DataService._uniqueId(), ...income, createdAt: new Date().toISOString() };
         this.data.income.push(newIncome);
         this.saveIncome();
         return newIncome;
     }
     static async addIncomeWithConversion(income) {
         await this.initialize();
-        const incomeData = { ...income, id: Date.now(), createdAt: new Date().toISOString() };
+        const incomeData = { ...income, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
         this.data.income.push(incomeData);
         this.saveIncome();
         return incomeData;
@@ -807,7 +816,7 @@ class DataService {
     static async getCategories() { await this.initialize(); return [...this.data.categories]; }
     static async addCategory(category) {
         await this.initialize();
-        const newCategory = { id: Date.now(), ...category, subcategories: category.subcategories || [], monthlyBudget: category.monthlyBudget || 0, subcategoryBudgets: category.subcategoryBudgets || {} };
+        const newCategory = { id: DataService._uniqueId(), ...category, subcategories: category.subcategories || [], monthlyBudget: category.monthlyBudget || 0, subcategoryBudgets: category.subcategoryBudgets || {} };
         this.data.categories.push(newCategory);
         this.saveCategories();
         return newCategory;
@@ -998,7 +1007,7 @@ class DataService {
         if (goals.find(g => g.name.toLowerCase() === name.trim().toLowerCase())) throw new Error('A goal with this name already exists');
         if (!targetAmount || parseFloat(targetAmount) <= 0) throw new Error('Target amount must be greater than 0');
         if (deadline && new Date(deadline) <= new Date()) throw new Error('Deadline must be in the future');
-        const goal = { id: Date.now(), name: name.trim(), targetAmount: parseFloat(targetAmount), currency: currency || 'GBP', deadline: deadline || '', notes: notes || '', emoji: emoji || '', currentSaved: parseFloat(currentSaved || 0), createdAt: new Date().toISOString() };
+        const goal = { id: DataService._uniqueId(), name: name.trim(), targetAmount: parseFloat(targetAmount), currency: currency || 'GBP', deadline: deadline || '', notes: notes || '', emoji: emoji || '', currentSaved: parseFloat(currentSaved || 0), createdAt: new Date().toISOString() };
         goals.push(goal);
         this.saveGoals(goals);
         return goal;
@@ -1013,7 +1022,7 @@ class DataService {
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
         const today = new Date().toISOString().split('T')[0];
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
-        const bill = { id: Date.now(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
+        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
     static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates }; this.saveBills(bills); } }
@@ -1075,14 +1084,28 @@ class DataService {
     }
     static restoreBackup(backupData) {
         if (!backupData || !backupData.version || !backupData.data) throw new Error('Invalid backup structure');
-        let count = 0;
-        Object.entries(backupData.data).forEach(([key, value]) => { if (value !== null && value !== undefined) { localStorage.setItem('financeApp_' + key, JSON.stringify(value)); count++; } });
+        const entries = Object.entries(backupData.data).filter(([, value]) => value !== null && value !== undefined);
         // Stamp lastSaveTime so the cloud-vs-local check after reload sees equal timestamps
         // and never re-prompts for the same backup
         const saveTime = backupData.createdAt || new Date().toISOString();
-        localStorage.setItem('financeApp_lastSaveTime', saveTime);
-        localStorage.setItem('financeApp_latestBackup', JSON.stringify(backupData));
-        return count;
+        const writes = [
+            ...entries.map(([key, value]) => ['financeApp_' + key, JSON.stringify(value)]),
+            ['financeApp_lastSaveTime', saveTime],
+            ['financeApp_latestBackup', JSON.stringify(backupData)],
+        ];
+        // Snapshot pre-restore values so a failure partway through (e.g. quota exceeded)
+        // can be rolled back instead of leaving localStorage half-old/half-new
+        const previous = writes.map(([key]) => [key, localStorage.getItem(key)]);
+        try {
+            writes.forEach(([key, value]) => localStorage.setItem(key, value));
+            return entries.length;
+        } catch (e) {
+            previous.forEach(([key, value]) => {
+                try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); }
+                catch (_) { /* best-effort rollback */ }
+            });
+            throw e;
+        }
     }
     static getDeletionLog() {
         try { return JSON.parse(localStorage.getItem('financeApp__deletionLog') || '{}'); } catch(_) { return {}; }
@@ -1168,7 +1191,7 @@ class DataService {
     static getDebts() { return JSON.parse(localStorage.getItem('financeApp_debts') || '[]'); }
     static saveDebts(d) { localStorage.setItem('financeApp_debts', JSON.stringify(d)); }
     static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person }) {
-        const debt = { id: Date.now(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', person: person||'own', isSettled: false, createdAt: new Date().toISOString() };
+        const debt = { id: DataService._uniqueId(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', person: person||'own', isSettled: false, createdAt: new Date().toISOString() };
         const debts = this.getDebts(); debts.push(debt); this.saveDebts(debts); return debt;
     }
     static updateDebt(id, updates) {
@@ -1180,7 +1203,7 @@ class DataService {
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
     static addNetWorthItem({ name, value, currency, category, type, notes, person }) {
-        const item = { id: Date.now(), name, value: parseFloat(value), currency, category, type, notes: notes||'', person: person||'own', updatedAt: new Date().toISOString() };
+        const item = { id: DataService._uniqueId(), name, value: parseFloat(value), currency, category, type, notes: notes||'', person: person||'own', updatedAt: new Date().toISOString() };
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(); return item;
     }
@@ -1697,7 +1720,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         else if (duplicateDate === 'today') chosenDate = today;
         else { if (!duplicateCustomDate) { setDuplicateDateError('Please pick a date.'); return; } chosenDate = duplicateCustomDate; }
         if (chosenDate > today) { setDuplicateDateError('Duplicate date cannot be in the future.'); return; }
-        const newRecord = { ...duplicatingExpense, id: Date.now(), createdAt: new Date().toISOString(), date: chosenDate, description: duplicatingExpense.description + ' (Copy)' };
+        const newRecord = { ...duplicatingExpense, id: DataService._uniqueId(), createdAt: new Date().toISOString(), date: chosenDate, description: duplicatingExpense.description + ' (Copy)' };
         DataService.addExpense(newRecord); onUpdate(); setDuplicatingExpense(null);
     };
     const getCategoryName = (categoryId) => { const category = categories.find(cat => cat.id === categoryId); return category ? category.name : 'Unknown Category'; };
