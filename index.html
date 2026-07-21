@@ -994,8 +994,8 @@ class DataService {
         const alerts = [];
         budgetSummary.forEach(item => {
             if (item.budget > 0) {
-                if (item.percentage >= 100) alerts.push({ type: 'over', name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
-                else if (item.percentage >= 80) alerts.push({ type: 'near', name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
+                if (item.percentage >= 100) alerts.push({ type: 'over', categoryId: item.id, name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
+                else if (item.percentage >= 80) alerts.push({ type: 'near', categoryId: item.id, name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
             }
         });
         return alerts;
@@ -1205,6 +1205,33 @@ class DataService {
             return keys.some(k => JSON.stringify(current.data[k]) !== JSON.stringify(last.data[k]));
         } catch (_) { return true; }
     }
+    static getNotifications() { return JSON.parse(localStorage.getItem('financeApp_notifications') || '[]'); }
+    static saveNotifications(list) { localStorage.setItem('financeApp_notifications', JSON.stringify(list)); }
+    // Reconciles the persisted notification list with whatever alert conditions are currently
+    // true (activeAlerts: [{key, type, title, message, screen}]). Entries whose condition is no
+    // longer active are dropped; still-active ones keep their existing id/read/createdAt so
+    // re-running this on every data change doesn't spam duplicates or reset read state.
+    static syncNotifications(activeAlerts) {
+        const existing = this.getNotifications();
+        const activeKeys = new Set(activeAlerts.map(a => a.key));
+        const kept = existing.filter(n => activeKeys.has(n.key));
+        const now = new Date().toISOString();
+        activeAlerts.forEach(a => {
+            const idx = kept.findIndex(n => n.key === a.key);
+            if (idx !== -1) { kept[idx] = { ...kept[idx], type: a.type, title: a.title, message: a.message, screen: a.screen }; }
+            else { kept.unshift({ id: this._uniqueId(), key: a.key, type: a.type, title: a.title, message: a.message, screen: a.screen, createdAt: now, read: false }); }
+        });
+        this.saveNotifications(kept.slice(0, 100));
+        return kept;
+    }
+    static markNotificationRead(id) {
+        const list = this.getNotifications();
+        const n = list.find(x => x.id === id);
+        if (n) { n.read = true; this.saveNotifications(list); }
+    }
+    static markAllNotificationsRead() { this.saveNotifications(this.getNotifications().map(n => ({ ...n, read: true }))); }
+    static dismissNotification(id) { this.saveNotifications(this.getNotifications().filter(n => n.id !== id)); }
+    static clearAllNotifications() { this.saveNotifications([]); }
     static getDebts() { return JSON.parse(localStorage.getItem('financeApp_debts') || '[]'); }
     static saveDebts(d) { localStorage.setItem('financeApp_debts', JSON.stringify(d)); }
     static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person }) {
@@ -1471,7 +1498,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         if (tags.some(t => t.length > 30)) { setErrors({ tags: 'Tags must be 30 characters or fewer' }); setIsSubmitting(false); return; }
         const validation = ValidationUtils.validateExpense({ ...formData, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
-        if ((!editExpense && !editSplitGroup && isSplit) || editSplitGroup) {
+        if (isSplit || editSplitGroup) {
             if (splitParticipants.length < 2) { setErrors({ general: 'A split needs at least 2 participants.' }); setIsSubmitting(false); return; }
             if (splitMethod === 'custom') {
                 const total = splitParticipants.reduce((sum, p) => sum + (parseFloat(customAmounts[p.id]) || 0), 0);
@@ -1504,7 +1531,23 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             }
             const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) };
             if (editExpense) {
-                DataService.updateExpense(editExpense.id, expenseData);
+                if (isSplit && splitParticipants.length >= 2) {
+                    // Converting a single expense into a new split — replace it with N split records
+                    DataService.deleteExpense(editExpense.id);
+                    const splitGroupId = 'split_' + Date.now();
+                    const totalAmt = parseFloat(formData.amount);
+                    const n = splitParticipants.length;
+                    const baseShare = Math.round(totalAmt / n * 100) / 100;
+                    splitParticipants.forEach((p, i) => {
+                        const share = splitMethod === 'equal'
+                            ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
+                            : parseFloat(customAmounts[p.id] || 0);
+                        DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: p.name, splitGroupId, isSplitRecord: true });
+                    });
+                } else {
+                    DataService.updateExpense(editExpense.id, expenseData);
+                }
+                if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
             } else if (isSplit && splitParticipants.length >= 2) {
                 const splitGroupId = 'split_' + Date.now();
                 const totalAmt = parseFloat(formData.amount);
@@ -1628,11 +1671,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
                     </div>
                 )}
-                {(!editExpense || editSplitGroup) && (
-                    <div className="form-group">
-                        {!editSplitGroup && (
-                            <div className="form-check">
-                                <input className="form-check-input" type="checkbox" id="isSplit" checked={isSplit} onChange={e => {
+                <div className="form-group">
+                    {!editSplitGroup && (
+                        <div className="form-check">
+                            <input className="form-check-input" type="checkbox" id="isSplit" checked={isSplit} onChange={e => {
                                     const val = e.target.checked;
                                     setIsSplit(val);
                                     if (val && splitParticipants.length === 0) {
@@ -1694,8 +1736,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                             </div>
                         )}
                     </div>
-                )}
-                {!editExpense && !editSplitGroup && (
+                {!editSplitGroup && (
                     <div className="form-group">
                         <div className="form-check">
                             <input className="form-check-input" type="checkbox" id="isRecurring" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} />
@@ -4157,18 +4198,37 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
 
         // OAuth FIRST while user gesture is still fresh (required for popup)
         let cloudBackup = null;
+        let svc = null;
         if (selected === 'gdrive' || selected === 'onedrive') {
-            const svc = selected === 'gdrive' ? GDriveService : OneDriveService;
+            svc = selected === 'gdrive' ? GDriveService : OneDriveService;
             if (svc.isConfigured()) {
                 try {
                     setOauthStep('connecting');
                     await svc.requestToken();
                     setOauthStep('downloading');
                     cloudBackup = await svc.download();
-                    setOauthStep('done');
                 } catch (_) {
                     setOauthStep('error');
+                    setSaving(false);
+                    return; // Connection/download failed — abort before touching the committed preference
                 }
+            }
+        }
+
+        // If the chosen provider has no backup file yet, we're about to become its only copy
+        // of this data — the upload must actually succeed before we commit the switch. Otherwise
+        // financeApp_storagePreference would point at a provider with nothing backed up, and the
+        // app would show "cloud protected" while silently having no cloud copy at all.
+        if (svc && svc.isConfigured() && !cloudBackup) {
+            try {
+                setOauthStep('uploading');
+                const signed = await signBackupForUpload(DataService.createBackup(), currentUser);
+                await svc.upload(signed);
+                localStorage.setItem('financeApp_lastCloudSync', new Date().toISOString());
+            } catch (_) {
+                setOauthStep('error');
+                setSaving(false);
+                return; // Upload failed — keep the previous provider active, don't commit the switch
             }
         }
 
@@ -4178,6 +4238,7 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
         localStorage.setItem('financeApp_storagePreference', selected);
         localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
         localStorage.removeItem('financeApp_storagePickerSkipCount');
+        setOauthStep('done');
         setSaving(false);
         onConfirm(selected, cloudBackup);
     };
@@ -4225,15 +4286,16 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
                     <div className={'alert d-flex gap-2 py-2 mb-3 ' + (oauthStep==='error'?'alert-warning':'alert-info')} style={{borderRadius:'10px',fontSize:'0.83rem'}}>
                         {oauthStep==='connecting' && <><span className="spinner-border spinner-border-sm me-2 flex-shrink-0" style={{marginTop:'1px'}}></span><span>Connecting to {selected==='gdrive'?'Google Drive':'OneDrive'}…</span></>}
                         {oauthStep==='downloading' && <><span className="spinner-border spinner-border-sm me-2 flex-shrink-0" style={{marginTop:'1px'}}></span><span>Checking for existing backup…</span></>}
+                        {oauthStep==='uploading' && <><span className="spinner-border spinner-border-sm me-2 flex-shrink-0" style={{marginTop:'1px'}}></span><span>Saving your first backup to {selected==='gdrive'?'Google Drive':'OneDrive'}…</span></>}
                         {oauthStep==='done' && <><i className="fas fa-check-circle me-2 flex-shrink-0" style={{color:'#198754',marginTop:'1px'}}></i><span>Connected! Proceeding…</span></>}
-                        {oauthStep==='error' && <><i className="fas fa-exclamation-triangle me-2 flex-shrink-0" style={{marginTop:'1px'}}></i><span>Couldn't connect — you can re-connect later in Settings.</span></>}
+                        {oauthStep==='error' && <><i className="fas fa-exclamation-triangle me-2 flex-shrink-0" style={{marginTop:'1px'}}></i><span>Couldn't back up to {selected==='gdrive'?'Google Drive':'OneDrive'} — nothing has changed, you're still on your previous storage. Please try again.</span></>}
                     </div>
                 )}
                 <button className="btn w-100 fw-semibold py-3" onClick={handleConfirm} disabled={!selected || saving}
                     style={{borderRadius:'12px',background:selected?'#fff':'rgba(255,255,255,0.4)',color:selected?'#4a6cf7':'rgba(255,255,255,0.6)',border:'none',fontSize:'1rem',transition:'all 0.15s'}}>
                     {saving
-                        ? (oauthStep==='connecting'||oauthStep==='downloading'
-                            ? <><span className="spinner-border spinner-border-sm me-2"></span>{oauthStep==='connecting'?'Connecting…':'Checking backup…'}</>
+                        ? (oauthStep==='connecting'||oauthStep==='downloading'||oauthStep==='uploading'
+                            ? <><span className="spinner-border spinner-border-sm me-2"></span>{oauthStep==='connecting'?'Connecting…':oauthStep==='downloading'?'Checking backup…':'Backing up…'}</>
                             : <><span className="spinner-border spinner-border-sm me-2"></span>Saving…</>)
                         : 'Confirm'}
                 </button>
@@ -6037,8 +6099,8 @@ function App() {
     const [categories, setCategories] = useState([]);
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
     const [people, setPeople] = useState([]);
-    const [budgetAlerts, setBudgetAlerts] = useState([]);
-    const [billsDueSoon, setBillsDueSoon] = useState([]);
+    const [notifications, setNotifications] = useState(() => DataService.getNotifications());
+    const [showNotifPanel, setShowNotifPanel] = useState(false);
     const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
     const [expensesInitPaidBy, setExpensesInitPaidBy] = useState('');
@@ -6080,6 +6142,29 @@ function App() {
     const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
     const [syncMergeToast, setSyncMergeToast] = useState('');
     const showSyncMergeToast = (msg) => { setSyncMergeToast(msg); setTimeout(() => setSyncMergeToast(''), 4500); };
+
+    // Recomputes which budget/bill alerts are currently true and reconciles them into the
+    // persisted notification store (financeApp_notifications) so they survive reloads and
+    // show up in the bell/panel instead of only as a banner that resets on every render.
+    const refreshNotifications = async () => {
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        let budgetActive = [];
+        if (notifSettings.budgetAlertsEnabled !== false) {
+            const alerts = await DataService.checkBudgetAlerts();
+            budgetActive = alerts.map(a => ({
+                key: 'budget:' + a.categoryId,
+                type: a.type === 'over' ? 'budget-over' : 'budget-near',
+                title: a.type === 'over' ? `${a.name}: over budget` : `${a.name}: approaching budget`,
+                message: `${a.pct.toFixed(0)}% of budget ${a.type === 'over' ? 'spent' : 'used'}`,
+                screen: 'categories'
+            }));
+        }
+        const todayStr = new Date().toISOString().split('T')[0];
+        const dueSoon = DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
+        const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'bills' }));
+        DataService.syncNotifications([...budgetActive, ...billActive]);
+        setNotifications(DataService.getNotifications());
+    };
 
     useEffect(() => {
         if (!window.__firebaseReady) return;
@@ -6240,13 +6325,7 @@ function App() {
                 ]);
                 setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
                 setPeople(DataService.getPeople());
-                const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
-                if (notifSettings.budgetAlertsEnabled !== false) {
-                    const alerts = await DataService.checkBudgetAlerts();
-                    setBudgetAlerts(alerts);
-                } else { setBudgetAlerts([]); }
-                const today = new Date().toISOString().split('T')[0];
-                setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(today)) / 86400000); return diff <= b.reminderDaysBefore; }));
+                await refreshNotifications();
             } catch (error) { console.error('Error loading data:', error); }
         };
         loadData();
@@ -6259,13 +6338,7 @@ function App() {
             ]);
             setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
             setPeople(DataService.getPeople());
-            const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
-            if (notifSettings.budgetAlertsEnabled !== false) {
-                const alerts = await DataService.checkBudgetAlerts();
-                setBudgetAlerts(alerts);
-            } else { setBudgetAlerts([]); }
-            const todayStr = new Date().toISOString().split('T')[0];
-            setBillsDueSoon(DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; }));
+            await refreshNotifications();
             // Guard: check BEFORE saveLatestBackup() sets financeApp_lastSaveTime, so that
             // a freshly-wiped device (just logged in, no local data yet) doesn't overwrite
             // the cloud backup with empty data.
@@ -6355,6 +6428,11 @@ function App() {
         setSyncStatus('idle');
         setReconnectBannerDismissed(false);
         localStorage.removeItem('financeApp_storagePickerSkipCount');
+        // Reflect a backup that already succeeded (e.g. the picker's own upload when this
+        // provider had no prior file) immediately, instead of waiting on handleDataUpdate()'s
+        // own re-upload below to succeed before the Settings screen shows a synced time.
+        const persistedSync = localStorage.getItem('financeApp_lastCloudSync');
+        if ((pref === 'gdrive' || pref === 'onedrive') && persistedSync) { setLastSyncTime(persistedSync); setSyncStatus('synced'); }
         let showingRestore = false;
         if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
             const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
@@ -6564,22 +6642,48 @@ function App() {
                             {(syncStatus==='idle'||syncStatus==='not_configured') && <i className="fas fa-cloud" style={{color:'rgba(255,255,255,0.35)',fontSize:'0.85rem'}}></i>}
                         </span>
                     )}
+                    <button className="btn btn-sm btn-outline-light position-relative" onClick={() => setShowNotifPanel(true)} title="Notifications">
+                        <i className="fas fa-bell"></i>
+                        {notifications.some(n => !n.read) && (
+                            <span className="badge rounded-pill bg-danger" style={{position:'absolute',top:-4,right:-4,fontSize:'0.6rem',padding:'2px 5px',lineHeight:1}}>
+                                {notifications.filter(n => !n.read).length}
+                            </span>
+                        )}
+                    </button>
                     <button className="btn btn-sm btn-outline-light" onClick={() => setCurrentScreen('profile')} title="My Profile"><i className="fas fa-user-circle"></i></button>
                 </div>
             </div>
-            {budgetAlerts.map((alert, i) => (
-                <div key={i} className={'alert ' + (alert.type === 'over' ? 'alert-danger' : 'alert-warning')} style={{margin: '0.5rem 1rem', fontSize: '0.85rem'}}>
-                    <i className={'fas fa-' + (alert.type === 'over' ? 'exclamation-circle' : 'exclamation-triangle') + ' me-2'}></i>
-                    {alert.type === 'over'
-                        ? `${alert.name}: OVER BUDGET (${alert.pct.toFixed(0)}% spent)`
-                        : `${alert.name}: ${alert.pct.toFixed(0)}% of budget used`}
-                    <button className="btn-close btn-close-sm float-end" onClick={() => setBudgetAlerts(prev => prev.filter((_,j) => j !== i))}></button>
-                </div>
-            ))}
-            {billsDueSoon.length > 0 && (
-                <div className="alert alert-info" style={{margin: '0 1rem 0.5rem', fontSize: '0.85rem', cursor: 'pointer'}} onClick={() => setCurrentScreen('bills')}>
-                    <i className="fas fa-clock me-2"></i>
-                    ⏰ {billsDueSoon.length} bill{billsDueSoon.length !== 1 ? 's' : ''} due soon — {billsDueSoon.map(b => b.name).join(', ')}
+            {showNotifPanel && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}} onClick={() => setShowNotifPanel(false)}>
+                    <div className="modal-dialog modal-dialog-centered" onClick={e => e.stopPropagation()}>
+                        <div className="modal-content">
+                            <div className="modal-header">
+                                <h5 className="modal-title"><i className="fas fa-bell me-2"></i>Notifications</h5>
+                                <button type="button" className="btn-close" onClick={() => setShowNotifPanel(false)}></button>
+                            </div>
+                            <div className="modal-body" style={{maxHeight:'60vh',overflowY:'auto'}}>
+                                {notifications.length === 0 ? (
+                                    <p className="text-muted text-center mb-0">You're all caught up — no notifications.</p>
+                                ) : notifications.map(n => (
+                                    <div key={n.id} className="d-flex align-items-start gap-2 mb-2 pb-2" style={{borderBottom:'1px solid #eee',cursor:'pointer',opacity:n.read?0.65:1}}
+                                        onClick={() => { DataService.markNotificationRead(n.id); setNotifications(DataService.getNotifications()); setShowNotifPanel(false); if (n.screen) setCurrentScreen(n.screen); }}>
+                                        <i className={'fas mt-1 ' + (n.type === 'bill' ? 'fa-clock text-info' : n.type === 'budget-over' ? 'fa-exclamation-circle text-danger' : 'fa-exclamation-triangle text-warning')}></i>
+                                        <div style={{flex:1}}>
+                                            <div style={{fontSize:'0.9rem',fontWeight:n.read?400:600}}>{n.title}</div>
+                                            <div className="text-muted" style={{fontSize:'0.78rem'}}>{n.message}</div>
+                                        </div>
+                                        <button type="button" className="btn-close btn-close-sm" style={{fontSize:'0.55rem'}} onClick={(e) => { e.stopPropagation(); DataService.dismissNotification(n.id); setNotifications(DataService.getNotifications()); }}></button>
+                                    </div>
+                                ))}
+                            </div>
+                            {notifications.length > 0 && (
+                                <div className="modal-footer">
+                                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { DataService.markAllNotificationsRead(); setNotifications(DataService.getNotifications()); }}>Mark all read</button>
+                                    <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => { DataService.clearAllNotifications(); setNotifications([]); }}>Clear all</button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </div>
             )}
             {syncMergeToast && (
