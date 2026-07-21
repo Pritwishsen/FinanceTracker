@@ -236,16 +236,23 @@ const GDriveService = {
         if (!cr.ok) throw new Error('gdrive_mkdir:' + cr.status);
         return (await cr.json()).id;
     },
-    async _doForm(method, url, meta, body) {
-        const tok = await this._tok();
+    // Takes the token from the caller instead of re-acquiring it — a caller like upload()
+    // already fetched one token for the whole operation; having this call _tok() again
+    // per-request could independently decide the token needs renewing and pop a second,
+    // unexpected OAuth prompt mid-save (and silently hang the upload if popups are blocked).
+    async _doForm(tok, method, url, meta, body) {
         const form = new FormData();
         form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
         form.append('file', new Blob([body], { type: 'application/json' }));
         return { tok, res: await fetch(url, { method, headers: { Authorization: `Bearer ${tok}` }, body: form }) };
     },
     _histName() {
+        // Seconds included — minute-only precision let two saves in the same minute produce
+        // the identical filename, so Drive/OneDrive kept both as separate files instead of
+        // one: version history showed duplicate timestamps, the 5-snapshot prune cap filled
+        // up with near-duplicates faster than expected, and storage grew accordingly.
         const n = new Date(); const p = x => String(x).padStart(2,'0');
-        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}.json`;
+        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}${p(n.getUTCSeconds())}.json`;
     },
     async _pruneGdHistory(tok, fid) {
         try {
@@ -266,7 +273,7 @@ const GDriveService = {
         const body = JSON.stringify(json);
         const cached = localStorage.getItem('ftGdFileId');
         if (cached) {
-            const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, {}, body);
+            const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, {}, body);
             if (res.status === 404) { localStorage.removeItem('ftGdFileId'); return this.upload(json); }
             if (!res.ok) throw new Error('gdrive_upload:' + res.status);
         } else {
@@ -275,17 +282,17 @@ const GDriveService = {
             const { files } = await sr.json();
             if (files && files.length) {
                 localStorage.setItem('ftGdFileId', files[0].id);
-                const { res } = await this._doForm('PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
+                const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
                 if (!res.ok) throw new Error('gdrive_upload:' + res.status);
             } else {
-                const { res } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
+                const { res } = await this._doForm(tok, 'POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
                 if (!res.ok) throw new Error('gdrive_upload:' + res.status);
                 const f = await res.json(); if (f.id) localStorage.setItem('ftGdFileId', f.id);
             }
         }
         // versioned snapshot — best-effort, never fails the main upload
         try {
-            const { res: sr } = await this._doForm('POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this._histName(), parents: [fid] }, body);
+            const { res: sr } = await this._doForm(tok, 'POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this._histName(), parents: [fid] }, body);
             if (sr.ok) this._pruneGdHistory(tok, fid);
         } catch (_) {}
     },
@@ -328,9 +335,28 @@ const OneDriveService = {
     get clientId() { return (window.__OAUTH_CONFIG && window.__OAUTH_CONFIG.msClientId) || ''; },
     SCOPES: ['Files.ReadWrite.AppFolder'],
     FILE: 'financetracker-data.json',
-    _app: null, _account: null,
+    _app: null, _account: null, _msalReadyPromise: null,
     isConfigured() { return !!this.clientId; },
     isTokenValid() { const a = this._getApp(); return !!(a && a.getAllAccounts().length > 0); },
+    // msal-browser.min.js is loaded with async+defer, so it can still be missing the moment
+    // the app checks for an existing session right after a fresh page load (window.msal is
+    // undefined for a beat), which used to make isTokenValid() report false and pop the
+    // reconnect gate even though the session was actually still valid in storage. Bound-poll
+    // for the script to finish loading before trusting a negative isTokenValid() result.
+    waitUntilReady(timeoutMs = 3000) {
+        if (window.msal) return Promise.resolve(true);
+        if (this._msalReadyPromise) return this._msalReadyPromise;
+        this._msalReadyPromise = new Promise(resolve => {
+            const start = Date.now();
+            const poll = () => {
+                if (window.msal) { resolve(true); return; }
+                if (Date.now() - start >= timeoutMs) { resolve(false); return; }
+                setTimeout(poll, 50);
+            };
+            poll();
+        });
+        return this._msalReadyPromise;
+    },
     _getApp() {
         if (!window.msal || !this.clientId) return null;
         if (!this._app) {
@@ -355,8 +381,12 @@ const OneDriveService = {
     },
     clearToken() { this._account = null; this._app = null; },
     _histName() {
+        // Seconds included — minute-only precision let two saves in the same minute produce
+        // the identical filename, so Drive/OneDrive kept both as separate files instead of
+        // one: version history showed duplicate timestamps, the 5-snapshot prune cap filled
+        // up with near-duplicates faster than expected, and storage grew accordingly.
         const n = new Date(); const p = x => String(x).padStart(2,'0');
-        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}.json`;
+        return `financetracker-${n.getUTCFullYear()}-${p(n.getUTCMonth()+1)}-${p(n.getUTCDate())}-${p(n.getUTCHours())}${p(n.getUTCMinutes())}${p(n.getUTCSeconds())}.json`;
     },
     async _pruneOdHistory(tok) {
         try {
@@ -6237,6 +6267,10 @@ function App() {
             }
             const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
             if (svc.isConfigured()) {
+                (async () => {
+                // OneDrive's SDK loads async+defer and may not be ready yet on a fresh page
+                // load; wait for it so isTokenValid() doesn't spuriously report "no session".
+                if (svc.waitUntilReady) await svc.waitUntilReady();
                 if (svc.isTokenValid()) {
                     setCloudSyncGate('checking');
                     SyncService.download().then(async cloudBackup => {
@@ -6289,6 +6323,7 @@ function App() {
                     // No active session token — prompt user to reconnect before entering app
                     setCloudSyncGate('reconnect-prompt');
                 }
+                })();
             }
         } else if (!confirmed) {
             // skipCount = logins remaining before re-prompt (2 on first skip → hides on login 1 & 2 → shows on login 3)
@@ -6529,8 +6564,15 @@ function App() {
         setCloudGateConnecting(true); setCloudGateError('');
         try {
             await svc.requestToken();
-            setCloudGateConnecting(false); // OAuth complete — clear spinner before transition
-            setCloudSyncGate('checking');
+        } catch {
+            // Only the OAuth step itself failing is actually a pop-up/permissions problem
+            setCloudGateConnecting(false);
+            setCloudGateError('Connection failed — check pop-up permissions and try again.');
+            return;
+        }
+        setCloudGateConnecting(false); // OAuth complete — clear spinner before transition
+        setCloudSyncGate('checking');
+        try {
             const cloudBackup = await SyncService.download();
             if (!cloudBackup) { setCloudSyncGate('idle'); return; }
             // Fail-closed: reject backups that don't belong to the current user
@@ -6557,7 +6599,15 @@ function App() {
                 }
             }
             else { setCloudSyncGate('idle'); }
-        } catch { setCloudGateConnecting(false); setCloudGateError('Connection failed — check pop-up permissions and try again.'); }
+        } catch {
+            // A Drive/network/verification failure here has nothing to do with OAuth pop-ups —
+            // showing the pop-up-permissions message here sent users to re-grant a permission
+            // they already had, with no way to fix the actual problem. Return to the reconnect
+            // screen (instead of leaving the app stuck on the "Checking…" spinner forever) with
+            // wording that matches what actually failed.
+            setCloudSyncGate('reconnect-prompt');
+            setCloudGateError("Connected, but couldn't reach your cloud backup — check your connection and try again.");
+        }
     };
     const handleCloudGateSkip = () => { setCloudSyncGate('idle'); setCloudGateError(''); };
 
