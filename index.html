@@ -838,7 +838,7 @@ class DataService {
     static async deleteCategory(id) {
         await this.initialize();
         const index = this.data.categories.findIndex(category => category.id === id);
-        if (index !== -1) { const deleted = this.data.categories.splice(index, 1)[0]; this.saveCategories(); return deleted; }
+        if (index !== -1) { const deleted = this.data.categories.splice(index, 1)[0]; this.saveCategories(); this.recordDeletion('categories', id); return deleted; }
         return null;
     }
     static async addSubcategory(categoryId, subcategoryName) {
@@ -1161,15 +1161,18 @@ class DataService {
         const ld = (localBackup && localBackup.data) || {};
         const cd = (cloudBackup && cloudBackup.data) || {};
         const merged = { ...cd };
-        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
+        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','networth'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
         // Apply merged deletion log — items deleted on either device are removed
         const deletionLog = mergeDeletionLogs(ld._deletionLog, cd._deletionLog);
-        ['expenses','income','goals','bills','recurring','debts'].forEach(key => {
+        ['expenses','income','goals','bills','recurring','debts','categories','networth'].forEach(key => {
             if (deletionLog[key] && merged[key]) {
                 merged[key] = merged[key].filter(item => !deletionLog[key][String(item.id)]);
             }
         });
         merged._deletionLog = deletionLog;
+        // mergeById's union order is cloud-items-then-local-only-items, not chronological —
+        // the history table reads adjacent entries as consecutive-in-time, so restore date order
+        if (Array.isArray(merged.netWorthHistory)) merged.netWorthHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
         // For scalar blobs (settings, notifSettings), prefer the newer backup's version
         const cloudNewer = new Date(cloudBackup.createdAt || 0) >= new Date(localBackup.createdAt || 0);
         if (!cloudNewer) { if (ld.settings) merged.settings = ld.settings; if (ld.notifSettings) merged.notifSettings = ld.notifSettings; }
@@ -1228,7 +1231,7 @@ class DataService {
     }
     static deleteNetWorthItem(id) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
-        if (i !== -1) { items.splice(i, 1); this.saveNetWorthItems(items); }
+        if (i !== -1) { items.splice(i, 1); this.saveNetWorthItems(items); this.recordDeletion('networth', id); }
         this.autoSaveNetWorthSnapshot();
     }
     static computeNetWorth() {
@@ -1245,7 +1248,9 @@ class DataService {
     }
     static autoSaveNetWorthSnapshot() {
         const history = JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]');
-        history.push({ date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth() });
+        // id is required so mergeBackups() can union history entries across devices instead
+        // of dropping every entry (mergeById skips any item with id == null)
+        history.push({ id: this._uniqueId(), date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth() });
         localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
     }
     static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
@@ -1394,11 +1399,19 @@ function Navigation({ currentScreen, onScreenChange }) {
     );
 }
 
-function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
+function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null }) {
     const [people, setPeople] = useState([]);
     const [formData, setFormData] = useState(() => {
         const peopleList = DataService.getPeople();
         const defaultPerson = peopleList.find(p => p.isDefault);
+        if (editSplitGroup && editSplitGroup.length > 0) {
+            const first = editSplitGroup[0];
+            const total = editSplitGroup.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+            return {
+                amount: total, date: first.date, description: first.description, categoryId: first.categoryId,
+                subcategory: first.subcategory, paidBy: first.paidBy || '', currency: first.currency || 'GBP', tags: first.tags || []
+            };
+        }
         return {
             amount: editExpense ? editExpense.amount : '',
             date: editExpense ? editExpense.date : new Date().toISOString().split('T')[0],
@@ -1410,7 +1423,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
             tags: editExpense ? (editExpense.tags || []) : []
         };
     });
-    const [tagInputRaw, setTagInputRaw] = useState(() => editExpense ? (editExpense.tags || []).join(', ') : '');
+    const [tagInputRaw, setTagInputRaw] = useState(() => {
+        if (editSplitGroup && editSplitGroup.length > 0) return (editSplitGroup[0].tags || []).join(', ');
+        return editExpense ? (editExpense.tags || []).join(', ') : '';
+    });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -1418,14 +1434,19 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
-    const [isSplit, setIsSplit] = useState(false);
-    const [splitParticipants, setSplitParticipants] = useState([]);
-    const [splitMethod, setSplitMethod] = useState('equal');
-    const [customAmounts, setCustomAmounts] = useState({});
+    const [isSplit, setIsSplit] = useState(!!(editSplitGroup && editSplitGroup.length > 0));
+    const [splitParticipants, setSplitParticipants] = useState(() => (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: r.paidBy || 'Me' })) : []));
+    const [splitMethod, setSplitMethod] = useState(() => (editSplitGroup && editSplitGroup.length > 0 ? 'custom' : 'equal'));
+    const [customAmounts, setCustomAmounts] = useState(() => {
+        if (!editSplitGroup) return {};
+        const obj = {};
+        editSplitGroup.forEach(r => { obj[r.id] = r.amount; });
+        return obj;
+    });
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
-    useEffect(() => { if (!editExpense) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
-    useEffect(() => { if (!editExpense) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
+    useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
+    useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
 
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -1450,8 +1471,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         if (tags.some(t => t.length > 30)) { setErrors({ tags: 'Tags must be 30 characters or fewer' }); setIsSubmitting(false); return; }
         const validation = ValidationUtils.validateExpense({ ...formData, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
-        if (!editExpense && isSplit) {
-            if (splitParticipants.length < 2) { setErrors({ general: 'Add at least 2 participants for a split expense.' }); setIsSubmitting(false); return; }
+        if ((!editExpense && !editSplitGroup && isSplit) || editSplitGroup) {
+            if (splitParticipants.length < 2) { setErrors({ general: 'A split needs at least 2 participants.' }); setIsSubmitting(false); return; }
             if (splitMethod === 'custom') {
                 const total = splitParticipants.reduce((sum, p) => sum + (parseFloat(customAmounts[p.id]) || 0), 0);
                 const target = parseFloat(formData.amount);
@@ -1462,6 +1483,25 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
         try {
             let description = formData.description.trim();
             if (!description && selectedCategory) description = selectedCategory.name + ' - ' + formData.subcategory;
+            if (editSplitGroup) {
+                // Batch-update every existing record in the split group instead of creating new
+                // ones — shared fields (date/category/currency/etc.) apply to all, and each
+                // participant's own share is recalculated from the edited total.
+                const sharedFields = { date: formData.date, description, categoryId: parseInt(formData.categoryId), subcategory: formData.subcategory, currency: formData.currency, tags: formData.tags };
+                const totalAmt = parseFloat(formData.amount);
+                const n = splitParticipants.length;
+                const baseShare = Math.round(totalAmt / n * 100) / 100;
+                splitParticipants.forEach((p, i) => {
+                    const share = splitMethod === 'equal'
+                        ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
+                        : parseFloat(customAmounts[p.id] || 0);
+                    DataService.updateExpense(p.id, { ...sharedFields, amount: share, paidBy: p.name });
+                });
+                setShowSuccess(true);
+                setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
+                setIsSubmitting(false);
+                return;
+            }
             const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) };
             if (editExpense) {
                 DataService.updateExpense(editExpense.id, expenseData);
@@ -1494,16 +1534,16 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
     const selectedCategory = categories.find(cat => cat.id === parseInt(formData.categoryId));
 
     if (showSuccess) {
-        return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Expense {editExpense ? 'Updated' : 'Added'} Successfully!</h3></div></div>);
+        return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Expense {editSplitGroup ? 'Split Updated' : editExpense ? 'Updated' : 'Added'} Successfully!</h3></div></div>);
     }
 
     return (
         <div className="screen">
             <div className="screen-header">
                 <button onClick={onCancel} className="btn btn-outline-secondary"><i className="fas fa-arrow-left"></i> Back</button>
-                <h2>{editExpense ? 'Edit Expense' : 'Add New Expense'}</h2>
+                <h2>{editSplitGroup ? 'Edit Split Expense (All Records)' : editExpense ? 'Edit Expense' : 'Add New Expense'}</h2>
             </div>
-            {recentlyUsed.length > 0 && !editExpense && (
+            {recentlyUsed.length > 0 && !editExpense && !editSplitGroup && (
                 <div className="quick-fill-section">
                     <h6>Quick Fill from Recent:</h6>
                     <div className="quick-fill-buttons">
@@ -1527,7 +1567,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                     </select>
                 </div>
                 <div className="form-group">
-                    <label htmlFor="amount">Amount *</label>
+                    <label htmlFor="amount">{editSplitGroup ? 'Total Amount *' : 'Amount *'}</label>
                     <div className="input-group">
                         <span className="input-group-text">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
                         <input type="number" id="amount" className={'form-control ' + (errors.amount ? 'is-invalid' : '')} value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" step="0.01" min="0" />
@@ -1573,43 +1613,50 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                         {errors.subcategory && <div className="invalid-feedback">{errors.subcategory}</div>}
                     </div>
                 )}
-                <div className="form-group">
-                    <label htmlFor="paidBy">Who's Expense (Optional)</label>
-                    {people.length > 0 ? (
-                        <select id="paidBy" className={'form-select ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
-                            <option value="">— Me / My Own —</option>
-                            {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
-                        </select>
-                    ) : (
-                        <input type="text" id="paidBy" className={'form-control ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
-                    )}
-                    {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
-                    <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
-                </div>
-                {!editExpense && (
+                {!editSplitGroup && (
                     <div className="form-group">
-                        <div className="form-check">
-                            <input className="form-check-input" type="checkbox" id="isSplit" checked={isSplit} onChange={e => {
-                                const val = e.target.checked;
-                                setIsSplit(val);
-                                if (val && splitParticipants.length === 0) {
-                                    setSplitParticipants([{ id: 'me', name: formData.paidBy || 'Me' }]);
-                                }
-                            }} />
-                            <label className="form-check-label" htmlFor="isSplit"><i className="fas fa-users me-1"></i>Split this expense between people</label>
-                        </div>
+                        <label htmlFor="paidBy">Who's Expense (Optional)</label>
+                        {people.length > 0 ? (
+                            <select id="paidBy" className={'form-select ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
+                                <option value="">— Me / My Own —</option>
+                                {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
+                            </select>
+                        ) : (
+                            <input type="text" id="paidBy" className={'form-control ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
+                        )}
+                        {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
+                        <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
+                    </div>
+                )}
+                {(!editExpense || editSplitGroup) && (
+                    <div className="form-group">
+                        {!editSplitGroup && (
+                            <div className="form-check">
+                                <input className="form-check-input" type="checkbox" id="isSplit" checked={isSplit} onChange={e => {
+                                    const val = e.target.checked;
+                                    setIsSplit(val);
+                                    if (val && splitParticipants.length === 0) {
+                                        setSplitParticipants([{ id: 'me', name: formData.paidBy || 'Me' }]);
+                                    }
+                                }} />
+                                <label className="form-check-label" htmlFor="isSplit"><i className="fas fa-users me-1"></i>Split this expense between people</label>
+                            </div>
+                        )}
+                        {editSplitGroup && (
+                            <div className="fw-semibold small text-uppercase text-muted"><i className="fas fa-users me-1"></i>Split Participants (shares recalculated on save)</div>
+                        )}
                         {isSplit && (
                             <div className="mt-3 p-3 border rounded" style={{backgroundColor: '#f8f9fa'}}>
                                 <div className="mb-2 fw-semibold small text-uppercase text-muted">Participants</div>
                                 {splitParticipants.map(p => (
                                     <div key={p.id} className="d-flex justify-content-between align-items-center mb-1">
                                         <span className="small">{p.name}{p.id === 'me' ? <span className="text-muted"> (you)</span> : ''}</span>
-                                        {p.id !== 'me' && (
+                                        {!editSplitGroup && p.id !== 'me' && (
                                             <button type="button" className="btn btn-sm btn-outline-danger py-0 px-1" style={{lineHeight:'1.2'}} onClick={() => { setSplitParticipants(prev => prev.filter(x => x.id !== p.id)); setCustomAmounts(prev => { const n = {...prev}; delete n[p.id]; return n; }); }}><i className="fas fa-times"></i></button>
                                         )}
                                     </div>
                                 ))}
-                                {people.filter(p => !splitParticipants.find(s => s.name === p.name)).length > 0 && (
+                                {!editSplitGroup && people.filter(p => !splitParticipants.find(s => s.name === p.name)).length > 0 && (
                                     <select className="form-select form-select-sm mt-2 mb-2" value="" onChange={e => { const person = people.find(p => p.name === e.target.value); if (person) setSplitParticipants(prev => [...prev, { id: person.id, name: person.name }]); }}>
                                         <option value="">+ Add person to split...</option>
                                         {people.filter(p => !splitParticipants.find(s => s.name === p.name)).map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
@@ -1648,7 +1695,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                         )}
                     </div>
                 )}
-                {!editExpense && (
+                {!editExpense && !editSplitGroup && (
                     <div className="form-group">
                         <div className="form-check">
                             <input className="form-check-input" type="checkbox" id="isRecurring" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} />
@@ -1671,7 +1718,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null }) {
                 <div className="form-actions">
                     <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={isSubmitting}>Cancel</button>
                     <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-                        {isSubmitting ? (<><span className="spinner-border spinner-border-sm me-2"></span>{editExpense ? 'Updating...' : 'Adding...'}</>) : (<><i className="fas fa-save me-2"></i>{editExpense ? 'Update Expense' : 'Add Expense'}</>)}
+                        {isSubmitting ? (<><span className="spinner-border spinner-border-sm me-2"></span>{editExpense || editSplitGroup ? 'Updating...' : 'Adding...'}</>) : (<><i className="fas fa-save me-2"></i>{editSplitGroup ? 'Update All Split Records' : editExpense ? 'Update Expense' : 'Add Expense'}</>)}
                     </button>
                 </div>
             </form>
@@ -1686,6 +1733,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [filterDateFrom, setFilterDateFrom] = useState(initialDateFrom || '');
     const [filterDateTo, setFilterDateTo] = useState(initialDateTo || '');
     const [editingExpense, setEditingExpense] = useState(null);
+    const [editingSplitGroupId, setEditingSplitGroupId] = useState(null);
+    const [showEditConfirm, setShowEditConfirm] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [people, setPeople] = useState([]);
@@ -1729,6 +1778,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const handleDeleteSplitGroup = (splitGroupId) => { DataService.deleteExpensesBySplitGroup(splitGroupId); setShowDeleteConfirm(null); onUpdate(); };
     const deletingExpense = showDeleteConfirm ? expenses.find(e => e.id === showDeleteConfirm) : null;
     const deletingIsSplit = !!(deletingExpense && deletingExpense.isSplitRecord && deletingExpense.splitGroupId);
+    const editConfirmExpense = showEditConfirm ? expenses.find(e => e.id === showEditConfirm) : null;
     const handleDuplicateExpense = (expense) => { setDuplicatingExpense(expense); setDuplicateDate('today'); setDuplicateCustomDate(''); setDuplicateDateError(''); };
     const handleConfirmDuplicate = () => {
         const today = new Date().toISOString().split('T')[0];
@@ -1752,6 +1802,10 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
 
     if (editingExpense) {
         return (<ExpenseForm categories={categories} editExpense={editingExpense} onSave={() => { setEditingExpense(null); onUpdate(); }} onCancel={() => setEditingExpense(null)} />);
+    }
+    if (editingSplitGroupId) {
+        const groupRecords = expenses.filter(e => e.splitGroupId === editingSplitGroupId);
+        return (<ExpenseForm categories={categories} editSplitGroup={groupRecords} onSave={() => { setEditingSplitGroupId(null); onUpdate(); }} onCancel={() => setEditingSplitGroupId(null)} />);
     }
 
     return (
@@ -1854,7 +1908,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                     </button>
                                     {openMenuId === expense.id && (
                                         <div className="expense-menu-dropdown">
-                                            <button onClick={() => { setEditingExpense(expense); setOpenMenuId(null); }}><i className="fas fa-edit"></i>Edit</button>
+                                            <button onClick={() => { if (expense.isSplitRecord && expense.splitGroupId) { setShowEditConfirm(expense.id); } else { setEditingExpense(expense); } setOpenMenuId(null); }}><i className="fas fa-edit"></i>Edit</button>
                                             <button onClick={() => { handleDuplicateExpense(expense); setOpenMenuId(null); }}><i className="fas fa-copy"></i>Duplicate</button>
                                             <button className="danger" onClick={() => { setShowDeleteConfirm(expense.id); setOpenMenuId(null); }}><i className="fas fa-trash"></i>Delete</button>
                                         </div>
@@ -1926,6 +1980,23 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                 ) : (
                                     <button type="button" className="btn btn-danger" onClick={() => handleDeleteExpense(showDeleteConfirm)}>Delete</button>
                                 )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showEditConfirm && editConfirmExpense && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Edit Split Expense</h5></div>
+                            <div className="modal-body">
+                                <p>This expense is part of a split. Edit just this record, or edit all records in this split (recalculates everyone's share)?</p>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowEditConfirm(null)}>Cancel</button>
+                                <button type="button" className="btn btn-outline-primary" onClick={() => { setEditingExpense(editConfirmExpense); setShowEditConfirm(null); }}>Edit just this record</button>
+                                <button type="button" className="btn btn-primary" onClick={() => { setEditingSplitGroupId(editConfirmExpense.splitGroupId); setShowEditConfirm(null); }}>Edit all records in this split</button>
                             </div>
                         </div>
                     </div>
@@ -6229,7 +6300,15 @@ function App() {
                         } catch (_) { /* cloud check failed — proceed with local-only upload */ }
                         const signedBackup = await signBackupForUpload(backupToUpload, currentUser);
                         const result = await SyncService.upload(signedBackup);
-                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt); }
+                        if (result.status === 'success') {
+                            setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt);
+                            // Reconcile lastSaveTime with what we actually uploaded — otherwise it stays
+                            // pinned to the pre-upload stamp (set above by saveLatestBackup()), which is
+                            // always slightly older than backupToUpload.createdAt. On the next reload/login
+                            // the cloud-vs-local check then sees cloudTime > localTime and treats our own
+                            // just-uploaded data as "newer than local", triggering a spurious re-merge.
+                            if (backupToUpload.createdAt) localStorage.setItem('financeApp_lastSaveTime', backupToUpload.createdAt);
+                        }
                         else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
                         else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
                     } catch (_) { setSyncStatus('error'); }
