@@ -6286,6 +6286,10 @@ function App() {
     );
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
+    // Coalesces bursts of handleDataUpdate() calls (e.g. a 50-row CSV import firing one
+    // save event per row) into a single download+merge+upload cycle, instead of one full
+    // cloud round-trip per call — avoiding Drive/OneDrive per-user rate limits (HTTP 429).
+    const cloudSyncDebounceRef = React.useRef(null);
     const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
     const [cloudRestoreData, setCloudRestoreData] = useState(null);
     const [showCloudHistory, setShowCloudHistory] = useState(false);
@@ -6488,6 +6492,57 @@ function App() {
         loadData();
     }, []);
 
+    // The actual download+merge+upload cloud round-trip — runs once per debounce window,
+    // no matter how many handleDataUpdate() calls fed into it (see cloudSyncDebounceRef above).
+    const performCloudSync = async () => {
+        if (!SyncService.isCloudEnabled()) return;
+        setSyncStatus('syncing');
+        try {
+            // Download-first: merge any changes uploaded by another device
+            // before writing our snapshot, so neither device loses data.
+            let backupToUpload = DataService.createBackup();
+            try {
+                const cloudBackup = await SyncService.download();
+                if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
+                    const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                    if (isSignatureAcceptable(sigResult)) {
+                        const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
+                        const lastSync = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
+                        if (cloudTime > lastSync) {
+                            // Another device has uploaded since our last sync — merge
+                            const merged = DataService.mergeBackups(backupToUpload, cloudBackup);
+                            DataService.restoreBackup(merged);
+                            DataService.isInitialized = false;
+                            const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
+                            setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
+                            setPeople(DataService.getPeople());
+                            backupToUpload = merged;
+                        }
+                    }
+                }
+            } catch (_) { /* cloud check failed — proceed with local-only upload */ }
+            const signedBackup = await signBackupForUpload(backupToUpload, currentUser);
+            const result = await SyncService.upload(signedBackup);
+            if (result.status === 'success') {
+                setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt);
+                // Reconcile lastSaveTime with what we actually uploaded — otherwise it stays
+                // pinned to the pre-upload stamp (set above by saveLatestBackup()), which is
+                // always slightly older than backupToUpload.createdAt. On the next reload/login
+                // the cloud-vs-local check then sees cloudTime > localTime and treats our own
+                // just-uploaded data as "newer than local", triggering a spurious re-merge.
+                if (backupToUpload.createdAt) localStorage.setItem('financeApp_lastSaveTime', backupToUpload.createdAt);
+            }
+            else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
+            else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
+        } catch (_) { setSyncStatus('error'); }
+    };
+    const CLOUD_SYNC_DEBOUNCE_MS = 3000;
+    const scheduleCloudSync = () => {
+        if (cloudSyncDebounceRef.current) clearTimeout(cloudSyncDebounceRef.current);
+        cloudSyncDebounceRef.current = setTimeout(() => { cloudSyncDebounceRef.current = null; performCloudSync(); }, CLOUD_SYNC_DEBOUNCE_MS);
+    };
+    const cancelScheduledCloudSync = () => { if (cloudSyncDebounceRef.current) { clearTimeout(cloudSyncDebounceRef.current); cloudSyncDebounceRef.current = null; } };
+
     const handleDataUpdate = async () => {
         try {
             const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
@@ -6501,54 +6556,17 @@ function App() {
             // the cloud backup with empty data.
             const hasSavedLocally = !!localStorage.getItem('financeApp_lastSaveTime');
             DataService.saveLatestBackup();
-            if (SyncService.isCloudEnabled()) {
-                if (hasSavedLocally) {
-                    setSyncStatus('syncing');
-                    try {
-                        // Download-first: merge any changes uploaded by another device
-                        // before writing our snapshot, so neither device loses data.
-                        let backupToUpload = DataService.createBackup();
-                        try {
-                            const cloudBackup = await SyncService.download();
-                            if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
-                                const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
-                                if (isSignatureAcceptable(sigResult)) {
-                                    const cloudTime = new Date(cloudBackup.createdAt || 0).getTime();
-                                    const lastSync = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
-                                    if (cloudTime > lastSync) {
-                                        // Another device has uploaded since our last sync — merge
-                                        const merged = DataService.mergeBackups(backupToUpload, cloudBackup);
-                                        DataService.restoreBackup(merged);
-                                        DataService.isInitialized = false;
-                                        const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
-                                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                                        setPeople(DataService.getPeople());
-                                        backupToUpload = merged;
-                                    }
-                                }
-                            }
-                        } catch (_) { /* cloud check failed — proceed with local-only upload */ }
-                        const signedBackup = await signBackupForUpload(backupToUpload, currentUser);
-                        const result = await SyncService.upload(signedBackup);
-                        if (result.status === 'success') {
-                            setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt);
-                            // Reconcile lastSaveTime with what we actually uploaded — otherwise it stays
-                            // pinned to the pre-upload stamp (set above by saveLatestBackup()), which is
-                            // always slightly older than backupToUpload.createdAt. On the next reload/login
-                            // the cloud-vs-local check then sees cloudTime > localTime and treats our own
-                            // just-uploaded data as "newer than local", triggering a spurious re-merge.
-                            if (backupToUpload.createdAt) localStorage.setItem('financeApp_lastSaveTime', backupToUpload.createdAt);
-                        }
-                        else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
-                        else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
-                    } catch (_) { setSyncStatus('error'); }
-                }
-            }
+            // Debounced: a burst of calls (e.g. one per row of a CSV import) coalesces into
+            // a single cloud round-trip fired after the burst settles, instead of one per call.
+            if (SyncService.isCloudEnabled() && hasSavedLocally) scheduleCloudSync();
         } catch (error) { console.error('Error updating data:', error); }
     };
 
     const handleRegister = (user) => { setCurrentUser(user); };
     const handleLogout = () => {
+        // A pending debounced sync must not fire after logout — it would read the
+        // about-to-be-wiped local data and could overwrite the cloud backup with it.
+        cancelScheduledCloudSync();
         const pref = localStorage.getItem('financeApp_storagePreference') || '';
         if (pref === 'gdrive') GDriveService.clearToken();
         else if (pref === 'onedrive') OneDriveService.clearToken();
@@ -6644,6 +6662,8 @@ function App() {
     };
     const handleSyncNow = async () => {
         if (!SyncService.isCloudEnabled()) return;
+        // A manual sync makes any pending debounced one from a recent edit redundant.
+        cancelScheduledCloudSync();
         const svc = storagePreference === 'gdrive' ? GDriveService : OneDriveService;
         // If no valid token, show reconnect instead of trying (and failing with session-expired)
         if (!svc || !svc.isTokenValid()) { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); return; }
