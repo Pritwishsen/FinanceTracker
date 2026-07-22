@@ -196,6 +196,22 @@ const ValidationUtils = {
     },
     formatDate: (date) => {
         return new Date(date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    },
+    getPasswordStrength: (password) => {
+        if (!password) return { label: '', className: '', percent: 0 };
+        let categories = 0;
+        if (/[a-z]/.test(password)) categories++;
+        if (/[A-Z]/.test(password)) categories++;
+        if (/[0-9]/.test(password)) categories++;
+        if (/[^A-Za-z0-9]/.test(password)) categories++;
+        let score = 0;
+        if (password.length >= 8) score++;
+        if (password.length >= 12) score++;
+        if (categories >= 2) score++;
+        if (categories >= 3) score++;
+        if (score <= 1) return { label: 'Weak', className: 'weak', percent: 33 };
+        if (score <= 3) return { label: 'Fair', className: 'fair', percent: 66 };
+        return { label: 'Strong', className: 'strong', percent: 100 };
     }
 };
 window.ValidationUtils = ValidationUtils;
@@ -273,7 +289,7 @@ const GDriveService = {
         const body = JSON.stringify(json);
         const cached = localStorage.getItem('ftGdFileId');
         if (cached) {
-            const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, {}, body);
+            const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${cached}?uploadType=multipart`, { name: this.FILE }, body);
             if (res.status === 404) { localStorage.removeItem('ftGdFileId'); return this.upload(json); }
             if (!res.ok) throw new Error('gdrive_upload:' + res.status);
         } else {
@@ -282,7 +298,7 @@ const GDriveService = {
             const { files } = await sr.json();
             if (files && files.length) {
                 localStorage.setItem('ftGdFileId', files[0].id);
-                const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, {}, body);
+                const { res } = await this._doForm(tok, 'PATCH', `https://www.googleapis.com/upload/drive/v3/files/${files[0].id}?uploadType=multipart`, { name: this.FILE }, body);
                 if (!res.ok) throw new Error('gdrive_upload:' + res.status);
             } else {
                 const { res } = await this._doForm(tok, 'POST', `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`, { name: this.FILE, parents: [fid] }, body);
@@ -440,9 +456,22 @@ const OneDriveService = {
 
 // ── Unified SyncService ────────────────────────────────────────────────────
 const SyncService = {
+    DOWNLOAD_TIMEOUT_MS: 15000,
     pref() { return localStorage.getItem('financeApp_storagePreference') || 'local'; },
     isCloudEnabled() { const p = this.pref(); return p === 'gdrive' || p === 'onedrive'; },
     svc() { const p = this.pref(); if (p === 'gdrive') return GDriveService; if (p === 'onedrive') return OneDriveService; return null; },
+    // Cloud downloads use plain fetch(), which has no built-in timeout — an unresponsive
+    // provider (dead connection, slow mobile network) leaves the promise pending forever,
+    // so any UI gated on it (e.g. the login "checking" spinner) never resolves.
+    _withTimeout(promise, ms) {
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('sync_timeout')), ms);
+            promise.then(
+                v => { clearTimeout(timer); resolve(v); },
+                e => { clearTimeout(timer); reject(e); }
+            );
+        });
+    },
     async upload(json) {
         const s = this.svc(); if (!s) return { status: 'local' };
         if (!s.isConfigured()) return { status: 'not_configured' };
@@ -459,9 +488,9 @@ const SyncService = {
             return { status: 'error' };
         }
     },
-    async download() { const s = this.svc(); if (!s || !s.isConfigured()) return null; return s.download(); },
-    async listHistory() { const s = this.svc(); if (!s || !s.isConfigured()) return []; try { return await s.listHistory(); } catch (_) { return []; } },
-    async downloadVersion(id) { const s = this.svc(); if (!s) return null; return s.downloadById(id); }
+    async download() { const s = this.svc(); if (!s || !s.isConfigured()) return null; return this._withTimeout(s.download(), this.DOWNLOAD_TIMEOUT_MS); },
+    async listHistory() { const s = this.svc(); if (!s || !s.isConfigured()) return []; try { return await this._withTimeout(s.listHistory(), this.DOWNLOAD_TIMEOUT_MS); } catch (_) { return []; } },
+    async downloadVersion(id) { const s = this.svc(); if (!s) return null; return this._withTimeout(s.downloadById(id), this.DOWNLOAD_TIMEOUT_MS); }
 };
 
 // ── Cloud Restore Modal ────────────────────────────────────────────────────
@@ -1008,7 +1037,7 @@ class DataService {
         this.data.categories.forEach(category => {
             const categoryExpenses = monthlyExpenses.filter(expense => expense.categoryId === category.id);
             const totalSpent = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0);
-            const categoryData = { id: category.id, name: category.name, budget: category.monthlyBudget || 0, spent: totalSpent, remaining: (category.monthlyBudget || 0) - totalSpent, percentage: category.monthlyBudget > 0 ? (totalSpent / category.monthlyBudget) * 100 : 0, subcategories: [] };
+            const categoryData = { id: category.id, name: category.name, budget: category.monthlyBudget || 0, spent: totalSpent, remaining: (category.monthlyBudget || 0) - totalSpent, percentage: category.monthlyBudget > 0 ? (totalSpent / category.monthlyBudget) * 100 : 0, notificationThreshold: category.notificationThreshold || 80, subcategories: [] };
             category.subcategories.forEach(subcatName => {
                 const subcatExpenses = categoryExpenses.filter(expense => expense.subcategory === subcatName);
                 const subcatSpent = subcatExpenses.reduce((sum, expense) => sum + expense.amount, 0);
@@ -1025,7 +1054,7 @@ class DataService {
         budgetSummary.forEach(item => {
             if (item.budget > 0) {
                 if (item.percentage >= 100) alerts.push({ type: 'over', categoryId: item.id, name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
-                else if (item.percentage >= 80) alerts.push({ type: 'near', categoryId: item.id, name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
+                else if (item.percentage >= item.notificationThreshold) alerts.push({ type: 'near', categoryId: item.id, name: item.name, pct: item.percentage, spent: item.spent, budget: item.budget });
             }
         });
         return alerts;
@@ -1281,10 +1310,12 @@ class DataService {
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(); return item;
     }
-    static updateNetWorthItem(id, updates) {
+    // skipHistory: true for corrections to the base amount (typos, data-entry fixes) so they
+    // don't get recorded as a net-worth movement; a real valuation update should log normally.
+    static updateNetWorthItem(id, updates, { skipHistory = false } = {}) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
         if (i !== -1) { items[i] = { ...items[i], ...updates, updatedAt: new Date().toISOString() }; this.saveNetWorthItems(items); }
-        this.autoSaveNetWorthSnapshot();
+        if (!skipHistory) this.autoSaveNetWorthSnapshot();
     }
     static deleteNetWorthItem(id) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
@@ -1311,6 +1342,7 @@ class DataService {
         localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
     }
     static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
+    static clearNetWorthHistory() { localStorage.setItem('financeApp_netWorthHistory', '[]'); }
     static clearAllUserData() {
         // Wipe every financeApp_* key and cloud file-ID cache from localStorage
         Object.keys(localStorage)
@@ -1601,7 +1633,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     };
 
     const handleQuickFill = (recentExpense) => {
-        setFormData({ amount: '', date: new Date().toISOString().split('T')[0], description: recentExpense.description, categoryId: recentExpense.categoryId, subcategory: recentExpense.subcategory, paidBy: recentExpense.paidBy || '', currency: formData.currency });
+        setFormData(prev => ({ ...prev, amount: '', date: new Date().toISOString().split('T')[0], categoryId: recentExpense.categoryId, subcategory: recentExpense.subcategory, paidBy: recentExpense.paidBy || '' }));
     };
 
     const selectedCategory = categories.find(cat => cat.id === parseInt(formData.categoryId));
@@ -1621,7 +1653,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     <h6>Quick Fill from Recent:</h6>
                     <div className="quick-fill-buttons">
                         {recentlyUsed.map((item, index) => (
-                            <button key={index} type="button" className="btn btn-sm btn-outline-primary" onClick={() => handleQuickFill({ description: item.category.name + ' - ' + item.subcategory, categoryId: item.category.id, subcategory: item.subcategory })}>
+                            <button key={index} type="button" className="btn btn-sm btn-outline-primary" onClick={() => handleQuickFill({ categoryId: item.category.id, subcategory: item.subcategory })}>
                                 {item.category.name} - {item.subcategory}
                             </button>
                         ))}
@@ -2121,7 +2153,9 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     const handleAddSubcategory = (categoryId) => { if (!newSubcategoryName.trim()) { setErrors({ subcategory: 'Subcategory name is required' }); return; } const category = categories.find(cat => cat.id === categoryId); if (category.subcategories.includes(newSubcategoryName.trim())) { setErrors({ subcategory: 'Subcategory already exists' }); return; } DataService.addSubcategory(categoryId, newSubcategoryName.trim()); setNewSubcategoryName(''); setAddingSubcategoryTo(null); setErrors({}); onUpdate(); };
     const handleDeleteSubcategory = async (categoryId, subcategoryName) => { const expensesUsingSubcategory = await DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: `Cannot delete subcategory. It's being used by ${expensesUsingSubcategory.length} expense(s).` }); return; } await DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
     const handleBudgetChange = (categoryId, type, subcategory, value) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; setBudgetChanges(prev => ({ ...prev, [key]: value })); };
-    const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency); } } await onUpdate(); setBudgetChanges({}); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
+    const handleThresholdChange = (categoryId, value) => { setBudgetChanges(prev => ({ ...prev, ['threshold-' + categoryId]: value })); };
+    const getCurrentThresholdValue = (categoryId) => { const key = 'threshold-' + categoryId; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); return (category && category.notificationThreshold) || 80; };
+    const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency); } else if (key.startsWith('threshold-')) { const categoryId = parseInt(key.replace('threshold-', '')); const clamped = Math.min(100, Math.max(50, parseInt(value) || 80)); await DataService.updateCategory(categoryId, { notificationThreshold: clamped }); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency); } } await onUpdate(); setBudgetChanges({}); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
     const toggleBudgetMode = async (categoryId) => { const newMode = !categoryBudgetModes[categoryId]; setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: newMode })); await DataService.updateCategory(categoryId, { useSubcategoryBudgets: newMode }); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); onUpdate(); };
     const getCurrentBudgetValue = (categoryId, type, subcategory) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); if (!category) return ''; if (type === 'category') return category.monthlyBudget || ''; else return (category.subcategoryBudgets && category.subcategoryBudgets[subcategory]) || ''; };
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
@@ -2207,6 +2241,13 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
                                         })}
                                     </div>
                                 )}
+                                <div className="budget-input-row">
+                                    <label className="budget-label"><i className="fas fa-bell"></i> Notify me at:</label>
+                                    <div className="input-group input-group-sm budget-input">
+                                        <input type="number" className="form-control" value={getCurrentThresholdValue(category.id)} onChange={(e) => handleThresholdChange(category.id, e.target.value)} min="50" max="100" step="1" />
+                                        <span className="input-group-text">%</span>
+                                    </div>
+                                </div>
                                 {(() => {
                                     const useSubcategoryBudgets = categoryBudgetModes[category.id];
                                     let totalCategoryBudget = 0;
@@ -4631,6 +4672,15 @@ function RegistrationScreen({ onRegister, onLogin }) {
                                         <button type="button" className="btn btn-outline-secondary" onClick={() => setShowPassword(v => !v)} tabIndex={-1}><i className={'fas fa-' + (showPassword ? 'eye-slash' : 'eye')}></i></button>
                                         {errors.password && <div className="invalid-feedback">{errors.password}</div>}
                                     </div>
+                                    {formData.password && (() => {
+                                        const strength = ValidationUtils.getPasswordStrength(formData.password);
+                                        return (
+                                            <div className="password-strength">
+                                                <div className="password-strength-bar"><div className={'password-strength-fill ' + strength.className} style={{width: strength.percent + '%'}}></div></div>
+                                                <span className={'password-strength-label ' + strength.className}>{strength.label}</span>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                                 <div className="mb-4">
                                     <label className="form-label fw-semibold">Confirm Password</label>
@@ -5442,6 +5492,10 @@ function NetWorth({ defaultCurrency }) {
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
+    const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
+    const [valuationItem, setValuationItem] = useState(null);
+    const [valuationValue, setValuationValue] = useState('');
+    const [valuationError, setValuationError] = useState('');
     const [selectedPerson, setSelectedPerson] = useState('own');
     const [people, setPeople] = useState(() => DataService.getPeople());
     const [allExpenses, setAllExpenses] = useState(() => DataService.data.expenses || []);
@@ -5527,7 +5581,9 @@ function NetWorth({ defaultCurrency }) {
         if (!form.value || parseFloat(form.value) <= 0) errors.value = 'Value must be greater than 0';
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
         if (editingItem) {
-            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' });
+            // Base-amount correction (typo/data-entry fix) — not a real valuation movement,
+            // so it must not show up as a gain/loss in the history "Change" column.
+            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' }, { skipHistory: true });
         } else {
             DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' });
         }
@@ -5537,6 +5593,18 @@ function NetWorth({ defaultCurrency }) {
     };
 
     const handleDelete = (id) => { DataService.deleteNetWorthItem(id); setShowDeleteModal(null); reload(); };
+
+    const openValuationForm = (item) => { setValuationItem(item); setValuationValue(String(item.value)); setValuationError(''); };
+
+    const handleValuationSubmit = (e) => {
+        e.preventDefault();
+        if (!valuationValue || parseFloat(valuationValue) <= 0) { setValuationError('Value must be greater than 0'); return; }
+        // A real valuation update — logged to history so the change shows as a gain/loss.
+        DataService.updateNetWorthItem(valuationItem.id, { value: parseFloat(valuationValue) });
+        setValuationItem(null);
+        setValuationValue('');
+        reload();
+    };
 
     const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
     const assetItems = visibleItems.filter(i => i.type === 'asset');
@@ -5559,7 +5627,10 @@ function NetWorth({ defaultCurrency }) {
                 {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
             </div>
             <div style={{display:'flex',gap:'4px',flexShrink:0}}>
-                <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => openEditForm(item)}>
+                <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Update valuation (logs a change)" onClick={() => openValuationForm(item)}>
+                    <i className="fas fa-chart-line"></i>
+                </button>
+                <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Edit base amount (no change logged)" onClick={() => openEditForm(item)}>
                     <i className="fas fa-pencil-alt"></i>
                 </button>
                 <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(item.id)}>
@@ -5735,10 +5806,17 @@ function NetWorth({ defaultCurrency }) {
 
             {/* History table */}
             <div style={{padding:'0 1rem 1rem'}}>
-                <button type="button" className="btn btn-sm btn-outline-secondary w-100 mb-2" onClick={() => setShowHistory(v => !v)}>
-                    <i className={'fas fa-' + (showHistory ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
-                    {showHistory ? 'Hide' : 'Show'} History ({sortedHistory.length} snapshots)
-                </button>
+                <div style={{display:'flex',gap:'6px',marginBottom:'8px'}}>
+                    <button type="button" className="btn btn-sm btn-outline-secondary flex-grow-1" onClick={() => setShowHistory(v => !v)}>
+                        <i className={'fas fa-' + (showHistory ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
+                        {showHistory ? 'Hide' : 'Show'} History ({sortedHistory.length} snapshots)
+                    </button>
+                    {sortedHistory.length > 0 && (
+                        <button type="button" className="btn btn-sm btn-outline-danger" title="Delete all history" onClick={() => setShowClearHistoryConfirm(true)}>
+                            <i className="fas fa-trash-alt"></i>
+                        </button>
+                    )}
+                </div>
                 {showHistory && (
                     sortedHistory.length === 0
                         ? <div style={{textAlign:'center',padding:'1rem',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No history yet. Add your first asset or liability above.</div>
@@ -5789,6 +5867,50 @@ function NetWorth({ defaultCurrency }) {
                                 <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(showDeleteModal)}><i className="fas fa-trash me-1"></i>Delete</button>
                             </div>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Clear all history modal */}
+            {showClearHistoryConfirm && (
+                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header border-danger">
+                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All History?</h5>
+                            </div>
+                            <div className="modal-body">
+                                <p>You are about to permanently delete all <strong>{sortedHistory.length} net worth snapshot{sortedHistory.length !== 1 ? 's' : ''}</strong>.</p>
+                                <p className="mb-0">Your assets and liabilities themselves will not be affected — only the historical trend is cleared.</p>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearHistoryConfirm(false)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearNetWorthHistory(); setShowClearHistoryConfirm(false); reload(); }}>
+                                    <i className="fas fa-trash-alt me-1"></i>Delete All
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Update valuation modal */}
+            {valuationItem && (
+                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <form className="modal-content" onSubmit={handleValuationSubmit}>
+                            <div className="modal-header"><h5 className="modal-title">Update Valuation — {valuationItem.name}</h5></div>
+                            <div className="modal-body">
+                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current: {fmt(valuationItem.value, valuationItem.currency)}. This records a real change and will show as a gain/loss in the history below.</p>
+                                <label className="form-label">New Value ({valuationItem.currency})</label>
+                                <input type="number" step="0.01" className={'form-control' + (valuationError ? ' is-invalid' : '')} value={valuationValue} onChange={e => { setValuationValue(e.target.value); setValuationError(''); }} autoFocus />
+                                {valuationError && <div className="invalid-feedback">{valuationError}</div>}
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setValuationItem(null)}>Cancel</button>
+                                <button type="submit" className="btn btn-success btn-sm"><i className="fas fa-chart-line me-1"></i>Save Valuation</button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}
