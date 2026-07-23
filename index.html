@@ -3492,11 +3492,36 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     );
 }
 
+// Builds a CSV blob from headers + rows (quote-escaping values that contain
+// commas/quotes/newlines) and triggers a browser download. Shared by ExportData
+// and BulkUpload's template/failed-rows downloads.
+function downloadCSV(filename, headers, rows) {
+    const esc = (val) => { const s = String(val == null ? '' : val); return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const lines = [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+}
+
+const BULK_UPLOAD_MAX_ROWS = 1000;
+const BULK_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
+
 function BulkUpload({ categories, onUpdate }) {
     const [activeTab, setActiveTab] = useState('expenses');
     const [parsedRows, setParsedRows] = useState([]);
+    const [originalHeaderCols, setOriginalHeaderCols] = useState([]);
+    const [fileError, setFileError] = useState('');
+    const [selectedFileName, setSelectedFileName] = useState('');
     const [importResult, setImportResult] = useState(null);
+    const [isImporting, setIsImporting] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
+    const [showOnlyErrors, setShowOnlyErrors] = useState(false);
+    const [currentPage, setCurrentPage] = useState(1);
     const fileInputRef = React.useRef(null);
+    const ROWS_PER_PAGE = 50;
 
     const validCurrencies = ['GBP', 'EUR', 'USD', 'INR'];
 
@@ -3536,15 +3561,30 @@ function BulkUpload({ categories, onUpdate }) {
         return `${year}-${pad(month)}-${pad(day)}`;
     };
 
-    const handleFileSelect = (e) => {
+    // Shared by the file picker and the drag-and-drop zone so both paths go
+    // through identical validation and parsing.
+    const processFile = (file) => {
         setImportResult(null);
-        const file = e.target.files[0];
-        if (!file) { setParsedRows([]); return; }
+        setFileError('');
+        setParsedRows([]);
+        setOriginalHeaderCols([]);
+        setSelectedFileName(file.name);
+
+        if (file.size > BULK_UPLOAD_MAX_BYTES) {
+            setFileError(`This file is ${(file.size / (1024 * 1024)).toFixed(1)}MB, which exceeds the 5MB limit. Please split it into smaller files.`);
+            return;
+        }
+
         const reader = new FileReader();
         reader.onload = (evt) => {
             const text = evt.target.result;
             const lines = text.split(/\r?\n/).filter(l => l.trim());
-            if (lines.length < 2) { setParsedRows([]); return; }
+            if (lines.length < 2) { setFileError('The file must contain a header row and at least one data row.'); return; }
+            if (lines.length - 1 > BULK_UPLOAD_MAX_ROWS) {
+                setFileError(`This file has ${lines.length - 1} rows, which exceeds the ${BULK_UPLOAD_MAX_ROWS}-row limit. Please split it into smaller files.`);
+                return;
+            }
+            setOriginalHeaderCols(parseCSVLine(lines[0]));
             const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().trim());
 
             if (activeTab === 'expenses') {
@@ -3552,7 +3592,7 @@ function BulkUpload({ categories, onUpdate }) {
                 const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by'];
                 expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
-                    setParsedRows([{ error: 'Missing required columns: Date, Amount, Category, Sub Category', raw: lines[0] }]);
+                    setFileError('Missing required columns: Date, Amount, Category, Sub Category');
                     return;
                 }
                 const rows = [];
@@ -3608,7 +3648,7 @@ function BulkUpload({ categories, onUpdate }) {
                 const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income"];
                 incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['source of income'] === undefined) {
-                    setParsedRows([{ error: 'Missing required columns: Date, Amount, Source of Income', raw: lines[0] }]);
+                    setFileError('Missing required columns: Date, Amount, Source of Income');
                     return;
                 }
                 const rows = [];
@@ -3653,46 +3693,96 @@ function BulkUpload({ categories, onUpdate }) {
         reader.readAsText(file);
     };
 
-    const handleImport = async () => {
-        const validRows = parsedRows.filter(r => !r.error);
-        let imported = 0;
-        for (const row of validRows) {
-            if (activeTab === 'expenses') {
-                await DataService.addExpense({
-                    amount: row.amount,
-                    currency: row.currency,
-                    date: row.date,
-                    description: row.description,
-                    categoryId: row.categoryId,
-                    subcategory: row.subcategory,
-                    paidBy: row.paidBy
-                });
-            } else {
-                await DataService.addIncome({
-                    amount: row.amount,
-                    currency: row.currency,
-                    date: row.date,
-                    source: row.source,
-                    description: row.description,
-                    paidBy: row.paidBy
-                });
-            }
-            imported++;
+    const handleFileSelect = (e) => {
+        const file = e.target.files[0];
+        if (file) processFile(file);
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+        if (isImporting) return;
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (file) processFile(file);
+    };
+
+    const handleDownloadTemplate = () => {
+        if (activeTab === 'expenses') {
+            const exampleCat = categories[0];
+            const exampleSub = exampleCat && exampleCat.subcategories && exampleCat.subcategories[0];
+            downloadCSV('financetracker-expenses-template.csv',
+                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By'],
+                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '']]);
+        } else {
+            downloadCSV('financetracker-income-template.csv',
+                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income"],
+                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '']]);
         }
-        const errorCount = parsedRows.filter(r => r.error).length;
-        setImportResult({ imported, errors: errorCount });
-        setParsedRows([]);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        onUpdate();
+    };
+
+    const handleDownloadFailedRows = () => {
+        const failed = parsedRows.filter(r => r.error);
+        if (failed.length === 0) return;
+        const headers = [...originalHeaderCols, 'Error'];
+        const rows = failed.map(r => [...parseCSVLine(r.raw), r.error]);
+        downloadCSV(`financetracker-${activeTab}-failed-rows.csv`, headers, rows);
+    };
+
+    const handleImport = async () => {
+        setIsImporting(true);
+        try {
+            const validRows = parsedRows.filter(r => !r.error);
+            let imported = 0;
+            for (const row of validRows) {
+                if (activeTab === 'expenses') {
+                    await DataService.addExpense({
+                        amount: row.amount,
+                        currency: row.currency,
+                        date: row.date,
+                        description: row.description,
+                        categoryId: row.categoryId,
+                        subcategory: row.subcategory,
+                        paidBy: row.paidBy
+                    });
+                } else {
+                    await DataService.addIncome({
+                        amount: row.amount,
+                        currency: row.currency,
+                        date: row.date,
+                        source: row.source,
+                        description: row.description,
+                        paidBy: row.paidBy
+                    });
+                }
+                imported++;
+            }
+            const errorCount = parsedRows.filter(r => r.error).length;
+            setImportResult({ imported, errors: errorCount, fileName: selectedFileName });
+            setParsedRows([]);
+            setSelectedFileName('');
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            onUpdate();
+        } finally {
+            setIsImporting(false);
+        }
     };
 
     const validCount = parsedRows.filter(r => !r.error).length;
     const errorCount = parsedRows.filter(r => r.error).length;
+    const displayRows = showOnlyErrors ? parsedRows.filter(r => r.error) : parsedRows;
+    const totalPages = Math.max(1, Math.ceil(displayRows.length / ROWS_PER_PAGE));
+    const pageRows = displayRows.slice((currentPage - 1) * ROWS_PER_PAGE, currentPage * ROWS_PER_PAGE);
+
+    useEffect(() => { setCurrentPage(1); }, [parsedRows, showOnlyErrors]);
 
     const resetOnTabChange = (tab) => {
+        if (isImporting) return;
         setActiveTab(tab);
         setParsedRows([]);
+        setFileError('');
         setImportResult(null);
+        setSelectedFileName('');
+        setShowOnlyErrors(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -3702,45 +3792,84 @@ function BulkUpload({ categories, onUpdate }) {
                 <h2>Bulk Upload</h2>
             </div>
             <ul className="nav nav-tabs" style={{marginBottom: '1rem'}}>
-                <li className="nav-item">
-                    <button className={'nav-link ' + (activeTab === 'expenses' ? 'active' : '')} onClick={() => resetOnTabChange('expenses')}>Expenses</button>
+                {/* No "nav-item" class here: the app defines a global .nav-item rule for the
+                    bottom navigation bar (flex-column, max-width 70px) that collides with and
+                    breaks Bootstrap's unrelated nav-tabs <li> when reusing the same class name. */}
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'expenses' ? 'active' : '')} onClick={() => resetOnTabChange('expenses')} disabled={isImporting}>Expenses</button>
                 </li>
-                <li className="nav-item">
-                    <button className={'nav-link ' + (activeTab === 'income' ? 'active' : '')} onClick={() => resetOnTabChange('income')}>Income</button>
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'income' ? 'active' : '')} onClick={() => resetOnTabChange('income')} disabled={isImporting}>Income</button>
                 </li>
             </ul>
 
             {importResult && (
                 <div className="alert alert-info">
                     <i className="fas fa-check-circle me-2"></i>
-                    Imported {importResult.imported} rows.
+                    Imported {importResult.imported} row{importResult.imported !== 1 ? 's' : ''}{importResult.fileName ? <> from <strong>{importResult.fileName}</strong></> : ''}.
                     {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were skipped.`}
                 </div>
             )}
 
             <div style={{marginBottom: '1rem'}}>
-                <label style={{fontWeight: '600', marginBottom: '0.5rem', display: 'block'}}>
-                    Select CSV File
-                </label>
-                <input ref={fileInputRef} type="file" className="form-control" accept=".csv" onChange={handleFileSelect} />
+                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem'}}>
+                    <label style={{fontWeight: '600', margin: 0}}>Select CSV File</label>
+                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={handleDownloadTemplate}>
+                        <i className="fas fa-download me-1"></i>Download Template
+                    </button>
+                </div>
+                <div
+                    onDragOver={e => { e.preventDefault(); if (!isImporting) setIsDragOver(true); }}
+                    onDragLeave={() => setIsDragOver(false)}
+                    onDrop={handleDrop}
+                    style={{
+                        border: '2px dashed ' + (isDragOver ? '#4a6cf7' : '#ced4da'),
+                        borderRadius: '8px',
+                        padding: '0.75rem',
+                        background: isDragOver ? '#eef2ff' : 'transparent',
+                        transition: 'all 0.15s',
+                        opacity: isImporting ? 0.6 : 1
+                    }}
+                >
+                    <input ref={fileInputRef} type="file" className="form-control" accept=".csv" onChange={handleFileSelect} disabled={isImporting} />
+                    <div className="form-text mb-0">Drag and drop a CSV file here, or use the picker above.</div>
+                </div>
                 <div className="form-text">
                     {activeTab === 'expenses'
                         ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By'
                         : "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income"}
+                    {' '}· Max {BULK_UPLOAD_MAX_ROWS} rows, 5MB.
                 </div>
             </div>
 
-            {parsedRows.length > 0 && !parsedRows[0]?.raw?.includes(',') && parsedRows[0]?.error && (
-                <div className="alert alert-danger">{parsedRows[0].error}</div>
-            )}
+            {fileError && <div className="alert alert-danger"><i className="fas fa-exclamation-circle me-2"></i>{fileError}</div>}
 
-            {parsedRows.length > 0 && !(parsedRows.length === 1 && parsedRows[0].categoryId === undefined && parsedRows[0].source === undefined && parsedRows[0].error) && (
+            {parsedRows.length > 0 && (
                 <div>
-                    <div style={{marginBottom: '0.5rem', display: 'flex', gap: '1rem', alignItems: 'center'}}>
-                        <span className="badge bg-success">{validCount} valid</span>
-                        {errorCount > 0 && <span className="badge bg-danger">{errorCount} errors</span>}
+                    <div style={{marginBottom: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center', justifyContent: 'space-between'}}>
+                        <div style={{display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap'}}>
+                            <span className="badge bg-success">{validCount} valid</span>
+                            {errorCount > 0 && <span className="badge bg-danger">{errorCount} errors</span>}
+                            <div className="btn-group btn-group-sm" role="group">
+                                <button type="button" className={'btn ' + (!showOnlyErrors ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setShowOnlyErrors(false)}>All</button>
+                                <button type="button" className={'btn ' + (showOnlyErrors ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setShowOnlyErrors(true)} disabled={errorCount === 0}>Errors only</button>
+                            </div>
+                        </div>
+                        {errorCount > 0 && (
+                            <button type="button" className="btn btn-sm btn-outline-danger" onClick={handleDownloadFailedRows}>
+                                <i className="fas fa-download me-1"></i>Download Failed Rows
+                            </button>
+                        )}
                     </div>
-                    <div style={{overflowX: 'auto', marginBottom: '1rem'}}>
+
+                    <button className="btn btn-primary mb-3" onClick={handleImport} disabled={validCount === 0 || isImporting}>
+                        {isImporting
+                            ? <><span className="spinner-border spinner-border-sm me-2"></span>Importing...</>
+                            : <><i className="fas fa-file-import me-2"></i>Import {validCount} valid row{validCount !== 1 ? 's' : ''}</>
+                        }
+                    </button>
+
+                    <div style={{overflowX: 'auto', marginBottom: '0.5rem'}}>
                         <table className="table table-sm table-bordered" style={{fontSize: '0.85rem'}}>
                             <thead className="table-light">
                                 <tr>
@@ -3753,8 +3882,8 @@ function BulkUpload({ categories, onUpdate }) {
                                 </tr>
                             </thead>
                             <tbody>
-                                {parsedRows.map((row, idx) => (
-                                    <tr key={idx} className={row.error ? 'table-danger' : 'table-success'}>
+                                {pageRows.map((row, idx) => (
+                                    <tr key={row.rowNum ?? idx} className={row.error ? 'table-danger' : 'table-success'}>
                                         <td>{row.rowNum}</td>
                                         {activeTab === 'expenses' ? (
                                             <>
@@ -3782,13 +3911,21 @@ function BulkUpload({ categories, onUpdate }) {
                             </tbody>
                         </table>
                     </div>
-                    <button className="btn btn-primary" onClick={handleImport} disabled={validCount === 0}>
-                        <i className="fas fa-file-import me-2"></i>Import {validCount} valid row{validCount !== 1 ? 's' : ''}
-                    </button>
+                    {totalPages > 1 && (
+                        <div className="d-flex justify-content-between align-items-center mb-3" style={{fontSize: '0.85rem'}}>
+                            <button className="btn btn-sm btn-outline-secondary" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}>
+                                <i className="fas fa-chevron-left me-1"></i>Prev
+                            </button>
+                            <span className="text-muted">Page {currentPage} of {totalPages}</span>
+                            <button className="btn btn-sm btn-outline-secondary" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}>
+                                Next<i className="fas fa-chevron-right ms-1"></i>
+                            </button>
+                        </div>
+                    )}
                 </div>
             )}
 
-            {parsedRows.length === 0 && !importResult && (
+            {parsedRows.length === 0 && !importResult && !fileError && (
                 <div className="text-muted text-center" style={{padding: '2rem', background: '#f8f9fa', borderRadius: '8px'}}>
                     <i className="fas fa-file-csv fa-3x" style={{marginBottom: '0.75rem', display: 'block', opacity: 0.4}}></i>
                     <p>Select a CSV file to preview and import {activeTab === 'expenses' ? 'expenses' : 'income'}</p>
@@ -5179,16 +5316,7 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
         return true;
     };
 
-    const exportToCSV = (filename, headers, rows) => {
-        const esc = (val) => { const s = String(val == null ? '' : val); return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-        const lines = [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))];
-        const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = filename;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 500);
-    };
+    const exportToCSV = downloadCSV;
 
     const getCatName = (id) => { const c = categories.find(c => c.id === id); return c ? c.name : id || ''; };
     const getSubName = (cid, sid) => { const c = categories.find(c => c.id === cid); if (!c || !c.subcategories) return sid || ''; const s = c.subcategories.find(s => s.id === sid); return s ? s.name : sid || ''; };
