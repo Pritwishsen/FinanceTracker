@@ -1,9 +1,136 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const PORT = 5000;
 const ROOT = __dirname;
+
+const CONTACT_RATE_LIMIT_MAX = 5;
+const CONTACT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const contactRequestLog = new Map();
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+let mailTransporter = null;
+
+function getMailTransporter() {
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD
+      }
+    });
+  }
+  return mailTransporter;
+}
+
+function isContactRateLimited(ip) {
+  var now = Date.now();
+  var timestamps = (contactRequestLog.get(ip) || []).filter(function(t) { return now - t < CONTACT_RATE_LIMIT_WINDOW_MS; });
+  if (timestamps.length >= CONTACT_RATE_LIMIT_MAX) {
+    contactRequestLog.set(ip, timestamps);
+    return true;
+  }
+  timestamps.push(now);
+  contactRequestLog.set(ip, timestamps);
+  return false;
+}
+
+function readJsonBody(req, callback) {
+  var chunks = [];
+  var size = 0;
+  var MAX_BODY_BYTES = 20 * 1024;
+  req.on('data', function(chunk) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', function() {
+    if (size > MAX_BODY_BYTES) {
+      callback(new Error('Payload too large'));
+      return;
+    }
+    try {
+      var body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+      callback(null, body);
+    } catch (e) {
+      callback(new Error('Invalid JSON'));
+    }
+  });
+  req.on('error', function(err) {
+    callback(err);
+  });
+}
+
+function sendJson(res, statusCode, obj) {
+  var body = JSON.stringify(obj);
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+
+function handleContactRequest(req, res) {
+  var ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+
+  if (isContactRateLimited(ip)) {
+    sendJson(res, 429, { error: 'Too many requests. Please try again later.' });
+    return;
+  }
+
+  readJsonBody(req, function(err, body) {
+    if (err) {
+      sendJson(res, 400, { error: err.message });
+      return;
+    }
+
+    var subject = typeof body.subject === 'string' ? body.subject.replace(/[\r\n]+/g, ' ').trim() : '';
+    var details = typeof body.details === 'string' ? body.details.trim() : '';
+    var replyTo = typeof body.replyTo === 'string' ? body.replyTo.trim() : '';
+
+    if (!subject || subject.length > 200) {
+      sendJson(res, 400, { error: 'Subject is required and must be 200 characters or fewer.' });
+      return;
+    }
+    if (!details || details.length > 5000) {
+      sendJson(res, 400, { error: 'Details are required and must be 5000 characters or fewer.' });
+      return;
+    }
+    if (replyTo && !EMAIL_RE.test(replyTo)) {
+      sendJson(res, 400, { error: 'Reply-to email address is invalid.' });
+      return;
+    }
+
+    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD || !process.env.SUPPORT_EMAIL) {
+      console.error('Contact form submitted but email is not configured (GMAIL_USER/GMAIL_APP_PASSWORD/SUPPORT_EMAIL).');
+      sendJson(res, 503, { error: 'Contact support is not configured. Please try again later.' });
+      return;
+    }
+
+    var mailOptions = {
+      from: process.env.GMAIL_USER,
+      to: process.env.SUPPORT_EMAIL,
+      subject: '[FinanceTracker Contact] ' + subject,
+      text: details
+    };
+    if (replyTo) {
+      mailOptions.replyTo = replyTo;
+    }
+
+    getMailTransporter().sendMail(mailOptions, function(sendErr) {
+      if (sendErr) {
+        console.error('Contact email send failed:', sendErr.message);
+        sendJson(res, 502, { error: 'Failed to send message. Please try again later.' });
+        return;
+      }
+      sendJson(res, 200, { ok: true });
+    });
+  });
+}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -108,6 +235,11 @@ var server = http.createServer(function(req, res) {
   if (urlPath === '/__health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
+    return;
+  }
+
+  if (urlPath === '/api/contact' && req.method === 'POST') {
+    handleContactRequest(req, res);
     return;
   }
 
