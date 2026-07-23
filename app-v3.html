@@ -216,6 +216,27 @@ const ValidationUtils = {
 };
 window.ValidationUtils = ValidationUtils;
 
+// Given a list of cloud history files (each { id, name }) sorted newest-first
+// (name is date-prefixed and zero-padded, so lexicographic order == chronological
+// order), returns the subset to delete under the user's chosen retention policy —
+// shared by GDriveService and OneDriveService since both use the same
+// `financetracker-YYYY-MM-DD-HHMMSS.json` naming convention and the same setting.
+// The single newest file (index 0) is never returned, regardless of policy or age,
+// so a long-idle device under a day-based policy can never prune away every backup.
+function selectHistoryFilesToPrune(files) {
+    if (!files || files.length <= 1) return [];
+    const retention = (JSON.parse(localStorage.getItem('financeApp_settings') || '{}').cloudBackupRetention) || 'count5';
+    if (retention === 'count5') return files.length > 5 ? files.slice(5) : [];
+    const days = { '7d': 7, '30d': 30, '90d': 90 }[retention] || 30;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return files.slice(1).filter(f => {
+        const m = f.name.match(/financetracker-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})\.json/);
+        if (!m) return false;
+        const t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+        return t < cutoff;
+    });
+}
+
 // ── Google Drive OAuth + REST API ──────────────────────────────────────────
 const GDriveService = {
     SCOPES: 'https://www.googleapis.com/auth/drive.file',
@@ -276,10 +297,9 @@ const GDriveService = {
             const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&orderBy=name desc`, { headers: { Authorization: `Bearer ${tok}` } });
             if (!r.ok) return;
             const { files } = await r.json();
-            if (files && files.length > 5) {
-                for (const f of files.slice(5)) {
-                    await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
-                }
+            const toDelete = selectHistoryFilesToPrune(files);
+            for (const f of toDelete) {
+                await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
             }
         } catch (_) {}
     },
@@ -410,10 +430,9 @@ const OneDriveService = {
             if (!r.ok) return;
             const { value } = await r.json();
             const hist = (value || []).filter(f => /^financetracker-\d{4}/.test(f.name)).sort((a,b) => b.name.localeCompare(a.name));
-            if (hist.length > 5) {
-                for (const f of hist.slice(5)) {
-                    await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
-                }
+            const toDelete = selectHistoryFilesToPrune(hist);
+            for (const f of toDelete) {
+                await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
             }
         } catch (_) {}
     },
@@ -570,6 +589,7 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
     const [error, setError] = React.useState('');
     const [restoring, setRestoring] = React.useState(null); // id of snapshot being restored
     const [confirmed, setConfirmed] = React.useState(null); // snapshot awaiting confirm
+    const [confirmText, setConfirmText] = React.useState('');
 
     React.useEffect(() => {
         SyncService.listHistory().then(files => { setSnapshots(files); setLoading(false); })
@@ -577,14 +597,18 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
     }, []);
 
     const parseName = (name) => {
-        // financetracker-2026-06-27-1430.json
-        const m = name.match(/financetracker-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})\.json/);
+        // financetracker-2026-06-27-143045.json
+        const m = name.match(/financetracker-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})\.json/);
         if (!m) return null;
-        return new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5]));
+        return new Date(Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]));
     };
+
+    const retention = (JSON.parse(localStorage.getItem('financeApp_settings') || '{}').cloudBackupRetention) || 'count5';
+    const retentionLabel = { count5: 'max 5 kept', '7d': 'kept for 7 days', '30d': 'kept for 30 days', '90d': 'kept for 90 days' }[retention] || 'max 5 kept';
 
     const doRestore = async (snap) => {
         setConfirmed(null);
+        setConfirmText('');
         setRestoring(snap.id);
         try {
             const data = await SyncService.downloadVersion(snap.id);
@@ -613,7 +637,7 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
                 <div className="d-flex align-items-center justify-content-between mb-3">
                     <div>
                         <h5 className="fw-bold mb-0"><i className="fas fa-history me-2 text-primary"></i>Version History</h5>
-                        <div style={{fontSize:'0.78rem',color:'#6c757d'}}>Last 5 cloud snapshots</div>
+                        <div style={{fontSize:'0.78rem',color:'#6c757d'}}>Your cloud snapshots</div>
                     </div>
                     <button className="btn btn-sm btn-outline-secondary" onClick={onClose}><i className="fas fa-times"></i></button>
                 </div>
@@ -645,12 +669,15 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
                                     </div>
                                     <div>
                                         {isConfirming ? (
-                                            <div className="d-flex gap-1">
-                                                <button className="btn btn-danger btn-sm" style={{fontSize:'0.75rem'}} onClick={() => doRestore(snap)} disabled={!!restoring}>Restore</button>
-                                                <button className="btn btn-outline-secondary btn-sm" style={{fontSize:'0.75rem'}} onClick={() => setConfirmed(null)}>Cancel</button>
+                                            <div className="d-flex flex-column align-items-end gap-1">
+                                                <input type="text" className="form-control form-control-sm" style={{fontSize:'0.7rem', width:'112px'}} placeholder="Type RESTORE" value={confirmText} onChange={e => setConfirmText(e.target.value)} autoFocus />
+                                                <div className="d-flex gap-1">
+                                                    <button className="btn btn-danger btn-sm" style={{fontSize:'0.75rem'}} onClick={() => doRestore(snap)} disabled={!!restoring || confirmText.trim().toUpperCase() !== 'RESTORE'}>Restore</button>
+                                                    <button className="btn btn-outline-secondary btn-sm" style={{fontSize:'0.75rem'}} onClick={() => { setConfirmed(null); setConfirmText(''); }}>Cancel</button>
+                                                </div>
                                             </div>
                                         ) : (
-                                            <button className="btn btn-sm btn-outline-primary" style={{fontSize:'0.75rem'}} onClick={() => setConfirmed(snap)} disabled={!!restoring}>
+                                            <button className="btn btn-sm btn-outline-primary" style={{fontSize:'0.75rem'}} onClick={() => { setConfirmed(snap); setConfirmText(''); }} disabled={!!restoring}>
                                                 {isRestoring ? <span className="spinner-border spinner-border-sm"></span> : <><i className="fas fa-undo me-1"></i>Restore</>}
                                             </button>
                                         )}
@@ -661,7 +688,7 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
                     </div>
                 )}
                 <div className="mt-3 pt-2" style={{borderTop:'1px solid #e9ecef',fontSize:'0.72rem',color:'#9ca3af',textAlign:'center'}}>
-                    Snapshots are saved automatically on every sync · max 5 kept
+                    Snapshots are saved automatically on every sync · {retentionLabel}
                 </div>
             </div>
         </div>
@@ -2934,8 +2961,10 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [restorePreview, setRestorePreview] = useState(null);
     const [restoreError, setRestoreError] = useState('');
     const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+    const [restoreConfirmText, setRestoreConfirmText] = useState('');
     const [backupDownloaded, setBackupDownloaded] = useState(false);
     const [showContactModal, setShowContactModal] = useState(false);
+    const [cloudBackupRetention, setCloudBackupRetention] = useState('count5');
 
     useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); }); }, []);
     useEffect(() => {
@@ -2944,7 +2973,10 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     }, []);
 
     useEffect(() => {
-        DataService.getSettings().then(s => setAutoBackupEnabled(s.autoBackupEnabled !== false));
+        DataService.getSettings().then(s => {
+            setAutoBackupEnabled(s.autoBackupEnabled !== false);
+            setCloudBackupRetention(s.cloudBackupRetention || 'count5');
+        });
         setBackupHistory(DataService.getBackupHistory());
         setLastSaveTime(localStorage.getItem('financeApp_lastSaveTime') || '');
     }, []);
@@ -2959,6 +2991,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const handleToggleAutoBackup = async (enabled) => {
         setAutoBackupEnabled(enabled);
         await DataService.updateSettings({ autoBackupEnabled: enabled });
+    };
+
+    const handleChangeBackupRetention = async (value) => {
+        setCloudBackupRetention(value);
+        await DataService.updateSettings({ cloudBackupRetention: value });
     };
 
     const handleDownloadBackup = () => {
@@ -2990,7 +3027,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             localStorage.setItem('financeApp_skipCloudRestoreCheck', 'true');
             window.location.reload();
         }
-        catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); }
+        catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); setRestoreConfirmText(''); }
     };
 
     useEffect(() => {
@@ -3298,7 +3335,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 )}
                 {restorePreview && (
-                    <button className="btn btn-danger w-100" onClick={() => setShowRestoreConfirm(true)}>
+                    <button className="btn btn-danger w-100" onClick={() => { setShowRestoreConfirm(true); setRestoreConfirmText(''); }}>
                         <i className="fas fa-upload me-2"></i>Restore Backup
                     </button>
                 )}
@@ -3309,10 +3346,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     <div className="modal-dialog modal-dialog-centered">
                         <div className="modal-content">
                             <div className="modal-header"><h5 className="modal-title"><i className="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Restore</h5></div>
-                            <div className="modal-body"><p>Are you sure? This will <strong>replace all your current data</strong> with the selected backup. This cannot be undone.</p></div>
+                            <div className="modal-body">
+                                <p>Are you sure? This will <strong>replace all your current data</strong> with the selected backup. This cannot be undone.</p>
+                                <label className="form-label small fw-semibold mb-1">Type <strong>RESTORE</strong> to confirm</label>
+                                <input type="text" className="form-control" value={restoreConfirmText} onChange={e => setRestoreConfirmText(e.target.value)} autoFocus />
+                            </div>
                             <div className="modal-footer">
                                 <button className="btn btn-secondary" onClick={() => setShowRestoreConfirm(false)}>Cancel</button>
-                                <button className="btn btn-danger" onClick={handleConfirmRestore}><i className="fas fa-upload me-2"></i>Yes, Restore Now</button>
+                                <button className="btn btn-danger" onClick={handleConfirmRestore} disabled={restoreConfirmText.trim().toUpperCase() !== 'RESTORE'}><i className="fas fa-upload me-2"></i>Yes, Restore Now</button>
                             </div>
                         </div>
                     </div>
@@ -3416,6 +3457,20 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         </div>
                     );
                 })()}
+                {(storagePref === 'gdrive' || storagePref === 'onedrive') && (
+                    <div style={{marginTop: '0.85rem'}}>
+                        <label className="form-label small fw-semibold mb-1">Backup retention</label>
+                        <select className="form-select form-select-sm" value={cloudBackupRetention} onChange={e => handleChangeBackupRetention(e.target.value)}>
+                            <option value="count5">Keep last 5 backups</option>
+                            <option value="7d">Keep backups for 7 days</option>
+                            <option value="30d">Keep backups for 30 days</option>
+                            <option value="90d">Keep backups for 90 days</option>
+                        </select>
+                        <div className="text-muted" style={{fontSize: '0.78rem', marginTop: '0.25rem'}}>
+                            The most recent backup is always kept, even if it's older than this window.
+                        </div>
+                    </div>
+                )}
             </div>
 
             <hr style={{margin: '1.5rem 0'}} />
