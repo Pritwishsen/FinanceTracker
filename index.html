@@ -2965,11 +2965,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [backupDownloaded, setBackupDownloaded] = useState(false);
     const [showContactModal, setShowContactModal] = useState(false);
     const [cloudBackupRetention, setCloudBackupRetention] = useState('count5');
+    const [desktopNotifEnabled, setDesktopNotifEnabled] = useState(false);
+    const [notifPermission, setNotifPermission] = useState(() => ('Notification' in window ? Notification.permission : 'unsupported'));
 
     useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); }); }, []);
     useEffect(() => {
         const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
         setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
+        setDesktopNotifEnabled(!!notifSettings.desktopNotificationsEnabled && notifPermission === 'granted');
     }, []);
 
     useEffect(() => {
@@ -2985,6 +2988,18 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         setBudgetAlertsEnabled(enabled);
         const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
         notifSettings.budgetAlertsEnabled = enabled;
+        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
+    };
+
+    const handleToggleDesktopNotif = async (enabled) => {
+        if (enabled) {
+            let perm = Notification.permission;
+            if (perm === 'default') { perm = await Notification.requestPermission(); setNotifPermission(perm); }
+            if (perm !== 'granted') { setDesktopNotifEnabled(false); return; }
+        }
+        setDesktopNotifEnabled(enabled);
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        notifSettings.desktopNotificationsEnabled = enabled;
         localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
     };
 
@@ -3284,6 +3299,21 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                     <div className="form-check form-switch mb-0">
                         <input className="form-check-input" type="checkbox" id="budgetAlertsToggle" checked={budgetAlertsEnabled} onChange={e => handleToggleBudgetAlerts(e.target.checked)} style={{cursor: 'pointer'}} />
+                    </div>
+                </div>
+                <div className="d-flex justify-content-between align-items-center mt-2" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
+                    <div>
+                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Desktop Notifications</div>
+                        <div className="text-muted" style={{fontSize: '0.82rem'}}>
+                            {notifPermission === 'denied'
+                                ? 'Blocked — enable notifications for this site in your browser settings.'
+                                : notifPermission === 'unsupported'
+                                ? 'Not supported in this browser.'
+                                : 'Show a browser notification when a new alert appears while this app is open'}
+                        </div>
+                    </div>
+                    <div className="form-check form-switch mb-0">
+                        <input className="form-check-input" type="checkbox" id="desktopNotifToggle" checked={desktopNotifEnabled} disabled={notifPermission === 'denied' || notifPermission === 'unsupported'} onChange={e => handleToggleDesktopNotif(e.target.checked)} style={{cursor: 'pointer'}} />
                     </div>
                 </div>
             </div>
@@ -6685,6 +6715,18 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     );
 }
 
+// Shows a native OS notification per alert, opt-in only. `tag` is set to the
+// alert's own dedup key so re-showing a still-active alert replaces the
+// previous notification instead of stacking a new one.
+function showDesktopNotifications(alerts) {
+    const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+    if (!notifSettings.desktopNotificationsEnabled) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    alerts.forEach(a => {
+        try { new Notification(a.title, { body: a.message, tag: a.key }); } catch (_) {}
+    });
+}
+
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
     const [expenses, setExpenses] = useState([]);
@@ -6764,8 +6806,14 @@ function App() {
         const todayStr = new Date().toISOString().split('T')[0];
         const dueSoon = DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
         const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'bills' }));
-        DataService.syncNotifications([...budgetActive, ...billActive]);
+        const activeAlerts = [...budgetActive, ...billActive];
+        // Diff against the store BEFORE syncing so a native notification fires once per
+        // newly-appearing alert, not every time this recomputes while it's still active.
+        const previousKeys = new Set(DataService.getNotifications().map(n => n.key));
+        const newlyActive = activeAlerts.filter(a => !previousKeys.has(a.key));
+        DataService.syncNotifications(activeAlerts);
         setNotifications(DataService.getNotifications());
+        if (newlyActive.length > 0) showDesktopNotifications(newlyActive);
     };
 
     useEffect(() => {
