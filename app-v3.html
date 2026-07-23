@@ -6398,6 +6398,7 @@ function App() {
     // save event per row) into a single download+merge+upload cycle, instead of one full
     // cloud round-trip per call — avoiding Drive/OneDrive per-user rate limits (HTTP 429).
     const cloudSyncDebounceRef = React.useRef(null);
+    const cloudSyncInFlightRef = React.useRef(false);
     const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
     const [cloudRestoreData, setCloudRestoreData] = useState(null);
     const [showCloudHistory, setShowCloudHistory] = useState(false);
@@ -6406,6 +6407,10 @@ function App() {
     const [reconnectBannerDismissed, setReconnectBannerDismissed] = useState(false);
     const [syncMergeToast, setSyncMergeToast] = useState('');
     const showSyncMergeToast = (msg) => { setSyncMergeToast(msg); setTimeout(() => setSyncMergeToast(''), 4500); };
+    // Persisted (unlike syncStatus) so a failed/offline sync is still visible and
+    // auto-retryable after the user reloads or comes back to the app later.
+    const [pendingSyncSince, setPendingSyncSince] = useState(() => localStorage.getItem('financeApp_pendingCloudSync') || '');
+    const [pendingSyncBannerDismissed, setPendingSyncBannerDismissed] = useState(false);
 
     // Recomputes which budget/bill alerts are currently true and reconciles them into the
     // persisted notification store (financeApp_notifications) so they survive reloads and
@@ -6604,6 +6609,8 @@ function App() {
     // no matter how many handleDataUpdate() calls fed into it (see cloudSyncDebounceRef above).
     const performCloudSync = async () => {
         if (!SyncService.isCloudEnabled()) return;
+        if (cloudSyncInFlightRef.current) return;
+        cloudSyncInFlightRef.current = true;
         setSyncStatus('syncing');
         try {
             // Download-first: merge any changes uploaded by another device
@@ -6639,10 +6646,12 @@ function App() {
                 // the cloud-vs-local check then sees cloudTime > localTime and treats our own
                 // just-uploaded data as "newer than local", triggering a spurious re-merge.
                 if (backupToUpload.createdAt) localStorage.setItem('financeApp_lastSaveTime', backupToUpload.createdAt);
+                clearCloudSyncPending();
             }
             else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
             else if (result.status !== 'local') { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
         } catch (_) { setSyncStatus('error'); }
+        finally { cloudSyncInFlightRef.current = false; }
     };
     const CLOUD_SYNC_DEBOUNCE_MS = 3000;
     const scheduleCloudSync = () => {
@@ -6650,6 +6659,38 @@ function App() {
         cloudSyncDebounceRef.current = setTimeout(() => { cloudSyncDebounceRef.current = null; performCloudSync(); }, CLOUD_SYNC_DEBOUNCE_MS);
     };
     const cancelScheduledCloudSync = () => { if (cloudSyncDebounceRef.current) { clearTimeout(cloudSyncDebounceRef.current); cloudSyncDebounceRef.current = null; } };
+
+    // Marks that a local change hasn't been confirmed uploaded yet. Set optimistically
+    // whenever a sync is scheduled (not just on failure) so the flag — and the banner it
+    // drives — survives a tab close/reload that happens before the debounced sync fires
+    // or while offline, instead of only surfacing after a failed attempt.
+    const markCloudSyncPending = () => {
+        if (!localStorage.getItem('financeApp_pendingCloudSync')) {
+            const now = new Date().toISOString();
+            localStorage.setItem('financeApp_pendingCloudSync', now);
+            setPendingSyncSince(now);
+            setPendingSyncBannerDismissed(false);
+        }
+    };
+    const clearCloudSyncPending = () => {
+        localStorage.removeItem('financeApp_pendingCloudSync');
+        setPendingSyncSince('');
+    };
+
+    // Retries a pending sync as soon as the browser regains connectivity, instead of
+    // waiting for the user's next edit or a manual "Sync now". The periodic check is a
+    // fallback for the 'online' event not firing reliably (e.g. captive portals that
+    // briefly report connectivity before the real request fails).
+    useEffect(() => {
+        const retryIfPending = () => {
+            if (SyncService.isCloudEnabled() && navigator.onLine && localStorage.getItem('financeApp_pendingCloudSync')) {
+                performCloudSync();
+            }
+        };
+        window.addEventListener('online', retryIfPending);
+        const intervalId = setInterval(retryIfPending, 2 * 60 * 1000);
+        return () => { window.removeEventListener('online', retryIfPending); clearInterval(intervalId); };
+    }, []);
 
     const handleDataUpdate = async () => {
         try {
@@ -6666,7 +6707,7 @@ function App() {
             DataService.saveLatestBackup();
             // Debounced: a burst of calls (e.g. one per row of a CSV import) coalesces into
             // a single cloud round-trip fired after the burst settles, instead of one per call.
-            if (SyncService.isCloudEnabled() && hasSavedLocally) scheduleCloudSync();
+            if (SyncService.isCloudEnabled() && hasSavedLocally) { markCloudSyncPending(); scheduleCloudSync(); }
         } catch (error) { console.error('Error updating data:', error); }
     };
 
@@ -6791,7 +6832,7 @@ function App() {
                         DataService.isInitialized = false;
                         const signedMerged = await signBackupForUpload(merged, currentUser);
                         const mergeResult = await SyncService.upload(signedMerged);
-                        if (mergeResult.status === 'success') { setSyncStatus('synced'); setLastSyncTime(mergeResult.syncedAt); localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); }
+                        if (mergeResult.status === 'success') { setSyncStatus('synced'); setLastSyncTime(mergeResult.syncedAt); localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); clearCloudSyncPending(); }
                         else { setSyncStatus('idle'); }
                         const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
                         setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
@@ -6803,7 +6844,7 @@ function App() {
             // Local is up to date — upload it
             const signedForSync = await signBackupForUpload(DataService.createBackup(), currentUser);
             const result = await SyncService.upload(signedForSync);
-            if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+            if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); clearCloudSyncPending(); }
             else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
             else { setSyncStatus(result.status === 'not_configured' ? 'not_configured' : 'error'); }
         } catch (_) { setSyncStatus('error'); }
@@ -7003,6 +7044,16 @@ function App() {
                         </button>
                     </div>
                     <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setReconnectBannerDismissed(true)}></button>
+                </div>
+            )}
+            {pendingSyncSince && !pendingSyncBannerDismissed && syncStatus !== 'syncing' && syncStatus !== 'reconnect-needed' && (
+                <div className="alert d-flex gap-2 align-items-center" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px',background:'#f8d7da',border:'1px solid #dc3545',color:'#842029'}}>
+                    <i className="fas fa-exclamation-circle flex-shrink-0"></i>
+                    <div style={{flex:1}}>
+                        <strong>Changes not backed up</strong> — pending since {new Date(pendingSyncSince).toLocaleString()}. We'll retry automatically, or{' '}
+                        <button className="btn btn-link btn-sm p-0 fw-semibold" style={{verticalAlign:'baseline',fontSize:'0.83rem',color:'#842029'}} onClick={handleSyncNow}>sync now</button>.
+                    </div>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setPendingSyncBannerDismissed(true)}></button>
                 </div>
             )}
             {showLocalDeviceBanner && (
