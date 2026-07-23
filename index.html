@@ -2500,6 +2500,147 @@ function IncomeForm({ income, onUpdate }) {
     );
 }
 
+// Draws a bar that grows upward from a baseline with rounded top corners and a
+// square bottom edge (per the app's chart mark spec — data-end rounded, baseline square).
+function verticalBarPath(x, yTop, w, h, r) {
+    if (h <= 0) return '';
+    const radius = Math.min(r, w / 2, h);
+    return `M ${x} ${yTop + h} L ${x} ${yTop + radius} Q ${x} ${yTop} ${x + radius} ${yTop} L ${x + w - radius} ${yTop} Q ${x + w} ${yTop} ${x + w} ${yTop + radius} L ${x + w} ${yTop + h} Z`;
+}
+// Mirror of verticalBarPath for a bar growing rightward from a baseline (rounded
+// at the tip, square at the left/baseline edge).
+function horizontalBarPath(x, y, w, h, r) {
+    if (w <= 0) return '';
+    const radius = Math.min(r, h / 2, w);
+    return `M ${x} ${y} L ${x + w - radius} ${y} Q ${x + w} ${y} ${x + w} ${y + radius} L ${x + w} ${y + h - radius} Q ${x + w} ${y + h} ${x + w - radius} ${y + h} L ${x} ${y + h} Z`;
+}
+const formatCompactAmount = (value, defaultCurrency) => {
+    const symbol = ValidationUtils.getCurrencySymbol(defaultCurrency);
+    return symbol + new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+};
+
+// Grouped vertical bar chart: income vs expense across the last N months.
+// Colors match the existing summary cards above it (success green / danger red)
+// so the same income/expense color mapping is used everywhere on this screen.
+function IncomeExpenseTrendChart({ months, defaultCurrency }) {
+    const [hovered, setHovered] = useState(null); // { i, series } | null
+    const INCOME_COLOR = '#10b981', EXPENSE_COLOR = '#ef4444';
+    const width = 340, height = 190;
+    const padding = { top: 14, right: 10, bottom: 22, left: 6 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const rawMax = Math.max(1, ...months.flatMap(m => [m.income, m.expense]));
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawMax)));
+    const residual = rawMax / magnitude;
+    const niceResidual = residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1;
+    const niceMax = niceResidual * magnitude;
+    const gridFractions = [0, 0.25, 0.5, 0.75, 1];
+    const groupWidth = plotWidth / months.length;
+    const barWidth = Math.min(20, groupWidth / 2 - 6);
+    const barGap = 3;
+    const yFor = (v) => padding.top + plotHeight - (v / niceMax) * plotHeight;
+
+    return (
+        <div style={{ position: 'relative' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><span style={{ width: 10, height: 10, borderRadius: 2, background: INCOME_COLOR, display: 'inline-block' }}></span>Income</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><span style={{ width: 10, height: 10, borderRadius: 2, background: EXPENSE_COLOR, display: 'inline-block' }}></span>Expense</span>
+            </div>
+            <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}>
+                {gridFractions.map((f, i) => (
+                    <g key={i}>
+                        <line x1={padding.left} x2={width - padding.right} y1={yFor(niceMax * f)} y2={yFor(niceMax * f)} stroke="#e5e7eb" strokeWidth="1" />
+                        <text x={padding.left} y={yFor(niceMax * f) - 2} fontSize="7.5" fill="#898781">{formatCompactAmount(niceMax * f, defaultCurrency)}</text>
+                    </g>
+                ))}
+                {months.map((m, i) => {
+                    const groupX = padding.left + i * groupWidth;
+                    const incomeX = groupX + groupWidth / 2 - barWidth - barGap / 2;
+                    const expenseX = groupX + groupWidth / 2 + barGap / 2;
+                    const isCurrent = i === months.length - 1;
+                    const incomeHovered = hovered && hovered.i === i && hovered.series === 'income';
+                    const expenseHovered = hovered && hovered.i === i && hovered.series === 'expense';
+                    return (
+                        <g key={i}>
+                            <path d={verticalBarPath(incomeX, yFor(m.income), barWidth, plotHeight - (yFor(m.income) - padding.top), 4)}
+                                fill={INCOME_COLOR} opacity={incomeHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
+                                onMouseEnter={() => setHovered({ i, series: 'income' })} onMouseLeave={() => setHovered(null)}
+                                onFocus={() => setHovered({ i, series: 'income' })} onBlur={() => setHovered(null)} />
+                            <path d={verticalBarPath(expenseX, yFor(m.expense), barWidth, plotHeight - (yFor(m.expense) - padding.top), 4)}
+                                fill={EXPENSE_COLOR} opacity={expenseHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
+                                onMouseEnter={() => setHovered({ i, series: 'expense' })} onMouseLeave={() => setHovered(null)}
+                                onFocus={() => setHovered({ i, series: 'expense' })} onBlur={() => setHovered(null)} />
+                            {isCurrent && (
+                                <>
+                                    <text x={incomeX + barWidth / 2} y={yFor(m.income) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.income, defaultCurrency)}</text>
+                                    <text x={expenseX + barWidth / 2} y={yFor(m.expense) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.expense, defaultCurrency)}</text>
+                                </>
+                            )}
+                            <text x={groupX + groupWidth / 2} y={height - padding.bottom + 13} textAnchor="middle" fontSize="9" fill="#6b7280">{m.label}</text>
+                        </g>
+                    );
+                })}
+            </svg>
+            {hovered && (() => {
+                const m = months[hovered.i];
+                const val = hovered.series === 'income' ? m.income : m.expense;
+                const groupX = padding.left + hovered.i * groupWidth;
+                const leftPct = ((groupX + groupWidth / 2) / width) * 100;
+                const topPct = (yFor(val) / height) * 100;
+                return (
+                    <div style={{ position: 'absolute', left: leftPct + '%', top: topPct + '%', transform: 'translate(-50%, -110%)', background: '#1f2937', color: '#fff', padding: '0.3rem 0.55rem', borderRadius: '6px', fontSize: '0.72rem', pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 5 }}>
+                        <strong>{ValidationUtils.formatCurrency(val, defaultCurrency)}</strong> · {hovered.series === 'income' ? 'Income' : 'Expense'} · {m.label}
+                    </div>
+                );
+            })()}
+        </div>
+    );
+}
+
+// Horizontal bar chart for category spend: replaces the old duplicate progress-bar
+// lists. Uses the project's validated categorical palette (fixed hue order — see
+// dataviz skill), folding anything past the 7th category into a neutral "Other" bar.
+function CategoryBarChart({ items, defaultCurrency }) {
+    const [hoveredIdx, setHoveredIdx] = useState(null);
+    const CATEGORY_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
+    const OTHER_COLOR = '#9ca3af';
+    const MAX_SLOTS = 7;
+
+    const top = items.slice(0, MAX_SLOTS).map((it, i) => ({ name: it.name, total: it.total, color: CATEGORY_PALETTE[i] }));
+    const rest = items.slice(MAX_SLOTS);
+    const bars = rest.length > 0 ? [...top, { name: 'Other', total: rest.reduce((sum, it) => sum + it.total, 0), color: OTHER_COLOR }] : top;
+    if (bars.length === 0) return null;
+
+    const width = 360;
+    const rowHeight = 28;
+    const barThickness = 16;
+    const labelWidth = 108;
+    const valueColWidth = 70;
+    const plotWidth = width - labelWidth - valueColWidth;
+    const height = bars.length * rowHeight + 6;
+    const maxTotal = Math.max(...bars.map(b => b.total), 1);
+
+    return (
+        <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}>
+            {bars.map((b, i) => {
+                const barW = Math.max((b.total / maxTotal) * plotWidth, 2);
+                const y = i * rowHeight + (rowHeight - barThickness) / 2;
+                const isHovered = hoveredIdx === i;
+                const label = b.name.length > 15 ? b.name.slice(0, 14) + '…' : b.name;
+                return (
+                    <g key={b.name} tabIndex={0} style={{ cursor: 'pointer' }}
+                        onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)}
+                        onFocus={() => setHoveredIdx(i)} onBlur={() => setHoveredIdx(null)}>
+                        <text x={0} y={y + barThickness / 2 + 3} fontSize="9.5" fill="#1f2937" fontWeight={isHovered ? '600' : '400'}>{label}</text>
+                        <path d={horizontalBarPath(labelWidth, y, barW, barThickness, 4)} fill={b.color} opacity={isHovered ? 1 : 0.9} />
+                        <text x={labelWidth + barW + 6} y={y + barThickness / 2 + 3} fontSize="9" fill="#6b7280">{ValidationUtils.formatCurrency(b.total, defaultCurrency)}</text>
+                    </g>
+                );
+            })}
+        </svg>
+    );
+}
+
 function Summary({ expenses, income, categories, defaultCurrency }) {
     const [timeRange, setTimeRange] = useState('month');
     const [selectedCategory, setSelectedCategory] = useState('');
@@ -2642,6 +2783,37 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     const totalIncome = filteredIncome.reduce((sum, inc) => sum + inc.amount, 0);
     const netAmount = totalIncome - totalExpenses;
     const expensesByCategory = categories.map(category => { const categoryExpenses = filteredExpenses.filter(expense => expense.categoryId === category.id); const total = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0); const percentage = totalExpenses > 0 ? (total / totalExpenses) * 100 : 0; return { ...category, total, percentage, count: categoryExpenses.length }; }).filter(category => category.total > 0).sort((a, b) => b.total - a.total);
+    // Last 6 calendar months of income vs expense, independent of the Time Period
+    // selector above (a trend view always needs its own fixed window) but still
+    // scoped by the Person/Category filters, mirroring the filtering already done
+    // for filteredExpenses/filteredIncome.
+    const monthlyTrend = (() => {
+        const now = new Date();
+        const months = [];
+        for (let i = 5; i >= 0; i--) {
+            const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+            const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0, 23, 59, 59, 999);
+            let monthExpenses = convertedExpenses.filter(exp => { const d = new Date(exp.date); return d >= monthStart && d <= monthEnd; });
+            let monthIncome = convertedIncome.filter(inc => { const d = new Date(inc.date); return d >= monthStart && d <= monthEnd; });
+            if (selectedPaidBy) {
+                if (selectedPaidBy === 'self') {
+                    monthExpenses = monthExpenses.filter(exp => !exp.paidBy || exp.paidBy.trim() === '');
+                    monthIncome = monthIncome.filter(inc => !inc.paidBy || inc.paidBy.trim() === '');
+                } else {
+                    monthExpenses = monthExpenses.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy);
+                    monthIncome = monthIncome.filter(inc => inc.paidBy && inc.paidBy === selectedPaidBy);
+                }
+            }
+            if (selectedCategory) { monthExpenses = monthExpenses.filter(exp => exp.categoryId === parseInt(selectedCategory)); }
+            months.push({
+                label: monthDate.toLocaleDateString('en-US', { month: 'short' }),
+                income: monthIncome.reduce((sum, inc) => sum + inc.amount, 0),
+                expense: monthExpenses.reduce((sum, exp) => sum + exp.amount, 0)
+            });
+        }
+        return months;
+    })();
     const getPreviousPeriodComparison = () => { const { startDate } = getDateRange(); const periodLength = new Date() - startDate; const previousEndDate = new Date(startDate.getTime() - 1); const previousStartDate = new Date(previousEndDate.getTime() - periodLength); const previousExpenses = convertedExpenses.filter(expense => { const expenseDate = new Date(expense.date); return expenseDate >= previousStartDate && expenseDate <= previousEndDate; }); const previousTotal = previousExpenses.reduce((sum, expense) => sum + expense.amount, 0); const change = totalExpenses - previousTotal; const changePercentage = previousTotal > 0 ? (change / previousTotal) * 100 : 0; return { change, changePercentage, previousTotal }; };
     const trendData = getPreviousPeriodComparison();
     const getTopSpendingDays = () => { const dailySpending = {}; filteredExpenses.forEach(expense => { const date = expense.date; dailySpending[date] = (dailySpending[date] || 0) + expense.amount; }); return Object.entries(dailySpending).sort(([,a], [,b]) => b - a).slice(0, 5).map(([date, amount]) => ({ date, amount })); };
@@ -2688,24 +2860,10 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                 <div className={'summary-card ' + (netAmount >= 0 ? 'positive' : 'negative')}><div className="card-icon"><i className={'fas fa-' + (netAmount >= 0 ? 'plus' : 'minus')}></i></div><div className="card-content"><h6>Net Amount</h6><div className="amount">{ValidationUtils.formatCurrency(Math.abs(netAmount), defaultCurrency)}</div><div className="trend">{netAmount >= 0 ? 'Surplus' : 'Deficit'}</div></div></div>
                 <div className="summary-card info"><div className="card-icon"><i className="fas fa-calendar-day"></i></div><div className="card-content"><h6>Daily Average</h6><div className="amount">{ValidationUtils.formatCurrency(avgDailySpending, defaultCurrency)}</div><div className="trend">{daysDiff} days</div></div></div>
             </div>
-            {filteredExpenses.length > 0 && expensesByCategory.length > 0 && (
-                <div className="category-breakdown" style={{marginBottom: '1.5rem'}}>
-                    <h5><i className="fas fa-chart-bar me-2"></i>Spending by Category</h5>
-                    <div className="category-list">
-                        {expensesByCategory.map(cat => (
-                            <div key={cat.id} style={{marginBottom: '0.85rem'}}>
-                                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem', fontSize: '0.9rem'}}>
-                                    <span style={{fontWeight: '500'}}>{cat.name}</span>
-                                    <span>{ValidationUtils.formatCurrency(cat.total, defaultCurrency)} <span className="text-muted">({cat.percentage.toFixed(1)}%)</span></span>
-                                </div>
-                                <div className="progress" style={{height: '8px'}}>
-                                    <div className="progress-bar" role="progressbar" style={{width: Math.min(cat.percentage, 100) + '%'}} aria-valuenow={Math.round(cat.percentage)} aria-valuemin="0" aria-valuemax="100"></div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
+            <div className="category-breakdown" style={{marginBottom: '1.5rem'}}>
+                <h5><i className="fas fa-chart-bar me-2"></i>Income vs Expense (Last 6 Months)</h5>
+                <IncomeExpenseTrendChart months={monthlyTrend} defaultCurrency={defaultCurrency} />
+            </div>
             {timeRange === 'month' && budgetData.length > 0 && (
                 <div className="budget-overview">
                     <h5><i className="fas fa-calculator"></i> Monthly Budget Overview</h5>
@@ -2728,15 +2886,7 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
             {expensesByCategory.length > 0 && (
                 <div className="category-breakdown">
                     <h5>Expenses by Category</h5>
-                    <div className="category-list">
-                        {expensesByCategory.map(category => (
-                            <div key={category.id} className="category-breakdown-item">
-                                <div className="category-info"><div className="category-name">{category.name}</div><div className="category-details">{category.count} transaction{category.count !== 1 ? 's' : ''}</div></div>
-                                <div className="category-amount"><div className="amount">{ValidationUtils.formatCurrency(category.total, defaultCurrency)}</div><div className="percentage">{category.percentage.toFixed(1)}%</div></div>
-                                <div className="category-bar"><div className="bar-fill" style={{ width: category.percentage + '%' }}></div></div>
-                            </div>
-                        ))}
-                    </div>
+                    <CategoryBarChart items={expensesByCategory} defaultCurrency={defaultCurrency} />
                 </div>
             )}
             {topSpendingDays.length > 0 && (
