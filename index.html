@@ -216,6 +216,73 @@ const ValidationUtils = {
 };
 window.ValidationUtils = ValidationUtils;
 
+// ── Global "Active View" (who's data is currently visible) ────────────────
+// Storage convention: 'own' represents the logged-in user themselves; every
+// other entry is a person's name (matching DataService.getPeople()). This is
+// a plain localStorage key (not part of financeApp_settings) because it must
+// be readable synchronously at the very top of App's loadData/handleDataUpdate,
+// before any DataService.get*() calls run.
+const ACTIVE_VIEW_KEY = 'financeApp_activeView';
+function getActiveView() {
+    try {
+        const v = JSON.parse(localStorage.getItem(ACTIVE_VIEW_KEY) || '["own"]');
+        return Array.isArray(v) && v.length > 0 ? v : ['own'];
+    } catch (_) { return ['own']; }
+}
+function setActiveView(view) {
+    const safe = Array.isArray(view) && view.length > 0 ? view : ['own'];
+    localStorage.setItem(ACTIVE_VIEW_KEY, JSON.stringify(safe));
+    return safe;
+}
+// value = a record's paidBy/person/owner field (may be '', null, or undefined).
+// Storage convention (existing, unchanged): expenses/income use '' (falsy) for "own";
+// debts/net worth/goals use the literal string 'own' — both mean the same thing, so
+// this treats them as equivalent rather than picking one. The active view's display
+// name is a UI label only, never written into these fields either way.
+function matchesActiveView(value, activeView) {
+    const v = (value || '').trim().toLowerCase();
+    if (!v || v === 'own') return activeView.includes('own');
+    return activeView.some(sel => sel !== 'own' && sel.toLowerCase() === v);
+}
+// First + last initial (or just the first letter for a single-word name), e.g.
+// "Alex Morgan" -> "AM", "John" -> "J". Keeps the header pill compact regardless
+// of how long a display name or person's name is.
+function getInitials(name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return '';
+    const parts = trimmed.split(/\s+/);
+    return (parts.length === 1 ? parts[0].charAt(0) : parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+}
+// Renders the header pill / any other "who's active" label, using initials in place
+// of full names. 'own' maps to the user's display name's initials; past ~20 combined
+// characters (rare now that names are this short), collapses to "First +N".
+function formatActiveViewLabel(activeView, displayName) {
+    const names = (activeView.length ? activeView : ['own']).map(v => getInitials(v === 'own' ? (displayName || 'Own') : v));
+    const joined = names.join(', ');
+    if (joined.length <= 20 || names.length === 1) return joined;
+    return names[0] + ' +' + (names.length - 1);
+}
+// Shared "who is this for" picker used by Expense/Income/Debt/Net Worth/Goals
+// forms. When exactly one view is active, callers hide this entirely and
+// auto-tag instead (see resolveActiveViewValue) — this component only renders
+// when the caller wants it shown (i.e. multiple people are active), and its
+// options are restricted to just the currently-selected participants.
+function PersonSelect({ value, onChange, activeView, id, className, ownLabel }) {
+    const options = activeView.filter(v => v !== 'own');
+    return (
+        <select id={id} className={className || 'form-select'} value={value} onChange={e => onChange(e.target.value)}>
+            {activeView.includes('own') && <option value="">{ownLabel || '— Me / My Own —'}</option>}
+            {options.map(name => (<option key={name} value={name}>{name}</option>))}
+        </select>
+    );
+}
+// Resolves what a NEW record's paidBy/person/owner value should be when the
+// picker is hidden (single active view): '' for 'own', the person's name otherwise.
+function resolveActiveViewValue(activeView) {
+    const v = activeView[0];
+    return v === 'own' ? '' : v;
+}
+
 // Given a list of cloud history files (each { id, name }) sorted newest-first
 // (name is date-prefixed and zero-padded, so lexicographic order == chronological
 // order), returns the subset to delete under the user's chosen retention policy —
@@ -1095,13 +1162,13 @@ class DataService {
     }
     static getGoals() { return JSON.parse(localStorage.getItem('financeApp_goals') || '[]'); }
     static saveGoals(goals) { localStorage.setItem('financeApp_goals', JSON.stringify(goals)); }
-    static addGoal({ name, targetAmount, currency, deadline, notes, emoji, currentSaved }) {
+    static addGoal({ name, targetAmount, currency, deadline, notes, emoji, currentSaved, owner }) {
         const goals = this.getGoals();
         if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
         if (goals.find(g => g.name.toLowerCase() === name.trim().toLowerCase())) throw new Error('A goal with this name already exists');
         if (!targetAmount || parseFloat(targetAmount) <= 0) throw new Error('Target amount must be greater than 0');
         if (deadline && new Date(deadline) <= new Date()) throw new Error('Deadline must be in the future');
-        const goal = { id: DataService._uniqueId(), name: name.trim(), targetAmount: parseFloat(targetAmount), currency: currency || 'GBP', deadline: deadline || '', notes: notes || '', emoji: emoji || '', currentSaved: parseFloat(currentSaved || 0), createdAt: new Date().toISOString() };
+        const goal = { id: DataService._uniqueId(), name: name.trim(), targetAmount: parseFloat(targetAmount), currency: currency || 'GBP', deadline: deadline || '', notes: notes || '', emoji: emoji || '', currentSaved: parseFloat(currentSaved || 0), owner: owner || 'own', createdAt: new Date().toISOString() };
         goals.push(goal);
         this.saveGoals(goals);
         return goal;
@@ -1320,8 +1387,8 @@ class DataService {
     static clearAllNotifications() { this.saveNotifications([]); }
     static getDebts() { return JSON.parse(localStorage.getItem('financeApp_debts') || '[]'); }
     static saveDebts(d) { localStorage.setItem('financeApp_debts', JSON.stringify(d)); }
-    static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person }) {
-        const debt = { id: DataService._uniqueId(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', person: person||'own', isSettled: false, createdAt: new Date().toISOString() };
+    static addDebt({ counterparty, amount, currency, direction, notes, dueDate, person, createdInView }) {
+        const debt = { id: DataService._uniqueId(), counterparty, amount: parseFloat(amount), currency, direction, notes: notes||'', dueDate: dueDate||'', person: person||'own', createdInView: createdInView||['own'], isSettled: false, createdAt: new Date().toISOString() };
         const debts = this.getDebts(); debts.push(debt); this.saveDebts(debts); return debt;
     }
     static updateDebt(id, updates) {
@@ -1515,11 +1582,9 @@ function Navigation({ currentScreen, onScreenChange }) {
     );
 }
 
-function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null }) {
+function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null, activeView }) {
     const [people, setPeople] = useState([]);
     const [formData, setFormData] = useState(() => {
-        const peopleList = DataService.getPeople();
-        const defaultPerson = peopleList.find(p => p.isDefault);
         if (editSplitGroup && editSplitGroup.length > 0) {
             const first = editSplitGroup[0];
             const total = editSplitGroup.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
@@ -1534,7 +1599,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             description: editExpense ? editExpense.description : '',
             categoryId: editExpense ? editExpense.categoryId : '',
             subcategory: editExpense ? editExpense.subcategory : '',
-            paidBy: editExpense ? (editExpense.paidBy || '') : (defaultPerson ? defaultPerson.name : ''),
+            paidBy: editExpense ? (editExpense.paidBy || '') : resolveActiveViewValue(activeView),
             currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP',
             tags: editExpense ? (editExpense.tags || []) : []
         };
@@ -1579,6 +1644,21 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         setFormData(prev => ({ ...prev, tags }));
     };
 
+    // The "me" split participant's display name (seeded as 'Me' or an active-view label,
+    // never blank — see splitParticipants' initial state) is separate from what should be
+    // STORED as paidBy: it must resolve to the same ''/'own' convention every other "own"
+    // record uses, or it silently disappears from the active-view filter once the app
+    // isn't showing "All" anymore. `editSplitGroup` participants use real record ids, not
+    // 'me', so they're identified by their original record having had an empty paidBy.
+    const resolveSplitParticipantPaidBy = (p) => {
+        if (p.id === 'me') return resolveActiveViewValue(activeView);
+        if (editSplitGroup) {
+            const original = editSplitGroup.find(r => r.id === p.id);
+            if (original && !(original.paidBy || '').trim()) return resolveActiveViewValue(activeView);
+        }
+        return p.name;
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
         setIsSubmitting(true);
@@ -1611,7 +1691,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     const share = splitMethod === 'equal'
                         ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                         : parseFloat(customAmounts[p.id] || 0);
-                    DataService.updateExpense(p.id, { ...sharedFields, amount: share, paidBy: p.name });
+                    DataService.updateExpense(p.id, { ...sharedFields, amount: share, paidBy: resolveSplitParticipantPaidBy(p) });
                 });
                 setShowSuccess(true);
                 setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
@@ -1631,7 +1711,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         const share = splitMethod === 'equal'
                             ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                             : parseFloat(customAmounts[p.id] || 0);
-                        DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: p.name, splitGroupId, isSplitRecord: true });
+                        DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), splitGroupId, isSplitRecord: true });
                     });
                 } else {
                     DataService.updateExpense(editExpense.id, expenseData);
@@ -1646,7 +1726,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     const share = splitMethod === 'equal'
                         ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                         : parseFloat(customAmounts[p.id] || 0);
-                    DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: p.name, splitGroupId, isSplitRecord: true });
+                    DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), splitGroupId, isSplitRecord: true });
                 });
                 if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
             } else {
@@ -1745,19 +1825,15 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         {errors.subcategory && <div className="invalid-feedback">{errors.subcategory}</div>}
                     </div>
                 )}
-                {!editSplitGroup && (
+                {/* Hidden when a single Active View is selected — the expense is auto-tagged to
+                    that person (see formData.paidBy's initializer above). Reappears, restricted
+                    to just the currently-selected participants, when multiple are active. */}
+                {!editSplitGroup && activeView.length > 1 && (
                     <div className="form-group">
-                        <label htmlFor="paidBy">Who's Expense (Optional)</label>
-                        {people.length > 0 ? (
-                            <select id="paidBy" className={'form-select ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
-                                <option value="">— Me / My Own —</option>
-                                {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
-                            </select>
-                        ) : (
-                            <input type="text" id="paidBy" className={'form-control ' + (errors.paidBy ? 'is-invalid' : '')} value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
-                        )}
+                        <label htmlFor="paidBy">Who's Expense</label>
+                        <PersonSelect id="paidBy" value={formData.paidBy} onChange={(v) => handleInputChange('paidBy', v)} activeView={activeView} className={'form-select ' + (errors.paidBy ? 'is-invalid' : '')} />
                         {errors.paidBy && <div className="invalid-feedback">{errors.paidBy}</div>}
-                        <div className="form-text">{people.length > 0 ? 'Select who paid for this expense' : 'Enter who paid for this expense (leave empty if it\'s your own)'}</div>
+                        <div className="form-text">Select who paid for this expense</div>
                     </div>
                 )}
                 <div className="form-group">
@@ -1856,7 +1932,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     );
 }
 
-function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '' }) {
+function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '', activeView }) {
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
     const [filterPerson, setFilterPerson] = useState(initialPaidBy || '');
@@ -1867,7 +1943,6 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [showEditConfirm, setShowEditConfirm] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
-    const [people, setPeople] = useState([]);
     const [duplicatingExpense, setDuplicatingExpense] = useState(null);
     const [duplicateDate, setDuplicateDate] = useState('today');
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
@@ -1877,7 +1952,9 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
     const [openMenuId, setOpenMenuId] = useState(null);
 
-    useEffect(() => { setPeople(DataService.getPeople()); }, [expenses]);
+    // The person sub-filter only makes sense (and is only shown) when multiple
+    // participants are active — drop any stale selection once it drops back to one.
+    useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
 
     useEffect(() => {
         if (!openMenuId) return;
@@ -1931,11 +2008,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const expensesByCurrency = filteredExpenses.reduce((acc, expense) => { const currency = expense.currency || 'USD'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += expense.amount; acc[currency].count += 1; return acc; }, {});
 
     if (editingExpense) {
-        return (<ExpenseForm categories={categories} editExpense={editingExpense} onSave={() => { setEditingExpense(null); onUpdate(); }} onCancel={() => setEditingExpense(null)} />);
+        return (<ExpenseForm categories={categories} editExpense={editingExpense} onSave={() => { setEditingExpense(null); onUpdate(); }} onCancel={() => setEditingExpense(null)} activeView={activeView} />);
     }
     if (editingSplitGroupId) {
         const groupRecords = expenses.filter(e => e.splitGroupId === editingSplitGroupId);
-        return (<ExpenseForm categories={categories} editSplitGroup={groupRecords} onSave={() => { setEditingSplitGroupId(null); onUpdate(); }} onCancel={() => setEditingSplitGroupId(null)} />);
+        return (<ExpenseForm categories={categories} editSplitGroup={groupRecords} onSave={() => { setEditingSplitGroupId(null); onUpdate(); }} onCancel={() => setEditingSplitGroupId(null)} activeView={activeView} />);
     }
 
     return (
@@ -1975,11 +2052,16 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             {selectedCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
                         </select>
                     )}
-                    <select className="form-select" value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)}>
-                        <option value="">All People</option>
-                        <option value="__mine__">My Expenses Only</option>
-                        {[...new Set([...people.map(p => p.name), ...expenses.map(e => e.paidBy).filter(Boolean)])].sort().map(name => (<option key={name} value={name}>{name}</option>))}
-                    </select>
+                    {/* Hidden when a single Active View is selected — expenses are already
+                        scoped to that person upstream. Reappears, restricted to just the
+                        selected participants, when multiple are active. */}
+                    {activeView.length > 1 && (
+                        <select className="form-select" value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)}>
+                            <option value="">All (selected participants)</option>
+                            {activeView.includes('own') && <option value="__mine__">My Expenses Only</option>}
+                            {activeView.filter(v => v !== 'own').map(name => (<option key={name} value={name}>{name}</option>))}
+                        </select>
+                    )}
                 </div>
                 {(() => { const allTags = [...new Set(expenses.flatMap(e => e.tags || []))].sort(); return allTags.length > 0 ? (
                     <div className="filter-row" style={{flexDirection:'column',alignItems:'flex-start',gap:'6px'}}>
@@ -2336,13 +2418,9 @@ function CategoryManager({ categories, onUpdate, defaultCurrency }) {
     );
 }
 
-function IncomeForm({ income, onUpdate }) {
+function IncomeForm({ income, onUpdate, activeView }) {
     const [people, setPeople] = useState([]);
-    const [formData, setFormData] = useState(() => {
-        const peopleList = DataService.getPeople();
-        const defaultPerson = peopleList.find(p => p.isDefault);
-        return { amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: defaultPerson ? defaultPerson.name : '', currency: 'GBP' };
-    });
+    const [formData, setFormData] = useState(() => ({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: resolveActiveViewValue(activeView), currency: 'GBP' }));
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -2364,7 +2442,7 @@ function IncomeForm({ income, onUpdate }) {
             const incomeData = { ...formData, amount: parseFloat(formData.amount) };
             if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); if (isRecurring) { DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }); } }
             setShowSuccess(true);
-            setTimeout(() => { setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP' }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
+            setTimeout(() => { setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: resolveActiveViewValue(activeView), currency: 'GBP' }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
         setIsSubmitting(false);
     };
@@ -2414,18 +2492,16 @@ function IncomeForm({ income, onUpdate }) {
                         <label htmlFor="description">Description (Optional)</label>
                         <input type="text" id="description" className="form-control" value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Additional details" />
                     </div>
-                    <div className="form-group">
-                        <label htmlFor="paidBy">Who's Income (Optional)</label>
-                        {people.length > 0 ? (
-                            <select id="paidBy" className="form-select" value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)}>
-                                <option value="">— Me / My Own —</option>
-                                {people.map(p => (<option key={p.id} value={p.name}>{p.name}</option>))}
-                            </select>
-                        ) : (
-                            <input type="text" id="paidBy" className="form-control" value={formData.paidBy} onChange={(e) => handleInputChange('paidBy', e.target.value)} placeholder="e.g., John, Mary, Shared" />
-                        )}
-                        <div className="form-text">{people.length > 0 ? 'Select who received this income' : 'Enter who received this income (leave empty if it\'s your own)'}</div>
-                    </div>
+                    {/* Hidden when a single Active View is selected — the income is auto-tagged
+                        to that person. Reappears, restricted to the selected participants,
+                        when multiple are active. */}
+                    {activeView.length > 1 && (
+                        <div className="form-group">
+                            <label htmlFor="paidBy">Who's Income</label>
+                            <PersonSelect id="paidBy" value={formData.paidBy} onChange={(v) => handleInputChange('paidBy', v)} activeView={activeView} className="form-select" />
+                            <div className="form-text">Select who received this income</div>
+                        </div>
+                    )}
                     {!editingIncome && (
                         <div className="form-group">
                             <div className="form-check">
@@ -2668,12 +2744,16 @@ function CategoryBarChart({ items, defaultCurrency }) {
     );
 }
 
-function Summary({ expenses, income, categories, defaultCurrency }) {
+function Summary({ expenses, income, categories, defaultCurrency, activeView }) {
     const [timeRange, setTimeRange] = useState('month');
     const [selectedCategory, setSelectedCategory] = useState('');
     const [selectedPaidBy, setSelectedPaidBy] = useState('');
     const [budgetData, setBudgetData] = useState([]);
     const [convertedExpenses, setConvertedExpenses] = useState([]);
+
+    // The person sub-filter only makes sense (and is only shown) when multiple
+    // participants are active — drop any stale selection once it drops back to one.
+    useEffect(() => { if (activeView.length <= 1 && selectedPaidBy) setSelectedPaidBy(''); }, [activeView]);
     const [convertedIncome, setConvertedIncome] = useState([]);
 
     const convertAmountSync = (amount, fromCurrency, toCurrency) => {
@@ -2803,9 +2883,6 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     if (selectedCategory) {
         filteredExpenses = filteredExpenses.filter(exp => exp.categoryId === parseInt(selectedCategory));
     }
-    const expensePaidBy = convertedExpenses.filter(expense => expense.paidBy && expense.paidBy.trim() !== '').map(expense => expense.paidBy);
-    const incomePaidBy = convertedIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy.trim() !== '').map(incomeItem => incomeItem.paidBy);
-    const uniquePaidBy = [...new Set([...expensePaidBy, ...incomePaidBy])].sort();
     const totalExpenses = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
     const totalIncome = filteredIncome.reduce((sum, inc) => sum + inc.amount, 0);
     const netAmount = totalIncome - totalExpenses;
@@ -2860,13 +2937,19 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
                             <option value="week">This Week</option><option value="month">This Month</option><option value="year">This Year</option>
                         </select>
                     </div>
-                    <div className="filter-group">
-                        <label className="filter-label">Filter by Person:</label>
-                        <select className="form-select form-select-sm" value={selectedPaidBy} onChange={(e) => setSelectedPaidBy(e.target.value)}>
-                            <option value="">All People</option><option value="self">My Money Only</option>
-                            {uniquePaidBy.map(person => (<option key={person} value={person}>{person}'s Money Only</option>))}
-                        </select>
-                    </div>
+                    {/* Hidden when a single Active View is selected — data is already scoped to
+                        that person upstream. Reappears, restricted to the selected
+                        participants, when multiple are active. */}
+                    {activeView.length > 1 && (
+                        <div className="filter-group">
+                            <label className="filter-label">Filter by Person:</label>
+                            <select className="form-select form-select-sm" value={selectedPaidBy} onChange={(e) => setSelectedPaidBy(e.target.value)}>
+                                <option value="">All (selected participants)</option>
+                                {activeView.includes('own') && <option value="self">My Money Only</option>}
+                                {activeView.filter(v => v !== 'own').map(person => (<option key={person} value={person}>{person}'s Money Only</option>))}
+                            </select>
+                        </div>
+                    )}
                     <div className="filter-group">
                         <label className="filter-label">Category:</label>
                         <select className="form-select form-select-sm" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
@@ -2942,7 +3025,30 @@ function Summary({ expenses, income, categories, defaultCurrency }) {
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory }) {
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled }) {
+    const activeViewSectionRef = React.useRef(null);
+    // Delayed slightly so this fires after this screen's own async effects (people,
+    // backup history, settings) have settled, since scrolling before they load targets
+    // a position that content loading afterward could shift.
+    useEffect(() => {
+        if (scrollTarget !== 'activeView') return;
+        const timer = setTimeout(() => {
+            if (activeViewSectionRef.current) activeViewSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            if (onScrollTargetHandled) onScrollTargetHandled();
+        }, 200);
+        return () => clearTimeout(timer);
+    }, [scrollTarget]);
+    const handleToggleActiveViewPerson = (key) => {
+        const isSelected = activeView.includes(key);
+        let next;
+        if (isSelected) {
+            next = activeView.filter(v => v !== key);
+            if (next.length === 0) next = ['own'];
+        } else {
+            next = [...activeView, key];
+        }
+        if (onActiveViewChange) onActiveViewChange(next);
+    };
     const [saveMessage, setSaveMessage] = useState('');
     const [people, setPeople] = useState([]);
     const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
@@ -3283,6 +3389,30 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 </div>
             )}
+
+            <hr style={{margin: '1.5rem 0'}} />
+            <div ref={activeViewSectionRef} style={{marginBottom: '1.5rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
+                    <i className="fas fa-user"></i> Active View
+                </h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
+                    Choose whose data you want to see across the app. Select more than one to compare.
+                </p>
+                <div className="d-flex align-items-center justify-content-between" style={{padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: activeView.includes('own') ? '#eef2ff' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (activeView.includes('own') ? '#c7d2fe' : '#e9ecef')}}>
+                    <div className="form-check mb-0">
+                        <input className="form-check-input" type="checkbox" id="activeViewOwn" checked={activeView.includes('own')} onChange={() => handleToggleActiveViewPerson('own')} style={{cursor: 'pointer'}} />
+                        <label className="form-check-label" htmlFor="activeViewOwn" style={{cursor: 'pointer'}}>Me / My Own{currentUser && currentUser.displayName ? ` (${currentUser.displayName})` : ''}</label>
+                    </div>
+                </div>
+                {people.map(person => (
+                    <div key={person.id} className="d-flex align-items-center justify-content-between" style={{padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: activeView.includes(person.name) ? '#eef2ff' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (activeView.includes(person.name) ? '#c7d2fe' : '#e9ecef')}}>
+                        <div className="form-check mb-0">
+                            <input className="form-check-input" type="checkbox" id={'activeView-' + person.id} checked={activeView.includes(person.name)} onChange={() => handleToggleActiveViewPerson(person.name)} style={{cursor: 'pointer'}} />
+                            <label className="form-check-label" htmlFor={'activeView-' + person.id} style={{cursor: 'pointer'}}>{person.name}{person.relationship ? ` (${person.relationship})` : ''}</label>
+                        </div>
+                    </div>
+                ))}
+            </div>
 
             <hr style={{margin: '1.5rem 0'}} />
             <div style={{marginBottom: '1rem'}}>
@@ -3965,12 +4095,12 @@ function BulkUpload({ categories, onUpdate }) {
     );
 }
 
-function SavingsGoals({ defaultCurrency }) {
+function SavingsGoals({ defaultCurrency, activeView }) {
     const [goals, setGoals] = useState([]);
     const [monthlyNet, setMonthlyNet] = useState(0);
     const [showForm, setShowForm] = useState(false);
     const [editingGoal, setEditingGoal] = useState(null);
-    const [formData, setFormData] = useState({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '' });
+    const [formData, setFormData] = useState({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '', owner: resolveActiveViewValue(activeView) });
     const [formErrors, setFormErrors] = useState({});
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [addFundsGoalId, setAddFundsGoalId] = useState(null);
@@ -3993,7 +4123,7 @@ function SavingsGoals({ defaultCurrency }) {
     }, []);
 
     const resetForm = () => {
-        setFormData({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '' });
+        setFormData({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '', owner: resolveActiveViewValue(activeView) });
         setFormErrors({});
         setEditingGoal(null);
     };
@@ -4007,16 +4137,16 @@ function SavingsGoals({ defaultCurrency }) {
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
         try {
             if (editingGoal) {
-                DataService.updateGoal(editingGoal.id, { name: formData.name.trim(), targetAmount: parseFloat(formData.targetAmount), currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: parseFloat(formData.currentSaved || 0) });
+                DataService.updateGoal(editingGoal.id, { name: formData.name.trim(), targetAmount: parseFloat(formData.targetAmount), currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: parseFloat(formData.currentSaved || 0), owner: formData.owner || 'own' });
             } else {
-                DataService.addGoal({ name: formData.name.trim(), targetAmount: formData.targetAmount, currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: formData.currentSaved });
+                DataService.addGoal({ name: formData.name.trim(), targetAmount: formData.targetAmount, currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: formData.currentSaved, owner: formData.owner || 'own' });
             }
             resetForm(); setShowForm(false); loadGoals();
         } catch (err) { setFormErrors({ name: err.message }); }
     };
 
     const handleEdit = (goal) => {
-        setFormData({ name: goal.name, targetAmount: goal.targetAmount.toString(), currency: goal.currency || defaultCurrency || 'GBP', deadline: goal.deadline || '', currentSaved: goal.currentSaved.toString(), emoji: goal.emoji || '', notes: goal.notes || '' });
+        setFormData({ name: goal.name, targetAmount: goal.targetAmount.toString(), currency: goal.currency || defaultCurrency || 'GBP', deadline: goal.deadline || '', currentSaved: goal.currentSaved.toString(), emoji: goal.emoji || '', notes: goal.notes || '', owner: goal.owner || 'own' });
         setEditingGoal(goal); setShowForm(true);
     };
 
@@ -4046,6 +4176,7 @@ function SavingsGoals({ defaultCurrency }) {
 
     const currencies = ['GBP', 'EUR', 'USD', 'INR'];
     const fmt = (amount, currency) => ValidationUtils.formatCurrency(amount, currency || defaultCurrency);
+    const visibleGoals = goals.filter(g => matchesActiveView(g.owner, activeView));
 
     return (
         <div className="screen">
@@ -4092,6 +4223,12 @@ function SavingsGoals({ defaultCurrency }) {
                                     <input type="date" className={'form-control ' + (formErrors.deadline ? 'is-invalid' : '')} value={formData.deadline} onChange={e => setFormData(p => ({...p, deadline: e.target.value}))} />
                                     {formErrors.deadline && <div className="invalid-feedback">{formErrors.deadline}</div>}
                                 </div>
+                                {activeView.length > 1 && (
+                                    <div className="col-12">
+                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Owner</label>
+                                        <PersonSelect value={formData.owner} onChange={v => setFormData(p => ({...p, owner: v}))} activeView={activeView} className="form-select" ownLabel="Own (Me)" />
+                                    </div>
+                                )}
                                 <div className="col-12">
                                     <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Notes (optional)</label>
                                     <textarea className="form-control" rows={2} value={formData.notes} onChange={e => setFormData(p => ({...p, notes: e.target.value}))} placeholder="Optional notes..." />
@@ -4106,14 +4243,14 @@ function SavingsGoals({ defaultCurrency }) {
                 </div>
             )}
 
-            {goals.length === 0 && !showForm ? (
+            {visibleGoals.length === 0 && !showForm ? (
                 <div className="empty-state">
                     <i className="fas fa-piggy-bank fa-3x"></i>
                     <h4>No savings goals yet</h4>
                     <p>Create your first goal!</p>
                 </div>
             ) : (
-                goals.map(goal => {
+                visibleGoals.map(goal => {
                     const pct = goal.targetAmount > 0 ? Math.min((goal.currentSaved / goal.targetAmount) * 100, 100) : 0;
                     const reached = goal.currentSaved >= goal.targetAmount;
                     const projected = getProjectedCompletion(goal);
@@ -4440,7 +4577,7 @@ function BillTracker({ categories, onUpdate }) {
     );
 }
 
-function RecurringList({ onUpdate }) {
+function RecurringList({ onUpdate, activeView }) {
     const [schedules, setSchedules] = useState([]);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
 
@@ -4448,6 +4585,9 @@ function RecurringList({ onUpdate }) {
     useEffect(() => { load(); }, []);
 
     const today = new Date().toISOString().split('T')[0];
+    // Schedules have no field of their own — they inherit paidBy from the template
+    // expense/income record they were created from.
+    const visibleSchedules = schedules.filter(s => matchesActiveView(s.templateExpense && s.templateExpense.paidBy, activeView));
 
     const getStatus = (s) => {
         if (s.endDate && today > s.endDate) return 'ended';
@@ -4471,7 +4611,7 @@ function RecurringList({ onUpdate }) {
     return (
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-redo me-2"></i>Recurring Transactions</h2></div>
-            {schedules.length === 0 ? (
+            {visibleSchedules.length === 0 ? (
                 <div className="empty-state">
                     <i className="fas fa-redo fa-3x"></i>
                     <h4>No recurring transactions</h4>
@@ -4479,7 +4619,7 @@ function RecurringList({ onUpdate }) {
                 </div>
             ) : (
                 <div style={{padding: '0 1rem 1rem'}}>
-                    {schedules.map(s => {
+                    {visibleSchedules.map(s => {
                         const status = getStatus(s);
                         const t = s.templateExpense || {};
                         const isDueToday = s.nextDue === today;
@@ -5645,16 +5785,13 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
     );
 }
 
-function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentUser, onMonthSelect }) {
+function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthSelect }) {
     const [timeWindow, setTimeWindow] = useState(() => sessionStorage.getItem('trends_timeWindow') || '6m');
-    const [selectedPerson, setSelectedPerson] = useState(() => sessionStorage.getItem('trends_person') || '__me__');
     const [selectedCats, setSelectedCats] = useState(() => { try { return JSON.parse(sessionStorage.getItem('trends_cats') || '[]'); } catch(_) { return []; } });
     const [showCatFilter, setShowCatFilter] = useState(false);
     const [expanded, setExpanded] = useState({});
-    const [people] = useState(() => DataService.getPeople());
 
     const setTw = (v) => { setTimeWindow(v); sessionStorage.setItem('trends_timeWindow', v); };
-    const setPerson = (v) => { setSelectedPerson(v); sessionStorage.setItem('trends_person', v); };
     const setCats = (fn) => { setSelectedCats(prev => { const next = typeof fn === 'function' ? fn(prev) : fn; sessionStorage.setItem('trends_cats', JSON.stringify(next)); return next; }); };
 
     const toggle = (key) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
@@ -5685,34 +5822,10 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
     const months = getMonths();
     const now = new Date();
     const curYear = now.getFullYear(), curMonth = now.getMonth();
-    const personName = currentUser ? (currentUser.displayName || 'Me') : 'Me';
-
-    const myName = (currentUser ? (currentUser.displayName || '') : '').toLowerCase().trim();
-
-    const filteredExpenses = (() => {
-        let exps = expenses;
-        if (selectedPerson === '__me__') {
-            exps = exps.filter(e => {
-                const pb = (e.paidBy || '').toLowerCase().trim();
-                return !pb || (myName && pb === myName);
-            });
-        } else if (selectedPerson !== '__all__') {
-            exps = exps.filter(e => (e.paidBy || '').trim() === selectedPerson);
-        }
-        if (selectedCats.length > 0) exps = exps.filter(e => selectedCats.includes(e.categoryId));
-        return exps;
-    })();
-
-    const filteredIncome = (() => {
-        if (selectedPerson === '__all__') return income;
-        if (selectedPerson === '__me__') {
-            return income.filter(i => {
-                const wi = (i.whosIncome || i.paidBy || '').toLowerCase().trim();
-                return !wi || (myName && wi === myName);
-            });
-        }
-        return income.filter(i => (i.whosIncome || i.paidBy || '').trim() === selectedPerson);
-    })();
+    // Person scoping now comes entirely from the global Active View — expenses/income
+    // arrive already filtered by it; this screen only adds its own category filter.
+    const filteredExpenses = selectedCats.length > 0 ? expenses.filter(e => selectedCats.includes(e.categoryId)) : expenses;
+    const filteredIncome = income;
 
     const monthData = months.map(({ year, month }) => {
         const mm = String(month + 1).padStart(2, '0');
@@ -5776,11 +5889,6 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
             </div>
 
             <div style={{padding:'0 1rem 0.6rem',display:'flex',gap:'8px',flexWrap:'wrap'}}>
-                <select className="form-select form-select-sm" style={{flex:'1',minWidth:'150px'}} value={selectedPerson} onChange={e => setPerson(e.target.value)}>
-                    <option value="__me__">My expenses ({personName})</option>
-                    <option value="__all__">Everyone</option>
-                    {people.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                </select>
                 <button type="button" className={'btn btn-sm ' + (selectedCats.length > 0 ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setShowCatFilter(v => !v)} style={{whiteSpace:'nowrap'}}>
                     <i className="fas fa-filter me-1"></i>Categories{selectedCats.length > 0 ? ` (${selectedCats.length})` : ''}
                 </button>
@@ -5867,7 +5975,6 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                             const incKey = `${m.prefix}:inc`;
                             const hasCat = Object.keys(m.catBreakdown).length > 0;
                             const hasInc = Object.keys(m.incomeBreakdown).length > 0;
-                            const paidByFilter = selectedPerson === '__all__' ? '' : selectedPerson === '__me__' ? '__mine__' : selectedPerson;
                             return (
                                 <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
                                     <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 62px 52px',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
@@ -5877,7 +5984,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
                                         </div>
                                         <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>
                                         <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
-                                            onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to, paidByFilter)}
+                                            onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to)}
                                             title={m.totalExp > 0 ? `View ${m.label} expenses` : undefined}>
                                             {m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}
                                         </div>
@@ -5954,12 +6061,12 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, currentU
     );
 }
 
-function NetWorth({ defaultCurrency }) {
+function NetWorth({ defaultCurrency, activeView }) {
     const [items, setItems] = useState(() => DataService.getNetWorthItems());
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: 'own' });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: resolveActiveViewValue(activeView) });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -5967,21 +6074,19 @@ function NetWorth({ defaultCurrency }) {
     const [valuationItem, setValuationItem] = useState(null);
     const [valuationValue, setValuationValue] = useState('');
     const [valuationError, setValuationError] = useState('');
-    const [selectedPerson, setSelectedPerson] = useState('own');
-    const [people, setPeople] = useState(() => DataService.getPeople());
     const [allExpenses, setAllExpenses] = useState(() => DataService.data.expenses || []);
     const [allIncome, setAllIncome] = useState(() => DataService.data.income || []);
 
     useEffect(() => {
-        setPeople(DataService.getPeople());
         setAllExpenses(DataService.data.expenses || []);
         setAllIncome(DataService.data.income || []);
     }, []);
 
-    // Sync form person when person filter changes (only when form is not open for editing)
+    // Reseed the form's person whenever the active view changes (only when not mid-edit),
+    // so a freshly-opened Add form defaults to whoever's view is currently active.
     useEffect(() => {
-        if (!editingItem) setForm(f => ({...f, person: selectedPerson}));
-    }, [selectedPerson]);
+        if (!editingItem) setForm(f => ({...f, person: resolveActiveViewValue(activeView)}));
+    }, [activeView]);
 
     const ASSET_CATS = ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'];
     const LIABILITY_CATS = ['Mortgage', 'Loan', 'Credit Card', 'Other'];
@@ -6000,25 +6105,18 @@ function NetWorth({ defaultCurrency }) {
         catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
     };
 
-    // Cash Flow (income − expenses) filtered by person
-    const filteredExpenses = allExpenses.filter(r => {
-        if (selectedPerson === 'own') return !r.paidBy || r.paidBy.trim() === '';
-        return r.paidBy && r.paidBy.trim() === selectedPerson;
-    });
-    const filteredIncome = allIncome.filter(r => {
-        const person = (r.whosIncome || r.paidBy || '').trim();
-        if (selectedPerson === 'own') return person === '';
-        return person === selectedPerson;
-    });
+    // Cash Flow (income − expenses) filtered by the global active view
+    const filteredExpenses = allExpenses.filter(r => matchesActiveView(r.paidBy, activeView));
+    const filteredIncome = allIncome.filter(r => matchesActiveView(r.whosIncome || r.paidBy, activeView));
     const totalIncomeConverted = filteredIncome.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
     const totalExpensesConverted = filteredExpenses.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
     const cashFlow = totalIncomeConverted - totalExpensesConverted;
 
-    // Debts "I Owe" → shown as liabilities, filtered by selected person
-    const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled && (d.person || 'own') === selectedPerson);
+    // Debts "I Owe" → shown as liabilities, filtered by the global active view
+    const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled && (matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v))));
 
-    // Filter items by selected person
-    const visibleItems = items.filter(i => (i.person || 'own') === selectedPerson);
+    // Filter items by the global active view
+    const visibleItems = items.filter(i => matchesActiveView(i.person, activeView));
 
     const totalAssets = visibleItems.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalManualLiabilities = visibleItems.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
@@ -6029,7 +6127,7 @@ function NetWorth({ defaultCurrency }) {
 
     const openAddForm = () => {
         setEditingItem(null);
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: selectedPerson });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', category: 'Cash', notes: '', person: resolveActiveViewValue(activeView) });
         setFormErrors({});
         setShowForm(true);
     };
@@ -6115,14 +6213,6 @@ function NetWorth({ defaultCurrency }) {
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
 
-            {/* Person filter */}
-            <div style={{padding:'0 1rem 0.5rem'}}>
-                <select className="form-select form-select-sm" value={selectedPerson} onChange={e => setSelectedPerson(e.target.value)}>
-                    <option value="own">Own (Me)</option>
-                    {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
-                </select>
-            </div>
-
             {/* Summary banner — Total Assets | Cash Flow | Liabilities, then Net Worth centred */}
             <div style={{padding:'0 1rem 0.5rem'}}>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
@@ -6196,13 +6286,12 @@ function NetWorth({ defaultCurrency }) {
                                 {(form.type === 'asset' ? ASSET_CATS : LIABILITY_CATS).map(c => <option key={c} value={c}>{c}</option>)}
                             </select>
                         </div>
-                        <div className="mb-2">
-                            <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
-                            <select className="form-select form-select-sm" value={form.person} onChange={e => setForm(f => ({...f, person: e.target.value}))}>
-                                <option value="own">Own (Me)</option>
-                                {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
-                            </select>
-                        </div>
+                        {activeView.length > 1 && (
+                            <div className="mb-2">
+                                <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
+                                <PersonSelect value={form.person} onChange={v => setForm(f => ({...f, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
+                            </div>
+                        )}
                         <div className="mb-3">
                             <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
                                 onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
@@ -6389,12 +6478,12 @@ function NetWorth({ defaultCurrency }) {
     );
 }
 
-function DebtTracker({ defaultCurrency, categories, onUpdate }) {
+function DebtTracker({ defaultCurrency, categories, onUpdate, activeView }) {
     const [activeTab, setActiveTab] = useState('owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
     const [showForm, setShowForm] = useState(false);
     const [editingDebt, setEditingDebt] = useState(null);
-    const [form, setForm] = useState({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: 'own' });
+    const [form, setForm] = useState({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) });
     const [formErrors, setFormErrors] = useState({});
     const [showSettleModal, setShowSettleModal] = useState(null);
     const [showDeleteModal, setShowDeleteModal] = useState(null);
@@ -6402,15 +6491,17 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const [linkedCatId, setLinkedCatId] = useState('');
     const [linkedSubcat, setLinkedSubcat] = useState('');
     const [showSettled, setShowSettled] = useState(false);
-    const [selectedPerson, setSelectedPerson] = useState('own');
-    const [people] = useState(() => DataService.getPeople());
 
     const reload = () => setDebts(DataService.getDebts());
     const today = new Date().toISOString().split('T')[0];
     const currencies = ['GBP', 'EUR', 'USD', 'INR'];
     const isOverdue = (d) => d.dueDate && d.dueDate < today && !d.isSettled;
 
-    const personDebts = debts.filter(d => (d.person || 'own') === selectedPerson);
+    // Global Active View replaces this screen's own person filter: a debt is visible if
+    // it's linked to a selected person, OR it was created while a selected person's view
+    // was active (so a debt you logged for yourself while viewing "John" still shows up
+    // when you switch back to John's view, even though its `person` field is 'own').
+    const personDebts = debts.filter(d => matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v)));
     const activeDebts = personDebts.filter(d => !d.isSettled && d.direction === activeTab);
     const settledDebts = personDebts.filter(d => d.isSettled && d.direction === activeTab);
     const sortedActive = [...activeDebts].sort((a, b) => (isOverdue(a) ? 0 : 1) - (isOverdue(b) ? 0 : 1) || new Date(b.createdAt) - new Date(a.createdAt));
@@ -6437,9 +6528,9 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
             DataService.updateDebt(editingDebt.id, { counterparty: form.counterparty.trim(), amount: parseFloat(form.amount), currency: form.currency, notes: form.notes, dueDate: form.dueDate, person: form.person || 'own' });
             setEditingDebt(null);
         } else {
-            DataService.addDebt({ ...form, counterparty: form.counterparty.trim(), direction: activeTab });
+            DataService.addDebt({ ...form, counterparty: form.counterparty.trim(), direction: activeTab, createdInView: activeView });
         }
-        setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson });
+        setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) });
         setFormErrors({});
         setShowForm(false);
         reload();
@@ -6464,9 +6555,9 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     const handleLinkedRecord = async (debt) => {
         if (debt.direction === 'owe') {
             const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
-            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId ? Number(linkedCatId) : null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: '', tags: [] });
+            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId ? Number(linkedCatId) : null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: resolveActiveViewValue(activeView), tags: [] });
         } else {
-            await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, whosIncome: '' });
+            await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, whosIncome: resolveActiveViewValue(activeView) });
         }
         setLinkedCatId('');
         setLinkedSubcat('');
@@ -6479,14 +6570,6 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
     return (
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-handshake me-2"></i>Debt Tracker</h2></div>
-
-            {/* Person filter */}
-            <div style={{padding:'0 1rem 0.5rem'}}>
-                <select className="form-select form-select-sm" value={selectedPerson} onChange={e => { setSelectedPerson(e.target.value); setShowForm(false); setEditingDebt(null); }}>
-                    <option value="own">Own (Me)</option>
-                    {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
-                </select>
-            </div>
 
             <div style={{padding:'0 1rem 0.75rem',display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
                 <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'10px 12px'}}>
@@ -6510,7 +6593,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
                 <button type="button" className={'btn btn-sm flex-fill ' + (activeTab==='owed' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => setActiveTab('owed')}>
                     <i className="fas fa-arrow-down me-1"></i>Owed to Me
                 </button>
-                <button type="button" className={'btn btn-sm ' + (showForm ? 'btn-secondary' : 'btn-primary')} onClick={() => { if (showForm) { setShowForm(false); setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson }); } else { setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: selectedPerson }); setShowForm(true); } }} title="Add debt">
+                <button type="button" className={'btn btn-sm ' + (showForm ? 'btn-secondary' : 'btn-primary')} onClick={() => { if (showForm) { setShowForm(false); setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) }); } else { setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) }); setShowForm(true); } }} title="Add debt">
                     <i className={'fas fa-' + (showForm ? 'times' : 'plus')}></i>
                 </button>
             </div>
@@ -6541,13 +6624,12 @@ function DebtTracker({ defaultCurrency, categories, onUpdate }) {
                                 onChange={e => setForm(f => ({...f, dueDate: e.target.value}))} />
                             <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>Due date (optional)</div>
                         </div>
-                        <div className="mb-2">
-                            <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
-                            <select className="form-select form-select-sm" value={form.person} onChange={e => setForm(f => ({...f, person: e.target.value}))}>
-                                <option value="own">Own (Me)</option>
-                                {people.map(p => <option key={p.id} value={p.name}>{p.name}{p.relationship ? ` (${p.relationship})` : ''}</option>)}
-                            </select>
-                        </div>
+                        {activeView.length > 1 && (
+                            <div className="mb-2">
+                                <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
+                                <PersonSelect value={form.person} onChange={v => setForm(f => ({...f, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
+                            </div>
+                        )}
                         <div className="mb-3">
                             <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
                                 onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
@@ -6729,6 +6811,8 @@ function showDesktopNotifications(alerts) {
 
 function App() {
     const [currentScreen, setCurrentScreen] = useState('expenses');
+    const [activeView, setActiveViewState] = useState(() => getActiveView());
+    const [settingsScrollTarget, setSettingsScrollTarget] = useState(null);
     const [expenses, setExpenses] = useState([]);
     const [income, setIncome] = useState([]);
     const [categories, setCategories] = useState([]);
@@ -6738,7 +6822,6 @@ function App() {
     const [showNotifPanel, setShowNotifPanel] = useState(false);
     const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
-    const [expensesInitPaidBy, setExpensesInitPaidBy] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
         if (window.__firebaseReady) return null;
         try {
@@ -6961,6 +7044,29 @@ function App() {
         }
     }, [currentUser ? currentUser.uid : null]);
 
+    // Fetches expenses/income/categories/settings and applies the active-view filter to
+    // expenses/income before they reach any screen — the one place Feature 3 requires this
+    // for the two data types that already flow centrally through App. Takes the view
+    // explicitly (rather than reading the `activeView` closure) so callers that just changed
+    // the view can pass the new value straight through without waiting on React's async
+    // state update.
+    const reloadCoreData = async (view) => {
+        const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
+            DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
+        ]);
+        setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
+        setIncome(incomeData.filter(i => matchesActiveView(i.whosIncome || i.paidBy, view)));
+        setCategories(categoriesData);
+        setDefaultCurrency(settings.currency || 'GBP');
+        setPeople(DataService.getPeople());
+    };
+
+    const handleActiveViewChange = (newView) => {
+        setActiveView(newView);
+        setActiveViewState(newView);
+        reloadCoreData(newView);
+    };
+
     useEffect(() => {
         const loadData = async () => {
             try {
@@ -6975,11 +7081,7 @@ function App() {
                         localStorage.setItem('financeApp_lastAutoBackup', todayStr);
                     }
                 }
-                const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
-                    DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
-                ]);
-                setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
-                setPeople(DataService.getPeople());
+                await reloadCoreData(activeView);
                 await refreshNotifications();
             } catch (error) { console.error('Error loading data:', error); }
         };
@@ -7009,9 +7111,7 @@ function App() {
                             const merged = DataService.mergeBackups(backupToUpload, cloudBackup);
                             DataService.restoreBackup(merged);
                             DataService.isInitialized = false;
-                            const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
-                            setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                            setPeople(DataService.getPeople());
+                            await reloadCoreData(activeView);
                             backupToUpload = merged;
                         }
                     }
@@ -7075,11 +7175,7 @@ function App() {
 
     const handleDataUpdate = async () => {
         try {
-            const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
-                DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
-            ]);
-            setExpenses(expensesData); setIncome(incomeData); setCategories(categoriesData); setDefaultCurrency(settings.currency || 'GBP');
-            setPeople(DataService.getPeople());
+            await reloadCoreData(activeView);
             await refreshNotifications();
             // Guard: check BEFORE saveLatestBackup() sets financeApp_lastSaveTime, so that
             // a freshly-wiped device (just logged in, no local data yet) doesn't overwrite
@@ -7287,22 +7383,22 @@ function App() {
 
     const renderScreen = () => {
         switch (currentScreen) {
-            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} initialPaidBy={expensesInitPaidBy} />;
-            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} currentUser={currentUser} onMonthSelect={(from, to, paidBy) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setExpensesInitPaidBy(paidBy || ''); setCurrentScreen('expenses'); }} />;
-            case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} />;
+            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} activeView={activeView} />;
+            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
+            case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} />;
-            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} />;
-            case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} />;
-            case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} />;
+            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} />;
+            case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} />;
+            case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'bills': return <BillTracker categories={categories} onUpdate={handleDataUpdate} />;
-            case 'recurring': return <RecurringList onUpdate={handleDataUpdate} />;
+            case 'recurring': return <RecurringList onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
-            case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} />;
-            case 'networth': return <NetWorth defaultCurrency={defaultCurrency} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} />;
+            case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
+            case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} />;
+            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
-            default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} />;
+            default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
         }
     };
 
@@ -7355,6 +7451,9 @@ function App() {
             <div className="app-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <h1 style={{margin:0}}><i className="fas fa-wallet"></i> Personal Finance</h1>
                 <div style={{display:'flex',alignItems:'center',gap:'0.5rem'}}>
+                    <button className="btn btn-sm btn-outline-light" onClick={() => { setSettingsScrollTarget('activeView'); setCurrentScreen('settings'); }} title="Active view — tap to change">
+                        <i className="fas fa-user me-1"></i>{formatActiveViewLabel(activeView, currentUser ? currentUser.displayName : '')}
+                    </button>
                     {(storagePreference === 'gdrive' || storagePreference === 'onedrive') && (
                         <span style={{cursor:'default'}} title={syncStatus==='synced'?'Synced '+(lastSyncTime?new Date(lastSyncTime).toLocaleTimeString():''):syncStatus==='syncing'?'Syncing…':syncStatus==='reconnect-needed'?'Re-connect required':syncStatus==='error'?'Sync error':'Cloud sync'}>
                             {syncStatus==='syncing' && <i className="fas fa-spinner fa-spin" style={{color:'rgba(255,255,255,0.9)',fontSize:'0.85rem'}}></i>}
