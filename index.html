@@ -1225,12 +1225,18 @@ class DataService {
         }
         if (changed) this.saveRecurring(schedules);
     }
-    static createBackup() {
+    // currentUser is optional: pass the caller's already-known user (React state/closure)
+    // to avoid a race where localStorage's financeApp_currentUser has been cleared (e.g.
+    // by clearAllUserData() on logout/user-switch) before React state catches up, which
+    // would otherwise stamp userId: null onto the backup and make it permanently rejected
+    // by isBackupOwnedByCurrentUser() on this user's future signed-in sessions. Falls back
+    // to reading localStorage for callers with no user in scope (local-only backup paths).
+    static createBackup(currentUser) {
         const keys = ['expenses', 'income', 'categories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings', '_deletionLog'];
         const data = {};
         keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
-        const storedUser = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
-        return { version: '1.0', createdAt: new Date().toISOString(), userId: storedUser ? (storedUser.uid || String(storedUser.id) || null) : null, data };
+        const user = currentUser !== undefined ? currentUser : (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
+        return { version: '1.0', createdAt: new Date().toISOString(), userId: user ? (user.uid || String(user.id) || null) : null, data };
     }
     static downloadBackup() {
         const backup = this.createBackup();
@@ -1478,6 +1484,17 @@ function getOrCreateBackupSignKey(userId) {
         } catch (_) { return null; }
     }
     return key;
+}
+
+// Invalidates this device's signing key so a key extracted from the device (e.g. a
+// shared/borrowed machine) stops working after the user logs out or changes their
+// password. The next signBackupForUpload()/verifyBackupSignature() call transparently
+// generates a fresh key via getOrCreateBackupSignKey() — cross-device backups already
+// tolerate a non-matching key (see verifyBackupSignature's unverifiable branch), so
+// rotating here doesn't break restores from other devices.
+function rotateBackupSignKey(userId) {
+    if (!userId) return;
+    try { localStorage.removeItem('ftBsk_' + userId); } catch (_) {}
 }
 
 async function signBackupForUpload(backup, currentUser) {
@@ -4822,7 +4839,7 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
         if (svc && svc.isConfigured() && !cloudBackup) {
             try {
                 setOauthStep('uploading');
-                const signed = await signBackupForUpload(DataService.createBackup(), currentUser);
+                const signed = await signBackupForUpload(DataService.createBackup(currentUser), currentUser);
                 await svc.upload(signed);
                 localStorage.setItem('financeApp_lastCloudSync', new Date().toISOString());
             } catch (_) {
@@ -5649,6 +5666,9 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
                 const credential = EmailAuthProvider.credential(fbUser.email, currPw);
                 await fbUser.reauthenticateWithCredential(credential);
                 await fbUser.updatePassword(newPw);
+                // Rotate the backup signing key: a device compromised before this password
+                // change shouldn't keep a usable key after the account is re-secured
+                rotateBackupSignKey(fbUser.uid);
                 setCurrPw(''); setNewPw(''); setConfirmPw('');
                 setPwSuccess('Password changed successfully.');
                 setTimeout(() => setPwSuccess(''), 4000);
@@ -5674,6 +5694,9 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
             stored.passwordHash = await AuthUtils.hashPassword(newPw);
             delete stored.password;
             localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
+            // Rotate the backup signing key: a device compromised before this password
+            // change shouldn't keep a usable key after the account is re-secured
+            rotateBackupSignKey(stored.uid || String(stored.id));
             setCurrPw(''); setNewPw(''); setConfirmPw('');
             setPwSuccess('Password changed successfully.');
             setTimeout(() => setPwSuccess(''), 4000);
@@ -6959,7 +6982,7 @@ function App() {
                 const svc = pref === 'gdrive' ? GDriveService : OneDriveService;
                 if (svc.isConfigured() && svc.isTokenValid()) {
                     setSyncStatus('syncing');
-                    signBackupForUpload(DataService.createBackup(), currentUser).then(signed =>
+                    signBackupForUpload(DataService.createBackup(currentUser), currentUser).then(signed =>
                         SyncService.upload(signed)
                     ).then(result => {
                         if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
@@ -6995,7 +7018,7 @@ function App() {
                                     return;
                                 }
                                 // Both devices have data — merge so nothing is lost, then tell the user
-                                const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                                const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                                 DataService.restoreBackup(merged);
                                 DataService.isInitialized = false;
                                 setCloudSyncGate('idle');
@@ -7098,7 +7121,7 @@ function App() {
         try {
             // Download-first: merge any changes uploaded by another device
             // before writing our snapshot, so neither device loses data.
-            let backupToUpload = DataService.createBackup();
+            let backupToUpload = DataService.createBackup(currentUser);
             try {
                 const cloudBackup = await SyncService.download();
                 if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
@@ -7199,6 +7222,10 @@ function App() {
         // Clear session integrity token from sessionStorage (localStorage token wiped by clearAllUserData)
         sessionStorage.removeItem('financeApp_session_uid');
         sessionStorage.removeItem('financeApp_session_active');
+        // Rotate the backup signing key so it stops being valid for this account on this
+        // device once logged out (a stolen key from a shared/borrowed device shouldn't
+        // remain usable indefinitely)
+        if (currentUser) rotateBackupSignKey(currentUser.uid || String(currentUser.id));
         // Wipe all financial data so the next user on this device starts with a clean slate
         DataService.clearAllUserData();
         setCurrentUser(null); setStoragePreference(''); setShowStoragePicker(false);
@@ -7264,7 +7291,7 @@ function App() {
                         const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                         const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
                         if (localExp.length > 0 || localInc.length > 0) {
-                            const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                            const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                             DataService.restoreBackup(merged);
                             DataService.isInitialized = false;
                             const signedM = await signBackupForUpload(merged, currentUser);
@@ -7304,7 +7331,7 @@ function App() {
                     const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
                     if (cloudTime > localTime) {
                         // Merge cloud + local instead of replacing either side
-                        const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                        const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                         DataService.restoreBackup(merged);
                         DataService.isInitialized = false;
                         const signedMerged = await signBackupForUpload(merged, currentUser);
@@ -7319,7 +7346,7 @@ function App() {
                 }
             }
             // Local is up to date — upload it
-            const signedForSync = await signBackupForUpload(DataService.createBackup(), currentUser);
+            const signedForSync = await signBackupForUpload(DataService.createBackup(currentUser), currentUser);
             const result = await SyncService.upload(signedForSync);
             if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); clearCloudSyncPending(); }
             else if (result.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
@@ -7353,7 +7380,7 @@ function App() {
                 const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                 const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
                 if (localExp.length > 0 || localInc.length > 0) {
-                    const merged = DataService.mergeBackups(DataService.createBackup(), cloudBackup);
+                    const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                     DataService.restoreBackup(merged);
                     DataService.isInitialized = false;
                     setCloudSyncGate('idle');
