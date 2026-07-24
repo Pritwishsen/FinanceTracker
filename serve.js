@@ -244,6 +244,19 @@ var server = http.createServer(function(req, res) {
   }
 
   var safePath = path.normalize(urlPath).replace(/^(\.\.[\/\\])+/, '');
+
+  // Deny any path with a dotfile/dot-directory segment (.git, .env, .replit, etc.).
+  // This server has no allow-list of servable assets — without this, anything under
+  // ROOT with a predictable name is servable by path, including the .git directory
+  // (full commit history) and any .env that gets created for local convenience.
+  var segments = safePath.split(/[\/\\]/);
+  var hasDotSegment = segments.some(function(seg) { return seg.length > 0 && seg[0] === '.'; });
+  if (hasDotSegment) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+    return;
+  }
+
   var filePath = path.join(ROOT, safePath);
 
   if (!filePath.startsWith(ROOT)) {

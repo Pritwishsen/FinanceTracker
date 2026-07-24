@@ -17,6 +17,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = '/app-v3.html'
         return super().do_GET()
 
+    def send_head(self):
+        # Deny any path with a dotfile/dot-directory segment (.git, .env, etc.).
+        # This server has no allow-list of servable assets — without this, anything
+        # under DIRECTORY with a predictable name is servable by path, including the
+        # .git directory (full commit history) and any .env created for local use.
+        # Overriding send_head() (rather than just do_GET) covers HEAD requests too,
+        # since SimpleHTTPRequestHandler.do_HEAD calls send_head() directly.
+        path_only = self.path.split('?', 1)[0]
+        if any(seg.startswith('.') for seg in path_only.split('/') if seg):
+            self.send_error(404, "File not found")
+            return None
+        return super().send_head()
+
     def end_headers(self):
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         super().end_headers()
