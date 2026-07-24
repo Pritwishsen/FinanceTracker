@@ -1163,7 +1163,17 @@ class DataService {
         this.data.categories.forEach(category => {
             const categoryExpenses = monthlyExpenses.filter(expense => expense.categoryId === category.id);
             const totalSpent = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0);
-            const categoryData = { id: category.id, name: category.name, budget: category.monthlyBudget || 0, spent: totalSpent, remaining: (category.monthlyBudget || 0) - totalSpent, percentage: category.monthlyBudget > 0 ? (totalSpent / category.monthlyBudget) * 100 : 0, notificationThreshold: category.notificationThreshold || 80, subcategories: [] };
+            // When the category is in per-subcategory budgeting mode, the effective category
+            // budget is the sum of its subcategory budgets, not category.monthlyBudget (which
+            // stays 0 in that mode) — mirrors getEffectiveBudget() in CategoryManager, the other
+            // place that already treats useSubcategoryBudgets as the source of truth. Without
+            // this, checkBudgetAlerts() (the only caller of this method) never fires a threshold
+            // alert for any category budgeted at the subcategory level, since it read a budget
+            // of 0 no matter how much was actually spent.
+            const effectiveBudget = (category.useSubcategoryBudgets && category.subcategoryBudgets)
+                ? Object.values(category.subcategoryBudgets).reduce((sum, v) => sum + (v || 0), 0)
+                : (category.monthlyBudget || 0);
+            const categoryData = { id: category.id, name: category.name, budget: effectiveBudget, spent: totalSpent, remaining: effectiveBudget - totalSpent, percentage: effectiveBudget > 0 ? (totalSpent / effectiveBudget) * 100 : 0, notificationThreshold: category.notificationThreshold || 80, subcategories: [] };
             category.subcategories.forEach(subcatName => {
                 const subcatExpenses = categoryExpenses.filter(expense => expense.subcategory === subcatName);
                 const subcatSpent = subcatExpenses.reduce((sum, expense) => sum + expense.amount, 0);
