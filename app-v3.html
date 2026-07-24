@@ -6984,6 +6984,20 @@ function App() {
     // auto-retryable after the user reloads or comes back to the app later.
     const [pendingSyncSince, setPendingSyncSince] = useState(() => localStorage.getItem('financeApp_pendingCloudSync') || '');
     const [pendingSyncBannerDismissed, setPendingSyncBannerDismissed] = useState(false);
+    // The debounced sync normally clears pendingSyncSince within a few seconds, so
+    // surfacing the banner the instant a change is made (before that debounce even has a
+    // chance to fire) reads as an alarming false alarm on every single edit. Only show it
+    // once a sync has genuinely been stuck for a while — a real problem, not a normal save
+    // in flight. React state doesn't re-render on its own as time passes, so a periodic
+    // tick re-evaluates the elapsed time while a sync is pending.
+    const PENDING_SYNC_BANNER_DELAY_MS = 60000;
+    const [pendingSyncNowTick, setPendingSyncNowTick] = useState(() => Date.now());
+    useEffect(() => {
+        if (!pendingSyncSince) return;
+        const interval = setInterval(() => setPendingSyncNowTick(Date.now()), 5000);
+        return () => clearInterval(interval);
+    }, [pendingSyncSince]);
+    const pendingSyncBannerReady = !!pendingSyncSince && (pendingSyncNowTick - new Date(pendingSyncSince).getTime()) >= PENDING_SYNC_BANNER_DELAY_MS;
 
     // Recomputes which budget/bill alerts are currently true and reconciles them into the
     // persisted notification store (financeApp_notifications) so they survive reloads and
@@ -7667,7 +7681,7 @@ function App() {
                     <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => setReconnectBannerDismissed(true)}></button>
                 </div>
             )}
-            {pendingSyncSince && !pendingSyncBannerDismissed && syncStatus !== 'syncing' && syncStatus !== 'reconnect-needed' && (
+            {pendingSyncBannerReady && !pendingSyncBannerDismissed && syncStatus !== 'syncing' && syncStatus !== 'reconnect-needed' && (
                 <div className="alert d-flex gap-2 align-items-center" style={{margin:'0 1rem 0.5rem',fontSize:'0.83rem',borderRadius:'8px',background:'#f8d7da',border:'1px solid #dc3545',color:'#842029'}}>
                     <i className="fas fa-exclamation-circle flex-shrink-0"></i>
                     <div style={{flex:1}}>
