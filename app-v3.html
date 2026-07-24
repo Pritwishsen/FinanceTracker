@@ -3705,7 +3705,16 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
 // commas/quotes/newlines) and triggers a browser download. Shared by ExportData
 // and BulkUpload's template/failed-rows downloads.
 function downloadCSV(filename, headers, rows) {
-    const esc = (val) => { const s = String(val == null ? '' : val); return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    // Neutralize CSV/formula injection: a value starting with =, +, - or @ is
+    // interpreted as a live formula by Excel/Sheets when the exported file is
+    // reopened there. Genuine numbers (e.g. negative amounts) are exempted so they
+    // still import as numbers rather than being forced to text.
+    const isNumeric = (s) => /^-?\d+(\.\d+)?$/.test(s.trim());
+    const esc = (val) => {
+        const s = String(val == null ? '' : val);
+        const neutralized = (/^[=+\-@]/.test(s) && !isNumeric(s)) ? "'" + s : s;
+        return (neutralized.includes(',') || neutralized.includes('"') || neutralized.includes('\n')) ? '"' + neutralized.replace(/"/g, '""') + '"' : neutralized;
+    };
     const lines = [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))];
     const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -4728,13 +4737,39 @@ function RecurringList({ onUpdate, activeView }) {
 
 const AuthUtils = {
     get firebaseReady() { return !!window.__firebaseReady; },
-    async hashPassword(password) {
-        const data = new TextEncoder().encode(password);
-        const buf = await crypto.subtle.digest('SHA-256', data);
-        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    PBKDF2_ITERATIONS: 210000,
+    _bytesToB64(bytes) { return btoa(String.fromCharCode(...bytes)); },
+    _b64ToBytes(b64) { return Uint8Array.from(atob(b64), c => c.charCodeAt(0)); },
+    async _pbkdf2(password, saltBytes, iterations) {
+        const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), { name: 'PBKDF2' }, false, ['deriveBits']);
+        const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: saltBytes, iterations, hash: 'SHA-256' }, keyMaterial, 256);
+        return this._bytesToB64(new Uint8Array(bits));
     },
+    // Salted, iterated PBKDF2-SHA256. Format: pbkdf2$<iterations>$<saltB64>$<hashB64> —
+    // self-describing so verifyPassword() can still check hashes from before this scheme
+    // (a bare 64-char SHA-256 hex digest, unsalted/unstretched) without forcing every
+    // existing local account to reset their password.
+    async hashPassword(password) {
+        const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+        const hash = await this._pbkdf2(password, saltBytes, this.PBKDF2_ITERATIONS);
+        return `pbkdf2$${this.PBKDF2_ITERATIONS}$${this._bytesToB64(saltBytes)}$${hash}`;
+    },
+    isLegacyHash(hash) { return !!hash && !hash.startsWith('pbkdf2$'); },
     async verifyPassword(password, hash) {
-        return (await this.hashPassword(password)) === hash;
+        if (!hash) return false;
+        if (this.isLegacyHash(hash)) {
+            // Pre-upgrade format: bare unsalted SHA-256 hex digest.
+            const data = new TextEncoder().encode(password);
+            const buf = await crypto.subtle.digest('SHA-256', data);
+            const legacyHash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+            return legacyHash === hash;
+        }
+        const parts = hash.split('$');
+        if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+        const iterations = parseInt(parts[1], 10);
+        const saltBytes = this._b64ToBytes(parts[2]);
+        const computed = await this._pbkdf2(password, saltBytes, iterations);
+        return computed === parts[3];
     },
     async register(email, password, displayName) {
         const cred = await window.__firebaseAuth.createUserWithEmailAndPassword(email, password);
@@ -5183,6 +5218,14 @@ function RegistrationScreen({ onRegister, onLogin }) {
                     setSignError('Incorrect email or password.');
                 }
                 return;
+            }
+            // Transparently upgrade a pre-PBKDF2 (bare SHA-256) hash now that we have the
+            // plaintext password in hand from a successful verify — same pattern as the
+            // legacy-plaintext migration above, so existing accounts get the stronger hash
+            // without a forced password reset.
+            if (AuthUtils.isLegacyHash(stored.passwordHash)) {
+                stored.passwordHash = await AuthUtils.hashPassword(signPw);
+                localStorage.setItem('financeApp_currentUser', JSON.stringify(stored));
             }
             localStorage.removeItem('financeApp_failCount');
             localStorage.removeItem('financeApp_failLockUntil');
