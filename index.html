@@ -7360,6 +7360,11 @@ function App() {
         setSyncStatus('idle'); setReconnectBannerDismissed(false);
         setCloudSyncGate('idle'); setCloudGateConnecting(false); setCloudGateError('');
         setExpenses([]); setIncome([]); setCategories([]); setPeople([]);
+        // Logout can only be triggered from the Profile screen, so without this the next
+        // login (in the same browser session, no full page reload) would land right back
+        // on Profile instead of defaulting to Summary, since currentScreen otherwise
+        // survives the logout/login cycle untouched.
+        setCurrentScreen('summary');
     };
     const handleStorageConfirm = async (pref, cloudBackup) => {
         // Provider migration: switching from one cloud provider to another
