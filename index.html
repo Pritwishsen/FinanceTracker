@@ -3074,7 +3074,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView }) 
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled }) {
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled, onDisplayNameChange }) {
     const activeViewSectionRef = React.useRef(null);
     // Delayed slightly so this fires after this screen's own async effects (people,
     // backup history, settings) have settled, since scrolling before they load targets
@@ -3202,7 +3202,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
 
     useEffect(() => {
         DataService.getSettings().then(s => {
-            const name = s.displayName || '';
+            // financeApp_settings.displayName is only ever written when this field is
+            // explicitly saved here (or via Profile) — social sign-in (Google/Facebook)
+            // never seeds it, only currentUser.displayName. Fall back to that so the field
+            // shows the name the app already picked up at sign-in instead of appearing blank.
+            const name = s.displayName || (currentUser && currentUser.displayName) || '';
             setDisplayName(name);
             setSavedDisplayName(name);
         });
@@ -3228,6 +3232,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             }
             setPeople(DataService.getPeople());
         } catch (e) { /* name conflict — still save display name */ }
+        // Keep financeApp_currentUser (and App's currentUser state, via the callback) in
+        // sync too — this save path previously only touched financeApp_settings and the
+        // systemManaged person record, leaving the header's name pill showing the stale
+        // pre-edit name until the next full login/reload.
+        if (currentUser) {
+            localStorage.setItem('financeApp_currentUser', JSON.stringify({ ...currentUser, displayName: newName }));
+        }
+        if (onDisplayNameChange) onDisplayNameChange(newName);
         setSavedDisplayName(newName);
         setNameSaved(true);
         setTimeout(() => setNameSaved(false), 2000);
@@ -3453,7 +3465,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         <label className="form-check-label" htmlFor="activeViewOwn" style={{cursor: 'pointer'}}>Me / My Own{currentUser && currentUser.displayName ? ` (${currentUser.displayName})` : ''}</label>
                     </div>
                 </div>
-                {people.map(person => (
+                {/* The systemManaged person record represents the logged-in user themselves
+                    (kept in sync with their display name for use elsewhere, e.g. split-expense
+                    participant pickers) — it's already shown above as "Me / My Own", so it's
+                    excluded here to avoid listing the same identity twice. */}
+                {people.filter(person => !person.systemManaged).map(person => (
                     <div key={person.id} className="d-flex align-items-center justify-content-between" style={{padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: activeView.includes(person.name) ? '#eef2ff' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (activeView.includes(person.name) ? '#c7d2fe' : '#e9ecef')}}>
                         <div className="form-check mb-0">
                             <input className="form-check-input" type="checkbox" id={'activeView-' + person.id} checked={activeView.includes(person.name)} onChange={() => handleToggleActiveViewPerson(person.name)} style={{cursor: 'pointer'}} />
@@ -5688,7 +5704,7 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
     );
 }
 
-function ProfileScreen({ currentUser, onLogout, onUpdate }) {
+function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange }) {
     const [user, setUser] = useState({ ...currentUser });
     const [editingName, setEditingName] = useState(false);
     const [newName, setNewName] = useState(user.displayName || '');
@@ -5724,6 +5740,7 @@ function ProfileScreen({ currentUser, onLogout, onUpdate }) {
             setEditingName(false);
             setNameSuccess('Display name updated.');
             setTimeout(() => setNameSuccess(''), 3000);
+            if (onDisplayNameChange) onDisplayNameChange(trimmed);
             if (onUpdate) onUpdate();
         } catch (e) { setNameError('Failed to save. Please try again.'); }
         setNameSaving(false);
@@ -7302,6 +7319,13 @@ function App() {
     };
 
     const handleRegister = (user) => { setCurrentUser(user); };
+    // Profile/Settings name edits already persist to financeApp_currentUser directly —
+    // this just keeps App's own currentUser state (which the header "name pin" initials
+    // and Active View label read from) in sync, since those don't otherwise re-read
+    // localStorage until the next login/reload.
+    const handleCurrentUserDisplayNameChange = (newName) => {
+        setCurrentUser(prev => prev ? { ...prev, displayName: newName } : prev);
+    };
     const handleLogout = () => {
         // A pending debounced sync must not fire after logout — it would read the
         // about-to-be-wiped local data and could overwrite the cloud backup with it.
@@ -7512,9 +7536,9 @@ function App() {
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
             case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} />;
+            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
-            case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} />;
+            case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
         }
     };
