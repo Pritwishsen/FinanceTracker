@@ -7094,6 +7094,23 @@ function App() {
         const loadData = async () => {
             try {
                 await DataService.processRecurringSchedules();
+                await reloadCoreData(activeView);
+                await refreshNotifications();
+            } catch (error) { console.error('Error loading data:', error); }
+        };
+        loadData();
+    }, []);
+
+    // Deferred until authLoading resolves: onAuthStateChanged runs clearAllUserData()
+    // synchronously (for a uid mismatch) before it sets authLoading false, so waiting here
+    // guarantees any stale/previous-session localStorage has already been wiped before this
+    // reads DataService.data to decide whether to auto-backup. Without this gate, a mount
+    // that races ahead of Firebase's auth resolution could capture and locally save a
+    // previous or mismatched account's leftover data, stamped with today's date.
+    useEffect(() => {
+        if (authLoading) return;
+        const maybeAutoBackup = async () => {
+            try {
                 const todayStr = new Date().toISOString().split('T')[0];
                 const appSettings = await DataService.getSettings();
                 const hasData = DataService.data.expenses.length > 0 || DataService.data.income.length > 0;
@@ -7104,12 +7121,10 @@ function App() {
                         localStorage.setItem('financeApp_lastAutoBackup', todayStr);
                     }
                 }
-                await reloadCoreData(activeView);
-                await refreshNotifications();
-            } catch (error) { console.error('Error loading data:', error); }
+            } catch (error) { console.error('Error running auto-backup check:', error); }
         };
-        loadData();
-    }, []);
+        maybeAutoBackup();
+    }, [authLoading]);
 
     // The actual download+merge+upload cloud round-trip — runs once per debounce window,
     // no matter how many handleDataUpdate() calls fed into it (see cloudSyncDebounceRef above).
