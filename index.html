@@ -1220,12 +1220,12 @@ class DataService {
     static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
     static getBills() { return JSON.parse(localStorage.getItem('financeApp_bills') || '[]'); }
     static saveBills(b) { localStorage.setItem('financeApp_bills', JSON.stringify(b)); }
-    static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, reminderDaysBefore, notes }) {
+    static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, subcategory, reminderDaysBefore, notes }) {
         if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
         const today = new Date().toISOString().split('T')[0];
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
-        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
+        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
     static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates }; this.saveBills(bills); } }
@@ -2489,8 +2489,26 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterSource, setFilterSource] = useState('');
+    const [filterPerson, setFilterPerson] = useState('');
+    const [filterDateFrom, setFilterDateFrom] = useState('');
+    const [filterDateTo, setFilterDateTo] = useState('');
+    const [visibleCount, setVisibleCount] = useState(50);
+    const [openMenuId, setOpenMenuId] = useState(null);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
+
+    // Mirrors ExpenseList: the person sub-filter only makes sense when multiple
+    // participants are active — drop any stale selection once it drops back to one.
+    useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
+
+    useEffect(() => {
+        if (!openMenuId) return;
+        const close = () => setOpenMenuId(null);
+        document.addEventListener('click', close);
+        return () => document.removeEventListener('click', close);
+    }, [openMenuId]);
 
     const handleInputChange = (field, value) => { setFormData(prev => ({ ...prev, [field]: value })); if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' })); };
     const handleSubmit = (e) => {
@@ -2510,6 +2528,29 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: new Date().toISOString().split('T')[0] }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
     const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP' }); setErrors({}); };
     const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
+
+    const filteredIncome = useMemo(() => {
+        let filtered = income;
+        if (filterSource) filtered = filtered.filter(item => item.source === filterSource);
+        if (filterPerson === '__mine__') filtered = filtered.filter(item => !(item.paidBy || '').trim());
+        else if (filterPerson) filtered = filtered.filter(item => (item.paidBy || '').trim() === filterPerson.trim());
+        if (filterDateFrom) filtered = filtered.filter(item => (item.date || '').substring(0, 10) >= filterDateFrom);
+        if (filterDateTo) filtered = filtered.filter(item => (item.date || '').substring(0, 10) <= filterDateTo);
+        if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(item => (item.description || '').toLowerCase().includes(st) || (item.source || '').toLowerCase().includes(st)); }
+        return filtered;
+    }, [income, filterSource, filterPerson, filterDateFrom, filterDateTo, searchTerm]);
+
+    useEffect(() => { setVisibleCount(50); }, [filteredIncome]);
+
+    const visibleIncome = filteredIncome.slice(0, visibleCount);
+    const incomeSources = [...new Set(income.map(item => item.source).filter(Boolean))].sort();
+    const incomeByCurrency = filteredIncome.reduce((acc, item) => { const currency = item.currency || 'GBP'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += item.amount; acc[currency].count += 1; return acc; }, {});
+    const getSourceColor = (name) => {
+        const palette = ['#4a6cf7','#e67e22','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e91e63','#00bcd4','#ff5722','#607d8b'];
+        let h = 0;
+        for (let i = 0; i < (name||'').length; i++) h = (h * 31 + (name||'').charCodeAt(i)) & 0xffff;
+        return palette[h % palette.length];
+    };
 
     if (showSuccess) { return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Income {editingIncome ? 'Updated' : 'Added'} Successfully!</h3></div></div>); }
 
@@ -2590,36 +2631,96 @@ function IncomeForm({ income, onUpdate, activeView }) {
                 </form>
             </div>
             <div className="income-history">
-                <div className="d-flex align-items-center justify-content-between mb-2">
+                <div className="d-flex align-items-center justify-content-between mb-2" style={{flexWrap: 'wrap', gap: '0.5rem'}}>
                     <h5 className="mb-0">Income History</h5>
+                    {Object.keys(incomeByCurrency).length === 1 ? (
+                        <div className="income-total">Total: {ValidationUtils.formatCurrency(Object.values(incomeByCurrency)[0].total, Object.keys(incomeByCurrency)[0])}</div>
+                    ) : Object.keys(incomeByCurrency).length > 1 ? (
+                        <div className="income-total-multi">
+                            {Object.entries(incomeByCurrency).map(([currency, data]) => (<div key={currency} className="income-total-item">{ValidationUtils.formatCurrency(data.total, currency)}</div>))}
+                        </div>
+                    ) : null}
                     {income.length > 0 && (
                         <button className="btn btn-sm btn-outline-danger" onClick={() => setShowClearAllConfirm(true)} title="Delete all income">
                             <i className="fas fa-trash-alt me-1"></i>Clear All
                         </button>
                     )}
                 </div>
-                {income.length === 0 ? (
-                    <div className="empty-state"><i className="fas fa-piggy-bank fa-3x"></i><h4>No income recorded</h4><p>Start by adding your first income entry!</p></div>
+                <div className="filters-section">
+                    <div className="search-box">
+                        <div className="input-group">
+                            <span className="input-group-text"><i className="fas fa-search"></i></span>
+                            <input type="text" className="form-control" placeholder="Search income..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                        </div>
+                    </div>
+                    <div className="filter-row">
+                        <select className="form-select" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}>
+                            <option value="">All Sources</option>
+                            {incomeSources.map(source => (<option key={source} value={source}>{source}</option>))}
+                        </select>
+                        {/* Hidden when a single Active View is selected — income is already
+                            scoped to that person upstream. Reappears, restricted to just the
+                            selected participants, when multiple are active. */}
+                        {activeView.length > 1 && (
+                            <select className="form-select" value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)}>
+                                <option value="">All (selected participants)</option>
+                                {activeView.includes('own') && <option value="__mine__">My Income Only</option>}
+                                {activeView.filter(v => v !== 'own').map(name => (<option key={name} value={name}>{name}</option>))}
+                            </select>
+                        )}
+                    </div>
+                    <div className="filter-row">
+                        <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
+                        <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                    </div>
+                    {(filterSource || filterPerson || filterDateFrom || filterDateTo || searchTerm) && (
+                        <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterSource(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); }}>
+                            <i className="fas fa-times me-1"></i>Clear Filters
+                        </button>
+                    )}
+                </div>
+                {filteredIncome.length === 0 ? (
+                    <div className="empty-state"><i className="fas fa-piggy-bank fa-3x"></i><h4>No income found</h4><p>{income.length === 0 ? "Start by adding your first income entry!" : "Try adjusting your filters or search term."}</p></div>
                 ) : (
                     <div className="income-list">
-                        {income.map(incomeItem => (
+                        {visibleIncome.map(incomeItem => {
+                            const metaParts = [incomeItem.description, ValidationUtils.formatDate(incomeItem.date)];
+                            if (incomeItem.paidBy) metaParts.push(incomeItem.paidBy);
+                            return (
                             <div key={incomeItem.id} className="income-item">
-                                <div className="income-main">
-                                    <div className="income-info">
-                                        <div className="income-source">{incomeItem.source}</div>
-                                        {incomeItem.description && (<div className="income-description">{incomeItem.description}</div>)}
-                                        {incomeItem.paidBy && (<div className="income-paid-by"><i className="fas fa-user"></i>Received by: {incomeItem.paidBy}</div>)}
-                                        <div className="income-date"><i className="fas fa-calendar"></i>{ValidationUtils.formatDate(incomeItem.date)}</div>
-                                    </div>
-                                    <div className="income-amount">{ValidationUtils.formatCurrency(incomeItem.amount, incomeItem.currency || 'GBP')}</div>
+                                <div className="income-avatar" style={{background: getSourceColor(incomeItem.source)}}>
+                                    {(incomeItem.source || '?').charAt(0).toUpperCase()}
                                 </div>
-                                <div className="income-actions">
-                                    <button className="btn btn-sm btn-outline-primary" onClick={() => handleEdit(incomeItem)} title="Edit"><i className="fas fa-edit"></i></button>
-                                    <button className="btn btn-sm btn-outline-success" onClick={() => handleDuplicateIncome(incomeItem)} title="Duplicate"><i className="fas fa-copy"></i></button>
-                                    <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(incomeItem.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                                <div className="income-info">
+                                    <div className="income-source">{incomeItem.source}</div>
+                                    <div className="income-meta">{metaParts.filter(Boolean).join(' · ')}</div>
+                                </div>
+                                <div className="income-right">
+                                    <div className="income-amount">{ValidationUtils.formatCurrency(incomeItem.amount, incomeItem.currency || 'GBP')}</div>
+                                    <div className="income-menu-wrap">
+                                        <button className="income-menu-btn" title="Actions"
+                                            onClick={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === incomeItem.id ? null : incomeItem.id); }}>
+                                            <i className="fas fa-ellipsis-v"></i>
+                                        </button>
+                                        {openMenuId === incomeItem.id && (
+                                            <div className="income-menu-dropdown">
+                                                <button onClick={() => { handleEdit(incomeItem); setOpenMenuId(null); }}><i className="fas fa-edit"></i>Edit</button>
+                                                <button onClick={() => { handleDuplicateIncome(incomeItem); setOpenMenuId(null); }}><i className="fas fa-copy"></i>Duplicate</button>
+                                                <button className="danger" onClick={() => { setShowDeleteConfirm(incomeItem.id); setOpenMenuId(null); }}><i className="fas fa-trash"></i>Delete</button>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
-                        ))}
+                            );
+                        })}
+                    </div>
+                )}
+                {visibleCount < filteredIncome.length && (
+                    <div className="text-center py-3">
+                        <button className="btn btn-outline-primary" onClick={() => setVisibleCount(c => c + 50)}>
+                            <i className="fas fa-chevron-down me-2"></i>Load more ({filteredIncome.length - visibleCount} remaining)
+                        </button>
                     </div>
                 )}
             </div>
@@ -2876,7 +2977,15 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView }) 
                         const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
                         const effectiveSubBudget = getEffectiveSubcategoryBudget(category, subcatName, now);
                         let subcatBudget = await convertBudgetAmount(effectiveSubBudget.amount, effectiveSubBudget.currency);
-                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0 }); }
+                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0, hasBudget: true }); }
+                    }
+                } else {
+                    // Category is budgeted at the category level, not per-subcategory. Still surface
+                    // a spend-only breakdown by subcategory (no bar/remaining, since there's no
+                    // subcategory budget to measure against) — the budget view itself stays category-level.
+                    for (const subcatName of (category.subcategories || [])) {
+                        const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
+                        if (subcatSpent > 0) { subcats.push({ name: subcatName, budget: 0, spent: subcatSpent, remaining: 0, percentage: 0, hasBudget: false }); }
                     }
                 }
                 return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, subcategories: subcats };
@@ -3118,11 +3227,19 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView }) 
                                                 {budgetItem.subcategories.map(sub => (
                                                     <div key={sub.name} style={{marginBottom: '0.5rem'}}>
                                                         <div style={{fontSize: '0.83rem', fontWeight: 600, marginBottom: '0.2rem'}}>{sub.name}</div>
-                                                        <div className="budget-bar" style={{height: '6px'}}><div className={'budget-bar-fill ' + (sub.percentage > 100 ? 'over-budget' : sub.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(sub.percentage, 100) + '%' }}></div></div>
-                                                        <div className="budget-amounts" style={{fontSize: '0.76rem'}}>
-                                                            <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(sub.spent, defaultCurrency)}</span>
-                                                            <span className={'budget-remaining ' + (sub.remaining >= 0 ? 'positive' : 'negative')}>{sub.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(sub.remaining), defaultCurrency)}</span>
-                                                        </div>
+                                                        {sub.hasBudget ? (
+                                                            <React.Fragment>
+                                                                <div className="budget-bar" style={{height: '6px'}}><div className={'budget-bar-fill ' + (sub.percentage > 100 ? 'over-budget' : sub.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(sub.percentage, 100) + '%' }}></div></div>
+                                                                <div className="budget-amounts" style={{fontSize: '0.76rem'}}>
+                                                                    <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(sub.spent, defaultCurrency)}</span>
+                                                                    <span className={'budget-remaining ' + (sub.remaining >= 0 ? 'positive' : 'negative')}>{sub.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(sub.remaining), defaultCurrency)}</span>
+                                                                </div>
+                                                            </React.Fragment>
+                                                        ) : (
+                                                            <div className="budget-amounts" style={{fontSize: '0.76rem'}}>
+                                                                <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(sub.spent, defaultCurrency)}</span>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>
@@ -4498,10 +4615,14 @@ function BillTracker({ categories, onUpdate }) {
     const [bills, setBills] = useState([]);
     const [showForm, setShowForm] = useState(false);
     const [editingBill, setEditingBill] = useState(null);
-    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', reminderDaysBefore: '3', notes: '' });
+    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '' });
     const [formErrors, setFormErrors] = useState({});
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [logMsg, setLogMsg] = useState('');
+    const [logExpenseBill, setLogExpenseBill] = useState(null);
+    const [logExpenseCategoryId, setLogExpenseCategoryId] = useState('');
+    const [logExpenseSubcategory, setLogExpenseSubcategory] = useState('');
+    const [logExpenseConfirm, setLogExpenseConfirm] = useState(null);
 
     const loadBills = () => setBills(DataService.getBills());
     useEffect(() => { loadBills(); }, []);
@@ -4543,7 +4664,7 @@ function BillTracker({ categories, onUpdate }) {
     const inactiveBills = sortedBills.filter(b => !b.isActive);
 
     const resetForm = () => {
-        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', reminderDaysBefore: '3', notes: '' });
+        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '' });
         setFormErrors({}); setEditingBill(null);
     };
 
@@ -4556,29 +4677,68 @@ function BillTracker({ categories, onUpdate }) {
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
         try {
             if (editingBill) {
-                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes });
+                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, subcategory: formData.subcategory || '', reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes });
             } else {
-                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes });
+                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, subcategory: formData.subcategory, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes });
             }
             resetForm(); setShowForm(false); loadBills(); onUpdate();
         } catch (err) { setFormErrors({ name: err.message }); }
     };
 
     const handleEdit = (bill) => {
-        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '' });
+        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', subcategory: bill.subcategory || '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '' });
         setEditingBill(bill); setShowForm(true);
     };
 
     const handleMarkPaid = (id) => { DataService.markBillPaid(id); loadBills(); onUpdate(); };
     const handleDelete = (id) => { DataService.deleteBill(id); setDeleteConfirm(null); loadBills(); onUpdate(); };
 
-    const handleLogExpense = async (bill) => {
+    // Mirrors DataService.markBillPaid's frequency-based advancement, so "Log as
+    // Expense" moves the due date the same way "Mark Paid" does (e.g. +1 month for
+    // a Monthly bill) instead of a second, divergent notion of "next due date".
+    const computeNextDueDate = (bill) => {
+        const d = new Date(bill.nextDueDate);
+        if (bill.frequency === 'Weekly') d.setDate(d.getDate() + 7);
+        else if (bill.frequency === 'Monthly') d.setMonth(d.getMonth() + 1);
+        else if (bill.frequency === 'Quarterly') d.setMonth(d.getMonth() + 3);
+        else if (bill.frequency === 'Yearly') d.setFullYear(d.getFullYear() + 1);
+        return d.toISOString().split('T')[0];
+    };
+
+    const handleLogExpense = (bill) => {
+        const cat = categories.find(c => c.id === bill.categoryId);
+        const catHasSubcats = !!(cat && cat.subcategories && cat.subcategories.length > 0);
+        // A category is missing outright, or the bill's category has subcategories but
+        // none was ever picked for this bill — either way, ask before logging instead of
+        // silently logging with no subcategory.
+        if (!bill.categoryId || (catHasSubcats && !bill.subcategory)) {
+            setLogExpenseCategoryId(bill.categoryId ? bill.categoryId.toString() : '');
+            setLogExpenseSubcategory(bill.subcategory || '');
+            setLogExpenseBill(bill);
+            return;
+        }
+        setLogExpenseConfirm({ bill, categoryId: bill.categoryId, subcategory: bill.subcategory || '' });
+    };
+
+    const handleLogExpenseCategoryContinue = () => {
+        const selectedCat = categories.find(c => c.id === parseInt(logExpenseCategoryId));
+        const selectedCatHasSubcats = !!(selectedCat && selectedCat.subcategories && selectedCat.subcategories.length > 0);
+        if (!logExpenseCategoryId || (selectedCatHasSubcats && !logExpenseSubcategory)) return;
+        setLogExpenseConfirm({ bill: logExpenseBill, categoryId: parseInt(logExpenseCategoryId), subcategory: logExpenseSubcategory });
+        setLogExpenseBill(null);
+    };
+
+    const handleConfirmLogExpense = async () => {
+        const { bill, categoryId, subcategory } = logExpenseConfirm;
         try {
-            await DataService.addExpense({ amount: bill.amount, date: today, description: bill.name, categoryId: bill.categoryId, subcategory: '', currency: bill.currency || 'GBP', paidBy: '' });
-            setLogMsg(bill.name + ' logged as expense');
-            setTimeout(() => setLogMsg(''), 3000);
-            onUpdate();
+            await DataService.addExpense({ amount: bill.amount, date: today, description: bill.name, categoryId: categoryId, subcategory: subcategory || '', currency: bill.currency || 'GBP', paidBy: '' });
+            const newDueDate = computeNextDueDate(bill);
+            DataService.updateBill(bill.id, { categoryId, subcategory: subcategory || '', nextDueDate: newDueDate, isPaid: false });
+            setLogMsg(bill.name + ' logged as expense — due date moved to ' + ValidationUtils.formatDate(newDueDate));
+            setTimeout(() => setLogMsg(''), 4000);
+            loadBills(); onUpdate();
         } catch (e) { setLogMsg('Failed to log expense'); setTimeout(() => setLogMsg(''), 3000); }
+        setLogExpenseConfirm(null);
     };
 
     const currencies = ['GBP', 'EUR', 'USD', 'INR'];
@@ -4599,7 +4759,7 @@ function BillTracker({ categories, onUpdate }) {
                             </div>
                             <div style={{fontSize:'0.83rem', color:'#6c757d', marginTop:'0.15rem'}}>
                                 <strong>{fmtCurrency(bill.amount, bill.currency)}</strong> · {bill.frequency}
-                                {cat && <span> · {cat.name}</span>}
+                                {cat && <span> · {cat.name}{bill.subcategory ? ' / ' + bill.subcategory : ''}</span>}
                             </div>
                             <div style={{fontSize:'0.8rem', color:'#6c757d'}}>Due: {ValidationUtils.formatDate(bill.nextDueDate)}</div>
                             {bill.notes && <div style={{fontSize:'0.78rem', color:'#aaa', fontStyle:'italic'}}>{bill.notes}</div>}
@@ -4678,11 +4838,20 @@ function BillTracker({ categories, onUpdate }) {
                                 </div>
                                 <div className="col-6">
                                     <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Category</label>
-                                    <select className="form-select" value={formData.categoryId} onChange={e => setFormData(p => ({...p, categoryId: e.target.value}))}>
+                                    <select className="form-select" value={formData.categoryId} onChange={e => setFormData(p => ({...p, categoryId: e.target.value, subcategory: ''}))}>
                                         <option value="">None</option>
                                         {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                     </select>
                                 </div>
+                                {(() => { const cat = categories.find(c => c.id === parseInt(formData.categoryId)); return cat && cat.subcategories.length > 0 && (
+                                    <div className="col-6">
+                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Subcategory</label>
+                                        <select className="form-select" value={formData.subcategory} onChange={e => setFormData(p => ({...p, subcategory: e.target.value}))}>
+                                            <option value="">None</option>
+                                            {cat.subcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
+                                        </select>
+                                    </div>
+                                ); })()}
                                 <div className="col-6">
                                     <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Remind (days before)</label>
                                     <input type="number" min="1" max="14" className="form-control" value={formData.reminderDaysBefore} onChange={e => setFormData(p => ({...p, reminderDaysBefore: e.target.value}))} />
@@ -4728,6 +4897,61 @@ function BillTracker({ categories, onUpdate }) {
                             <div className="modal-footer">
                                 <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
                                 <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {logExpenseBill && (() => {
+                const cat = categories.find(c => c.id === parseInt(logExpenseCategoryId));
+                const catHasSubcats = !!(cat && cat.subcategories && cat.subcategories.length > 0);
+                return (
+                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Select Category</h5></div>
+                            <div className="modal-body">
+                                <p className="text-muted" style={{fontSize:'0.85rem'}}>
+                                    {logExpenseBill.categoryId
+                                        ? <React.Fragment><strong>{logExpenseBill.name}</strong> needs a subcategory before it can be logged as an expense.</React.Fragment>
+                                        : <React.Fragment><strong>{logExpenseBill.name}</strong> has no category set. Choose one to log it as an expense.</React.Fragment>}
+                                </p>
+                                <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Category *</label>
+                                <select className="form-select mb-2" value={logExpenseCategoryId} onChange={e => { setLogExpenseCategoryId(e.target.value); setLogExpenseSubcategory(''); }}>
+                                    <option value="">Select a category</option>
+                                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                                {catHasSubcats && (
+                                    <React.Fragment>
+                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Subcategory *</label>
+                                        <select className="form-select" value={logExpenseSubcategory} onChange={e => setLogExpenseSubcategory(e.target.value)}>
+                                            <option value="">Select a subcategory</option>
+                                            {cat.subcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
+                                        </select>
+                                    </React.Fragment>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setLogExpenseBill(null)}>Cancel</button>
+                                <button className="btn btn-primary" disabled={!logExpenseCategoryId || (catHasSubcats && !logExpenseSubcategory)} onClick={handleLogExpenseCategoryContinue}>Continue</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                );
+            })()}
+            {logExpenseConfirm && (
+                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Log as Expense</h5></div>
+                            <div className="modal-body">
+                                <p>Log <strong>{fmtCurrency(logExpenseConfirm.bill.amount, logExpenseConfirm.bill.currency)}</strong> for <strong>{logExpenseConfirm.bill.name}</strong> as an expense?</p>
+                                <p className="mb-0">This will also move its due date from <strong>{ValidationUtils.formatDate(logExpenseConfirm.bill.nextDueDate)}</strong> to <strong>{ValidationUtils.formatDate(computeNextDueDate(logExpenseConfirm.bill))}</strong>.</p>
+                            </div>
+                            <div className="modal-footer">
+                                <button className="btn btn-secondary" onClick={() => setLogExpenseConfirm(null)}>Cancel</button>
+                                <button className="btn btn-primary" onClick={handleConfirmLogExpense}>Confirm</button>
                             </div>
                         </div>
                     </div>
@@ -7214,9 +7438,10 @@ function App() {
                                 DataService.restoreBackup(merged);
                                 DataService.isInitialized = false;
                                 setCloudSyncGate('idle');
-                                const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
-                                setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                                setPeople(DataService.getPeople());
+                                // Re-apply the active-view filter (not a raw fetch+set) — otherwise a
+                                // silent login-time merge repopulates expenses/income with everyone's
+                                // data while the Active View selector still shows "own".
+                                await reloadCoreData(activeView);
                                 showSyncMergeToast('Merged changes from another device');
                                 setSyncStatus('syncing');
                                 try {
@@ -7515,9 +7740,7 @@ function App() {
                             DataService.isInitialized = false;
                             const signedM = await signBackupForUpload(merged, currentUser);
                             await SyncService.upload(signedM);
-                            const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
-                            setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                            setPeople(DataService.getPeople());
+                            await reloadCoreData(activeView);
                         } else {
                             setCloudRestoreData(cloudBackup);
                             setCloudSyncGate('restore-prompt');
@@ -7557,9 +7780,7 @@ function App() {
                         const mergeResult = await SyncService.upload(signedMerged);
                         if (mergeResult.status === 'success') { setSyncStatus('synced'); setLastSyncTime(mergeResult.syncedAt); localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); clearCloudSyncPending(); }
                         else { setSyncStatus('idle'); }
-                        const [expD, incD, catD, setD] = await Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]);
-                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                        setPeople(DataService.getPeople());
+                        await reloadCoreData(activeView);
                         return;
                     }
                 }
@@ -7604,10 +7825,7 @@ function App() {
                     DataService.isInitialized = false;
                     setCloudSyncGate('idle');
                     signBackupForUpload(merged, currentUser).then(signed => SyncService.upload(signed)).catch(() => {});
-                    Promise.all([DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()]).then(([expD, incD, catD, setD]) => {
-                        setExpenses(expD); setIncome(incD); setCategories(catD); setDefaultCurrency(setD.currency || 'GBP');
-                        setPeople(DataService.getPeople());
-                    });
+                    await reloadCoreData(activeView);
                 } else {
                     setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
                 }
