@@ -7576,8 +7576,22 @@ function App() {
                                     showSyncMergeToast('Merged locally, but the upload to the cloud failed — will retry on your next change.');
                                 }
                             } else {
-                                // Local is empty — just restore from cloud
-                                setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
+                                // Local is empty (routine after every logout, which wipes it) and the
+                                // user already has this provider chosen as their backup — there's no
+                                // real decision to make here: restoring an empty device from your own
+                                // signed cloud backup can't lose anything, so do it silently instead of
+                                // interrupting every single login with "Cloud Backup Found?". Still ask
+                                // when the signature can't be trusted (unsigned/legacy backup, or one
+                                // that fails verification) — that genuinely needs a human decision.
+                                const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
+                                if (isSignatureAcceptable(sigResult) && !sigResult.requiresConfirmation) {
+                                    DataService.restoreBackup(cloudBackup);
+                                    DataService.isInitialized = false;
+                                    setCloudSyncGate('idle');
+                                    await reloadCoreData(activeView);
+                                } else {
+                                    setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
+                                }
                             }
                         } else { setCloudSyncGate('idle'); }
                     }).catch(() => { setCloudSyncGate('idle'); });
