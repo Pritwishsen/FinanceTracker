@@ -161,7 +161,6 @@ const ValidationUtils = {
         const errors = {};
         if (!expense.amount || expense.amount <= 0) errors.amount = 'Amount must be greater than 0';
         if (!expense.date) { errors.date = 'Date is required'; } else { const date = new Date(expense.date); if (date > new Date()) errors.date = 'Date cannot be in the future'; }
-        if (expense.description && expense.description.trim().length > 0 && expense.description.trim().length < 3) errors.description = 'Description must be at least 3 characters if provided';
         if (!expense.categoryId) errors.categoryId = 'Category is required';
         if (!expense.subcategory) errors.subcategory = 'Subcategory is required';
         if (expense.paidBy && expense.paidBy.trim().length > 0 && expense.paidBy.trim().length < 2) errors.paidBy = 'Name must be at least 2 characters if provided';
@@ -262,6 +261,22 @@ function formatActiveViewLabel(activeView, displayName) {
     if (joined.length <= 20 || names.length === 1) return joined;
     return names[0] + ' +' + (names.length - 1);
 }
+// App brand mark (inlined so it renders with zero extra network requests, same as
+// every other icon in this app) — used on the login screen and the main app header.
+function Logo({ size = 40, style, className }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 56 56" style={style} className={className} aria-label="Spendly logo">
+            <rect width="56" height="56" rx="16" fill="#10b981"></rect>
+            <ellipse cx="26" cy="31" rx="14" ry="10" fill="#0f172a"></ellipse>
+            <rect x="36" y="27" width="5" height="4" rx="1.5" fill="#0f172a"></rect>
+            <circle cx="20" cy="29" r="1.6" fill="#10b981"></circle>
+            <path d="M14 33c-2 0-3.5-1.5-3.5-3" stroke="#0f172a" strokeWidth="2.4" strokeLinecap="round" fill="none"></path>
+            <rect x="23" y="20" width="6" height="4" rx="1" fill="#0f172a"></rect>
+            <path d="M20 40l-1.5 4M32 40l1.5 4" stroke="#0f172a" strokeWidth="2.6" strokeLinecap="round"></path>
+            <path d="M22 30l3 3 6-6" stroke="#10b981" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" fill="none"></path>
+        </svg>
+    );
+}
 // Shared "who is this for" picker used by Expense/Income/Debt/Net Worth/Goals
 // forms. When exactly one view is active, callers hide this entirely and
 // auto-tag instead (see resolveActiveViewValue) — this component only renders
@@ -324,6 +339,23 @@ const GDriveService = {
                 callback: resp => { if (resp.error) { reject(new Error(resp.error)); return; } this._storeToken(resp.access_token, resp.expires_in); resolve(resp.access_token); }
             });
             client.requestAccessToken();
+        });
+    },
+    // Tries to mint a fresh access token with zero UI — no popup, no account chooser.
+    // Succeeds only if the user still has an active Google session in this browser AND
+    // previously granted the Drive scope; GIS otherwise fires the callback with an
+    // error (e.g. interaction_required) instead of ever showing anything. Used to avoid
+    // interrupting returning users with the "Reconnect Google Drive" screen just because
+    // the short-lived access token expired or the tab was reopened.
+    requestTokenSilent() {
+        return new Promise((resolve, reject) => {
+            if (!this.isConfigured()) { reject(new Error('not_configured')); return; }
+            if (!window.google || !window.google.accounts) { reject(new Error('gis_not_loaded')); return; }
+            const client = window.google.accounts.oauth2.initTokenClient({
+                client_id: this.clientId, scope: this.SCOPES,
+                callback: resp => { if (resp.error) { reject(new Error(resp.error)); return; } this._storeToken(resp.access_token, resp.expires_in); resolve(resp.access_token); }
+            });
+            client.requestAccessToken({ prompt: '' });
         });
     },
     async _tok() { if (this.isTokenValid()) return this.getToken(); return this.requestToken(); },
@@ -928,7 +960,7 @@ class DataService {
         this.saveSettings();
     }
 
-    static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date)); }
+    static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id); }
     static _lastId = 0;
     static _uniqueId() {
         const now = Date.now();
@@ -1619,10 +1651,8 @@ function Navigation({ currentScreen, onScreenChange }) {
         { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
         { key: 'income', icon: 'fas fa-wallet', label: 'Income' },
         { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' },
-        { key: 'bills', icon: 'fas fa-file-invoice-dollar', label: 'Bills' },
-        { key: 'recurring', icon: 'fas fa-redo', label: 'Recurring' },
+        { key: 'manage', icon: 'fas fa-layer-group', label: 'Scheduled' },
         { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
-        { key: 'debts', icon: 'fas fa-handshake', label: 'Debts' },
         { key: 'networth', icon: 'fas fa-balance-scale', label: 'Net Worth' },
         { key: 'export', icon: 'fas fa-file-export', label: 'Export' },
         { key: 'trends', icon: 'fas fa-chart-line', label: 'Trends' },
@@ -1718,6 +1748,29 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         return p.name;
     };
 
+    // Used after adding (not editing) an expense so the user can log another one without
+    // leaving the Add Expense screen — full reset back to the same blank state the form
+    // opens in, except currency and date, which stay as whatever was last used: logging
+    // several expenses for the same (possibly backdated) day shouldn't need re-entering
+    // the date each time. The "Today" button next to the date field covers the common
+    // case of wanting to jump back to today after a batch of backdated entries.
+    const resetFormForNewEntry = () => {
+        setFormData(prev => ({
+            amount: '', date: prev.date, description: '',
+            categoryId: '', subcategory: '', paidBy: resolveActiveViewValue(activeView),
+            currency: prev.currency, tags: []
+        }));
+        setTagInputRaw('');
+        setErrors({});
+        setIsSplit(false);
+        setSplitParticipants([]);
+        setSplitMethod('equal');
+        setCustomAmounts({});
+        setIsRecurring(false);
+        setRecurringFreq('monthly');
+        setRecurringEndDate('');
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
         setIsSubmitting(true);
@@ -1793,7 +1846,14 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
             }
             setShowSuccess(true);
-            setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
+            if (editExpense) {
+                setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
+            } else {
+                // New expense (not an edit): stay on this screen and reset the form instead of
+                // navigating back to the list, so logging several expenses in a row doesn't
+                // require a screen switch after each one.
+                setTimeout(() => { onSave(); setShowSuccess(false); resetFormForNewEntry(); }, 1000);
+            }
         } catch (error) { setErrors({ general: 'Failed to save expense. Please try again.' }); }
         setIsSubmitting(false);
     };
@@ -1847,8 +1907,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 </div>
                 <div className="form-group">
                     <label htmlFor="date">Date *</label>
-                    <input type="date" id="date" className={'form-control ' + (errors.date ? 'is-invalid' : '')} value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} max={new Date().toISOString().split('T')[0]} />
-                    {errors.date && <div className="invalid-feedback">{errors.date}</div>}
+                    <div className="input-group">
+                        <input type="date" id="date" className={'form-control ' + (errors.date ? 'is-invalid' : '')} value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} max={new Date().toISOString().split('T')[0]} />
+                        <button type="button" className="btn btn-outline-secondary" onClick={() => handleInputChange('date', new Date().toISOString().split('T')[0])}>Today</button>
+                    </div>
+                    {errors.date && <div className="invalid-feedback d-block">{errors.date}</div>}
                 </div>
                 <div className="form-group">
                     <label htmlFor="description">Description (Optional)</label>
@@ -4611,7 +4674,7 @@ function SavingsGoals({ defaultCurrency, activeView }) {
     );
 }
 
-function BillTracker({ categories, onUpdate }) {
+function BillTracker({ categories, onUpdate, embedded }) {
     const [bills, setBills] = useState([]);
     const [showForm, setShowForm] = useState(false);
     const [editingBill, setEditingBill] = useState(null);
@@ -4784,7 +4847,7 @@ function BillTracker({ categories, onUpdate }) {
     };
 
     return (
-        <div className="screen">
+        <div className={embedded ? undefined : 'screen'}>
             <div className="screen-header" style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
                 <h2><i className="fas fa-file-invoice-dollar me-2"></i>Bills</h2>
                 <button className="btn btn-primary btn-sm" onClick={() => { if (showForm && !editingBill) { resetForm(); setShowForm(false); } else { resetForm(); setShowForm(true); } }}>
@@ -4961,7 +5024,7 @@ function BillTracker({ categories, onUpdate }) {
     );
 }
 
-function RecurringList({ onUpdate, activeView }) {
+function RecurringList({ onUpdate, activeView, embedded }) {
     const [schedules, setSchedules] = useState([]);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
 
@@ -4993,7 +5056,7 @@ function RecurringList({ onUpdate, activeView }) {
     const freqLabel = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
 
     return (
-        <div className="screen">
+        <div className={embedded ? undefined : 'screen'}>
             <div className="screen-header"><h2><i className="fas fa-redo me-2"></i>Recurring Transactions</h2></div>
             {visibleSchedules.length === 0 ? (
                 <div className="empty-state">
@@ -5109,19 +5172,6 @@ const AuthUtils = {
     },
     async signIn(email, password) {
         const cred = await window.__firebaseAuth.signInWithEmailAndPassword(email, password);
-        const doc = await window.__firebaseDb.collection('users').doc(cred.user.uid).get();
-        if (doc.exists) {
-            const pref = doc.data().storagePreference || 'local';
-            localStorage.setItem('financeApp_storagePreference', pref);
-            if (pref) localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
-        } else {
-            await window.__firebaseDb.collection('users').doc(cred.user.uid).set({
-                displayName: cred.user.displayName || email,
-                storagePreference: 'local',
-                createdAt: new Date().toISOString()
-            });
-            localStorage.setItem('financeApp_storagePreference', 'local');
-        }
         return cred.user;
     },
     async signOut() {
@@ -5132,39 +5182,27 @@ const AuthUtils = {
     async sendPasswordReset(email) {
         await window.__firebaseAuth.sendPasswordResetEmail(email);
     },
-    async _loadUserPref(user) {
-        const doc = await window.__firebaseDb.collection('users').doc(user.uid).get();
-        if (doc.exists) {
-            const pref = doc.data().storagePreference || 'local';
-            localStorage.setItem('financeApp_storagePreference', pref);
-            if (pref) localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
-        } else {
-            await window.__firebaseDb.collection('users').doc(user.uid).set({
-                displayName: user.displayName || user.email,
-                storagePreference: 'local',
-                createdAt: new Date().toISOString()
-            });
-            localStorage.setItem('financeApp_storagePreference', 'local');
-        }
-    },
+    // Deliberately does NOT touch storagePreference/financeApp_currentUser here — that used
+    // to be duplicated in every sign-in method AND in App's onAuthStateChanged listener
+    // (which fires for every one of these anyway), and the two independent Firestore
+    // reads racing against each other could let onAuthStateChanged's read "win" with a
+    // stale/incomplete result, incorrectly showing the storage picker to a returning user.
+    // onAuthStateChanged is now the single place that resolves the saved preference.
     async signInWithGoogle() {
         const provider = new firebase.auth.GoogleAuthProvider();
         provider.addScope('email');
         const cred = await window.__firebaseAuth.signInWithPopup(provider);
-        await this._loadUserPref(cred.user);
         return cred.user;
     },
     async signInWithFacebook() {
         const provider = new firebase.auth.FacebookAuthProvider();
         provider.addScope('email');
         const cred = await window.__firebaseAuth.signInWithPopup(provider);
-        await this._loadUserPref(cred.user);
         return cred.user;
     },
     async linkSocialCredential(email, password, pendingCredential) {
         const cred = await window.__firebaseAuth.signInWithEmailAndPassword(email, password);
         await cred.user.linkWithCredential(pendingCredential);
-        await this._loadUserPref(cred.user);
         return cred.user;
     },
     mapFirebaseError(code) {
@@ -5243,7 +5281,20 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
         }
 
         if (window.__firebaseReady && currentUser && currentUser.uid) {
-            try { await window.__firebaseDb.collection('users').doc(currentUser.uid).update({ storagePreference: selected, pickerConfirmed: true }); } catch (_) {}
+            // set(..., {merge:true}) instead of update() — update() throws "no document to
+            // update" and silently no-ops (caught below) if the per-user Firestore doc hasn't
+            // been created yet at this exact moment, which meant the choice only ever landed
+            // in localStorage and never reached Firestore: it looked like it "worked" for as
+            // long as the browser kept that localStorage around, then vanished the moment the
+            // user logged out (which wipes it) and reappeared on next login with nothing saved
+            // server-side to restore. set+merge creates the doc if missing, so this can't fail
+            // that way.
+            try {
+                await window.__firebaseDb.collection('users').doc(currentUser.uid).set({ storagePreference: selected, pickerConfirmed: true }, { merge: true });
+                console.log('[BackupPref] wrote to Firestore OK', { uid: currentUser.uid, selected });
+            } catch (err) {
+                console.error('[BackupPref] Firestore write FAILED', { uid: currentUser.uid, selected, err });
+            }
         }
         localStorage.setItem('financeApp_storagePreference', selected);
         localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
@@ -5427,7 +5478,11 @@ function RegistrationScreen({ onRegister, onLogin }) {
             const match = people.find(p => p.name === user.displayName && p.systemManaged);
             if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
             else if (user.displayName) { try { DataService.addPerson({ name: user.displayName, isDefault: true, systemManaged: true }); } catch (_) {} }
-            (onLogin || onRegister)(user);
+            // Not calling onLogin/onRegister here — App's onAuthStateChanged listener is
+            // already firing for this same sign-in and is now the single place that resolves
+            // the saved storagePreference before setting currentUser (see its comment). Setting
+            // currentUser here too raced that fetch and could beat it, showing the storage
+            // picker to a returning user who'd already chosen one.
         } catch (err) {
             console.error('[Social sign-in error]', err.code, err.message, err);
             if (err.code === 'auth/account-exists-with-different-credential') {
@@ -5452,7 +5507,7 @@ function RegistrationScreen({ onRegister, onLogin }) {
             localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
             setLinkModal(null);
             setLinkPw('');
-            (onLogin || onRegister)(user);
+            // Not calling onLogin/onRegister here — see the comment in handleSocialSignIn.
         } catch (err) {
             const mapped = AuthUtils.mapFirebaseError(err.code);
             setLinkError(mapped ? mapped.message : 'Incorrect password. Please try again.');
@@ -5481,7 +5536,7 @@ function RegistrationScreen({ onRegister, onLogin }) {
                 const people = DataService.getPeople();
                 const match = people.find(p => p.name === user.displayName && p.systemManaged);
                 if (match) { try { DataService.updatePerson(match.id, { isDefault: true }); } catch (_) {} }
-                (onLogin || onRegister)(user);
+                // Not calling onLogin/onRegister here — see the comment in handleSocialSignIn.
             } catch (err) {
                 if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
                     // Attempt migration: check if a localStorage account exists with matching credentials
@@ -5502,7 +5557,7 @@ function RegistrationScreen({ onRegister, onLogin }) {
                                 localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
                                 localStorage.removeItem('financeApp_failCount');
                                 localStorage.removeItem('financeApp_failLockUntil');
-                                (onLogin || onRegister)(user);
+                                // Not calling onLogin/onRegister here — see the comment in handleSocialSignIn.
                                 return;
                             } catch (migrErr) { /* fall through to error */ }
                         }
@@ -5587,9 +5642,9 @@ function RegistrationScreen({ onRegister, onLogin }) {
         <div style={{minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#4a6cf7 0%,#6a3de8 100%)', padding: '1rem'}}>
             <div style={{width: '100%', maxWidth: '420px'}}>
                 <div className="text-center text-white mb-4">
-                    <i className="fas fa-wallet fa-3x mb-3" style={{opacity: 0.9}}></i>
+                    <Logo size={64} style={{marginBottom: '0.75rem', boxShadow: '0 4px 14px rgba(0,0,0,0.25)', borderRadius: '16px'}} />
                     <h1 style={{fontWeight: '700', fontSize: '1.8rem'}}>Personal Finance</h1>
-                    <p style={{opacity: 0.85, marginBottom: 0}}>Track your money, reach your goals</p>
+                    <p style={{opacity: 0.85, marginBottom: 0}}>Track every penny. Own every byte. Your data never leaves your hands.</p>
                 </div>
                 <div className="card shadow-lg" style={cardRounded}>
                     <div className="card-body p-4">
@@ -6903,7 +6958,7 @@ function NetWorth({ defaultCurrency, activeView }) {
     );
 }
 
-function DebtTracker({ defaultCurrency, categories, onUpdate, activeView }) {
+function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedded }) {
     const [activeTab, setActiveTab] = useState('owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
     const [showForm, setShowForm] = useState(false);
@@ -6993,7 +7048,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView }) {
     const handleDelete = (id) => { DataService.deleteDebt(id); setShowDeleteModal(null); reload(); };
 
     return (
-        <div className="screen">
+        <div className={embedded ? undefined : 'screen'}>
             <div className="screen-header"><h2><i className="fas fa-handshake me-2"></i>Debt Tracker</h2></div>
 
             <div style={{padding:'0 1rem 0.75rem',display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
@@ -7222,6 +7277,42 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView }) {
     );
 }
 
+function ManageScreen({ categories, defaultCurrency, onUpdate, activeView }) {
+    const [activeTab, setActiveTab] = useState('bills');
+
+    return (
+        <div className="screen">
+            <div className="screen-header">
+                <h2><i className="fas fa-layer-group me-2"></i>Bills, Recurring & Debts</h2>
+            </div>
+            <ul className="nav nav-tabs" style={{marginBottom: '1rem'}}>
+                {/* No "nav-item" class here: the app defines a global .nav-item rule for the
+                    bottom navigation bar (flex-column, max-width 70px) that collides with and
+                    breaks Bootstrap's unrelated nav-tabs <li> when reusing the same class name. */}
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'bills' ? 'active' : '')} onClick={() => setActiveTab('bills')}>
+                        <i className="fas fa-file-invoice-dollar me-1"></i>Bills
+                    </button>
+                </li>
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'recurring' ? 'active' : '')} onClick={() => setActiveTab('recurring')}>
+                        <i className="fas fa-redo me-1"></i>Recurring
+                    </button>
+                </li>
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'debts' ? 'active' : '')} onClick={() => setActiveTab('debts')}>
+                        <i className="fas fa-handshake me-1"></i>Debts
+                    </button>
+                </li>
+            </ul>
+
+            {activeTab === 'bills' && <BillTracker categories={categories} onUpdate={onUpdate} embedded />}
+            {activeTab === 'recurring' && <RecurringList onUpdate={onUpdate} activeView={activeView} embedded />}
+            {activeTab === 'debts' && <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={onUpdate} activeView={activeView} embedded />}
+        </div>
+    );
+}
+
 // Shows a native OS notification per alert, opt-in only. `tag` is set to the
 // alert's own dedup key so re-showing a still-active alert replaces the
 // previous notification instead of stacking a new one.
@@ -7327,7 +7418,7 @@ function App() {
         }
         const todayStr = new Date().toISOString().split('T')[0];
         const dueSoon = DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
-        const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'bills' }));
+        const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'manage' }));
         const activeAlerts = [...budgetActive, ...billActive];
         // Diff against the store BEFORE syncing so a native notification fires once per
         // newly-appearing alert, not every time this recomputes while it's still active.
@@ -7343,6 +7434,7 @@ function App() {
         const unsubscribe = window.__firebaseAuth.onAuthStateChanged(async (fbUser) => {
             if (fbUser) {
                 const stored = (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch (_) { return null; } })();
+                console.log('[BackupPref] onAuthStateChanged fired', { fbUserUid: fbUser.uid, storedUid: stored && stored.uid, willWipe: !!(stored && stored.uid && stored.uid !== fbUser.uid) });
                 // If a different user's data is sitting in localStorage, wipe it before loading
                 if (stored && stored.uid && stored.uid !== fbUser.uid) {
                     DataService.clearAllUserData();
@@ -7356,20 +7448,36 @@ function App() {
                 };
                 localStorage.setItem('financeApp_currentUser', JSON.stringify(user));
                 // Read storagePreference from Firestore BEFORE calling setCurrentUser so that
-                // localStorage is already populated when the storage-gate useEffect runs.
-                // This ensures the storage picker is never shown to returning users regardless
-                // of which auth method they used (email/password, Google OAuth, or any future
-                // provider) — not just email/password which had a prior synchronous read.
+                // localStorage is already populated when the storage-gate useEffect runs. This
+                // is now the ONLY place that resolves the saved preference after sign-in — it
+                // used to also be read independently inside AuthUtils.signIn/signInWithGoogle/
+                // signInWithFacebook right after their own sign-in call, which raced this same
+                // fetch (two separate Firestore reads for the same doc, whichever "won" decided
+                // what localStorage ended up with) and could occasionally lose the race with a
+                // still-in-flight read, showing the storage picker to a returning user who'd
+                // already chosen one. Firestore doc creation for brand-new social sign-ins (no
+                // doc yet) also happens here now, for the same reason.
                 try {
                     const doc = await window.__firebaseDb.collection('users').doc(fbUser.uid).get();
+                    console.log('[BackupPref] onAuthStateChanged fetched doc', { uid: fbUser.uid, exists: doc.exists, data: doc.exists ? doc.data() : null });
                     if (doc.exists) {
                         const pref = doc.data().storagePreference;
                         if (pref) {
                             localStorage.setItem('financeApp_storagePreference', pref);
                             localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
                         }
+                    } else {
+                        await window.__firebaseDb.collection('users').doc(fbUser.uid).set({
+                            displayName: user.displayName,
+                            storagePreference: 'local',
+                            createdAt: new Date().toISOString()
+                        });
+                        localStorage.setItem('financeApp_storagePreference', 'local');
                     }
-                } catch (_) {}
+                } catch (err) {
+                    console.error('[BackupPref] onAuthStateChanged Firestore read FAILED', { uid: fbUser.uid, err });
+                }
+                console.log('[BackupPref] localStorage after resolve', { pref: localStorage.getItem('financeApp_storagePreference'), confirmed: localStorage.getItem('financeApp_storagePickerConfirmed') });
                 setCurrentUser(user);
             } else {
                 setCurrentUser(null);
@@ -7383,6 +7491,7 @@ function App() {
         if (!currentUser) return;
         const pref = localStorage.getItem('financeApp_storagePreference') || '';
         const confirmed = localStorage.getItem('financeApp_storagePickerConfirmed') === 'true';
+        console.log('[BackupPref] gating effect running', { uid: currentUser.uid, pref, confirmed, skipCount: localStorage.getItem('financeApp_storagePickerSkipCount') });
         setStoragePreference(pref);
         if (pref === 'gdrive' || pref === 'onedrive') {
             localStorage.setItem('financeApp_storagePickerConfirmed', 'true');
@@ -7413,7 +7522,17 @@ function App() {
                 // OneDrive's SDK loads async+defer and may not be ready yet on a fresh page
                 // load; wait for it so isTokenValid() doesn't spuriously report "no session".
                 if (svc.waitUntilReady) await svc.waitUntilReady();
-                if (svc.isTokenValid()) {
+                let tokenReady = svc.isTokenValid();
+                if (!tokenReady && pref === 'gdrive') {
+                    // The Drive access token is short-lived (~1hr) and tab-scoped by design, so
+                    // it's routinely "invalid" here even for a user who connected minutes ago.
+                    // Before interrupting them with the Reconnect screen, try a silent (no
+                    // popup) token refresh — if they're still signed into Google in this browser
+                    // and previously granted Drive access, this succeeds with zero clicks, same
+                    // as OneDrive already does via MSAL's acquireTokenSilent below.
+                    try { await GDriveService.requestTokenSilent(); tokenReady = true; } catch (_) { tokenReady = false; }
+                }
+                if (tokenReady) {
                     setCloudSyncGate('checking');
                     SyncService.download().then(async cloudBackup => {
                         if (!cloudBackup) { setCloudSyncGate('idle'); return; }
@@ -7652,6 +7771,7 @@ function App() {
         setCurrentUser(prev => prev ? { ...prev, displayName: newName } : prev);
     };
     const handleLogout = () => {
+        console.log('[BackupPref] handleLogout called', { uid: currentUser && currentUser.uid, prefBeforeWipe: localStorage.getItem('financeApp_storagePreference') });
         // A pending debounced sync must not fire after logout — it would read the
         // about-to-be-wiped local data and could overwrite the cloud backup with it.
         cancelScheduledCloudSync();
@@ -7854,10 +7974,9 @@ function App() {
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} />;
-            case 'bills': return <BillTracker categories={categories} onUpdate={handleDataUpdate} />;
-            case 'recurring': return <RecurringList onUpdate={handleDataUpdate} activeView={activeView} />;
+            case 'manage': case 'bills': case 'recurring': case 'debts':
+                return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
-            case 'debts': return <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
@@ -7913,7 +8032,7 @@ function App() {
     return (
         <div className="mobile-app">
             <div className="app-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                <h1 style={{margin:0}}><i className="fas fa-wallet"></i> Personal Finance</h1>
+                <h1 style={{margin:0, display:'flex', alignItems:'center', gap:'0.5rem'}}><Logo size={28} style={{borderRadius:'8px'}} /> Personal Finance</h1>
                 <div style={{display:'flex',alignItems:'center',gap:'0.5rem'}}>
                     <button className="btn btn-sm btn-outline-light" onClick={() => { setSettingsScrollTarget('activeView'); setCurrentScreen('settings'); }} title="Active view — tap to change">
                         <i className="fas fa-user me-1"></i>{formatActiveViewLabel(activeView, currentUser ? currentUser.displayName : '')}
