@@ -1252,12 +1252,12 @@ class DataService {
     static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
     static getBills() { return JSON.parse(localStorage.getItem('financeApp_bills') || '[]'); }
     static saveBills(b) { localStorage.setItem('financeApp_bills', JSON.stringify(b)); }
-    static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, subcategory, reminderDaysBefore, notes }) {
+    static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, subcategory, reminderDaysBefore, notes, person, createdInView }) {
         if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
         const today = new Date().toISOString().split('T')[0];
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
-        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', isActive: true, isPaid: false };
+        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
     static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates }; this.saveBills(bills); } }
@@ -1479,28 +1479,31 @@ class DataService {
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); this.recordDeletion('debts', id); } }
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
-    static addNetWorthItem({ name, value, currency, category, type, notes, person }) {
+    static addNetWorthItem({ name, value, currency, category, type, notes, person }, activeView) {
         const item = { id: DataService._uniqueId(), name, value: parseFloat(value), currency, category, type, notes: notes||'', person: person||'own', updatedAt: new Date().toISOString() };
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
-        this.autoSaveNetWorthSnapshot(); return item;
+        this.autoSaveNetWorthSnapshot(activeView); return item;
     }
     // skipHistory: true for corrections to the base amount (typos, data-entry fixes) so they
     // don't get recorded as a net-worth movement; a real valuation update should log normally.
-    static updateNetWorthItem(id, updates, { skipHistory = false } = {}) {
+    static updateNetWorthItem(id, updates, { skipHistory = false, activeView } = {}) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
         if (i !== -1) { items[i] = { ...items[i], ...updates, updatedAt: new Date().toISOString() }; this.saveNetWorthItems(items); }
-        if (!skipHistory) this.autoSaveNetWorthSnapshot();
+        if (!skipHistory) this.autoSaveNetWorthSnapshot(activeView);
     }
-    static deleteNetWorthItem(id) {
+    static deleteNetWorthItem(id, activeView) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
         if (i !== -1) { items.splice(i, 1); this.saveNetWorthItems(items); this.recordDeletion('networth', id); }
-        this.autoSaveNetWorthSnapshot();
+        this.autoSaveNetWorthSnapshot(activeView);
     }
-    static computeNetWorth() {
+    // activeView, when passed, scopes the total to items belonging to the currently selected
+    // person(s) — matching what's actually shown on screen — instead of summing everyone combined.
+    static computeNetWorth(activeView) {
         const defaultCurrency = (JSON.parse(localStorage.getItem('financeApp_settings') || '{}')).defaultCurrency || 'GBP';
         const items = this.getNetWorthItems();
+        const visibleItems = activeView ? items.filter(item => matchesActiveView(item.person, activeView)) : items;
         let total = 0;
-        items.forEach(item => {
+        visibleItems.forEach(item => {
             const rates = CurrencyService.fallbackRates[item.currency];
             const rate = rates ? (rates[defaultCurrency] || 1) : 1;
             const converted = item.value * rate;
@@ -1508,11 +1511,15 @@ class DataService {
         });
         return total;
     }
-    static autoSaveNetWorthSnapshot() {
+    static autoSaveNetWorthSnapshot(activeView) {
         const history = JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]');
         // id is required so mergeBackups() can union history entries across devices instead
         // of dropping every entry (mergeById skips any item with id == null)
-        history.push({ id: this._uniqueId(), date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth() });
+        const entry = { id: this._uniqueId(), date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth(activeView) };
+        // Tag the snapshot with the view it was taken under so the history table (which is
+        // per-view like everything else in Net Worth) can filter out other people's entries.
+        if (activeView) entry.view = [...activeView];
+        history.push(entry);
         localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
     }
     static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
@@ -4674,11 +4681,11 @@ function SavingsGoals({ defaultCurrency, activeView }) {
     );
 }
 
-function BillTracker({ categories, onUpdate, embedded }) {
+function BillTracker({ categories, onUpdate, activeView, embedded }) {
     const [bills, setBills] = useState([]);
     const [showForm, setShowForm] = useState(false);
     const [editingBill, setEditingBill] = useState(null);
-    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '' });
+    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
     const [formErrors, setFormErrors] = useState({});
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [logMsg, setLogMsg] = useState('');
@@ -4709,9 +4716,17 @@ function BillTracker({ categories, onUpdate, embedded }) {
         return bill.amount * (map[bill.frequency] || 1);
     };
 
-    const monthlyCommitment = bills.reduce((s, b) => s + getMonthlyAmount(b), 0);
+    // Global Active View — a bill is visible if it's linked to a selected person, OR it
+    // was created while a selected person's view was active (same pattern as debts'
+    // createdInView, so a bill logged for yourself while viewing "John" still shows up
+    // when you switch back to John's view even though its `person` field is 'own').
+    // Bills created before this field existed have no `person` at all — treated as
+    // visible under every view rather than disappearing.
+    const visibleBills = bills.filter(b => !b.person || matchesActiveView(b.person, activeView) || (b.createdInView || []).some(v => activeView.includes(v)));
 
-    const sortedBills = [...bills].sort((a, b) => {
+    const monthlyCommitment = visibleBills.reduce((s, b) => s + getMonthlyAmount(b), 0);
+
+    const sortedBills = [...visibleBills].sort((a, b) => {
         const aOverdue = getDaysDiff(a.nextDueDate) < 0 && !a.isPaid;
         const bOverdue = getDaysDiff(b.nextDueDate) < 0 && !b.isPaid;
         const aToday = a.nextDueDate === today;
@@ -4727,7 +4742,7 @@ function BillTracker({ categories, onUpdate, embedded }) {
     const inactiveBills = sortedBills.filter(b => !b.isActive);
 
     const resetForm = () => {
-        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '' });
+        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
         setFormErrors({}); setEditingBill(null);
     };
 
@@ -4740,16 +4755,16 @@ function BillTracker({ categories, onUpdate, embedded }) {
         if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
         try {
             if (editingBill) {
-                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, subcategory: formData.subcategory || '', reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes });
+                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, subcategory: formData.subcategory || '', reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes, person: formData.person || 'own' });
             } else {
-                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, subcategory: formData.subcategory, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes });
+                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, subcategory: formData.subcategory, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes, person: formData.person || 'own', createdInView: activeView });
             }
             resetForm(); setShowForm(false); loadBills(); onUpdate();
         } catch (err) { setFormErrors({ name: err.message }); }
     };
 
     const handleEdit = (bill) => {
-        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', subcategory: bill.subcategory || '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '' });
+        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', subcategory: bill.subcategory || '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '', person: bill.person || 'own' });
         setEditingBill(bill); setShowForm(true);
     };
 
@@ -4919,6 +4934,12 @@ function BillTracker({ categories, onUpdate, embedded }) {
                                     <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Remind (days before)</label>
                                     <input type="number" min="1" max="14" className="form-control" value={formData.reminderDaysBefore} onChange={e => setFormData(p => ({...p, reminderDaysBefore: e.target.value}))} />
                                 </div>
+                                {activeView.length > 1 && (
+                                    <div className="col-6">
+                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Linked to</label>
+                                        <PersonSelect value={formData.person} onChange={v => setFormData(p => ({...p, person: v}))} activeView={activeView} className="form-select" ownLabel="Own (Me)" />
+                                    </div>
+                                )}
                                 <div className="col-12">
                                     <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Notes</label>
                                     <input type="text" className="form-control" value={formData.notes} onChange={e => setFormData(p => ({...p, notes: e.target.value}))} placeholder="Optional notes" />
@@ -4933,7 +4954,7 @@ function BillTracker({ categories, onUpdate, embedded }) {
                 </div>
             )}
 
-            {bills.length === 0 && !showForm ? (
+            {visibleBills.length === 0 && !showForm ? (
                 <div className="empty-state">
                     <i className="fas fa-file-invoice-dollar fa-3x"></i>
                     <h4>No bills tracked yet</h4>
@@ -6267,12 +6288,19 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange })
 
 function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthSelect }) {
     const [timeWindow, setTimeWindow] = useState(() => sessionStorage.getItem('trends_timeWindow') || '6m');
-    const [selectedCats, setSelectedCats] = useState(() => { try { return JSON.parse(sessionStorage.getItem('trends_cats') || '[]'); } catch(_) { return []; } });
-    const [showCatFilter, setShowCatFilter] = useState(false);
+    const [selectedCategory, setSelectedCategory] = useState(() => sessionStorage.getItem('trends_category') || '');
+    const [chartSeriesFilter, setChartSeriesFilter] = useState('both'); // 'both' | 'income' | 'expense'
     const [expanded, setExpanded] = useState({});
+    // Custom time period: month+year only (no day-level picker), same shape as Summary's.
+    const [customFromMonth, setCustomFromMonth] = useState(() => { const v = sessionStorage.getItem('trends_customFromMonth'); return v !== null ? parseInt(v) : new Date().getMonth(); });
+    const [customFromYear, setCustomFromYear] = useState(() => { const v = sessionStorage.getItem('trends_customFromYear'); return v !== null ? parseInt(v) : new Date().getFullYear(); });
+    const [customToMonth, setCustomToMonth] = useState(() => { const v = sessionStorage.getItem('trends_customToMonth'); return v !== null ? parseInt(v) : new Date().getMonth(); });
+    const [customToYear, setCustomToYear] = useState(() => { const v = sessionStorage.getItem('trends_customToYear'); return v !== null ? parseInt(v) : new Date().getFullYear(); });
 
     const setTw = (v) => { setTimeWindow(v); sessionStorage.setItem('trends_timeWindow', v); };
-    const setCats = (fn) => { setSelectedCats(prev => { const next = typeof fn === 'function' ? fn(prev) : fn; sessionStorage.setItem('trends_cats', JSON.stringify(next)); return next; }); };
+    const setCat = (v) => { setSelectedCategory(v); sessionStorage.setItem('trends_category', v); };
+    const setCustomFrom = (m, y) => { setCustomFromMonth(m); setCustomFromYear(y); sessionStorage.setItem('trends_customFromMonth', m); sessionStorage.setItem('trends_customFromYear', y); };
+    const setCustomTo = (m, y) => { setCustomToMonth(m); setCustomToYear(y); sessionStorage.setItem('trends_customToMonth', m); sessionStorage.setItem('trends_customToYear', y); };
 
     const toggle = (key) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
 
@@ -6289,6 +6317,13 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
         const months = [];
         if (timeWindow === 'year') {
             for (let m = 0; m <= now.getMonth(); m++) months.push({ year: now.getFullYear(), month: m });
+        } else if (timeWindow === 'custom') {
+            const fromKey = customFromYear * 12 + customFromMonth, toKey = customToYear * 12 + customToMonth;
+            const [sY, sM, eY, eM] = fromKey <= toKey ? [customFromYear, customFromMonth, customToYear, customToMonth] : [customToYear, customToMonth, customFromYear, customFromMonth];
+            let cursor = new Date(sY, sM, 1);
+            const end = new Date(eY, eM, 1);
+            let guard = 0;
+            while (cursor <= end && guard < 60) { months.push({ year: cursor.getFullYear(), month: cursor.getMonth() }); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
         } else {
             const count = timeWindow === '3m' ? 3 : timeWindow === '12m' ? 12 : 6;
             for (let i = count - 1; i >= 0; i--) {
@@ -6304,7 +6339,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     const curYear = now.getFullYear(), curMonth = now.getMonth();
     // Person scoping now comes entirely from the global Active View — expenses/income
     // arrive already filtered by it; this screen only adds its own category filter.
-    const filteredExpenses = selectedCats.length > 0 ? expenses.filter(e => selectedCats.includes(e.categoryId)) : expenses;
+    const filteredExpenses = selectedCategory ? expenses.filter(e => e.categoryId === parseInt(selectedCategory)) : expenses;
     const filteredIncome = income;
 
     const monthData = months.map(({ year, month }) => {
@@ -6339,141 +6374,133 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
         return { year, month, prefix, label, shortLabel, totalExp, totalInc, net, savingsRate, isCurrent, from, to, catBreakdown, incomeBreakdown };
     });
 
-    const completeMonths = monthData.filter(m => !m.isCurrent && (m.totalExp > 0 || m.totalInc > 0));
+    // A category filter turns this into "how much did I spend on X, month by month"
+    // rather than a multi-month income/expense/net/savings-rate comparison — a single
+    // month of spend (including the still-in-progress current month) is meaningful on
+    // its own, so it doesn't need the 2-complete-month bar the general trend view uses.
+    const completeMonths = selectedCategory
+        ? monthData.filter(m => m.totalExp > 0)
+        : monthData.filter(m => !m.isCurrent && (m.totalExp > 0 || m.totalInc > 0));
+    const minMonthsNeeded = selectedCategory ? 1 : 2;
 
-    const maxVal = Math.max(...monthData.flatMap(m => [m.totalInc, m.totalExp]), 1);
-    const minNet = Math.min(...monthData.map(m => m.net), 0);
-    const totalRange = maxVal - minNet;
-    const svgW = 420, ChartH = 180, padL = 52, padR = 10, padT = 22, padB = 28;
-    const chartW = svgW - padL - padR, chartH = ChartH - padT - padB;
-    const n = monthData.length;
-    const slotW = chartW / Math.max(n, 1);
-    const barW = Math.min(slotW * 0.3, 13);
-    const toY = (v) => padT + ((maxVal - v) / totalRange) * chartH;
-    const zeroY = toY(0);
-    const fmtTick = (v) => { if (v >= 1000000) return (v/1000000).toFixed(1)+'M'; if (v >= 1000) return (v/1000).toFixed(0)+'k'; return Math.round(v)+''; };
-
-    const netPoints = monthData.map((m, i) => `${padL + (i + 0.5) * slotW},${toY(m.net)}`).join(' ');
-    const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => minNet + f * totalRange);
+    // Chart series: a category filter means "no income data makes sense here", so it
+    // always forces expense-only and hides the Both/Income/Expense toggle.
+    const effectiveSeriesFilter = selectedCategory ? 'expense' : chartSeriesFilter;
+    const chartMonths = monthData.map(m => ({ label: m.shortLabel, income: m.totalInc, expense: m.totalExp }));
+    // Table columns collapse to Month/Expenses only under a category filter, since
+    // Income/Net/Savings% all depend on income data that isn't shown in that mode.
+    const gridCols = selectedCategory ? '1fr 100px' : '1fr 70px 70px 62px 52px';
 
     return (
         <div className="screen">
-            <div className="screen-header"><h2><i className="fas fa-chart-line me-2"></i>Monthly Trends</h2></div>
-
-            <div style={{padding:'0 1rem 0.6rem'}}>
-                <div className="btn-group w-100" role="group">
-                    {[['3m','3M'],['6m','6M'],['12m','12M'],['year','This Year']].map(([v,l]) => (
-                        <button key={v} type="button" className={'btn btn-sm ' + (timeWindow === v ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setTw(v)} style={{fontSize:'0.75rem'}}>{l}</button>
-                    ))}
-                </div>
-            </div>
-
-            <div style={{padding:'0 1rem 0.6rem',display:'flex',gap:'8px',flexWrap:'wrap'}}>
-                <button type="button" className={'btn btn-sm ' + (selectedCats.length > 0 ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setShowCatFilter(v => !v)} style={{whiteSpace:'nowrap'}}>
-                    <i className="fas fa-filter me-1"></i>Categories{selectedCats.length > 0 ? ` (${selectedCats.length})` : ''}
-                </button>
-            </div>
-
-            {showCatFilter && (
-                <div style={{padding:'0 1rem 0.75rem'}}>
-                    <div style={{background:'#f8f9fa',borderRadius:'8px',padding:'0.5rem 0.6rem'}}>
-                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'0.4rem'}}>
-                            <span style={{fontSize:'0.78rem',color:'#6c757d',fontWeight:600}}>Filter by category</span>
-                            {selectedCats.length > 0 && <button type="button" className="btn btn-sm btn-link p-0" style={{fontSize:'0.75rem'}} onClick={() => setCats([])}>Clear all</button>}
+            <div className="screen-header">
+                <h2><i className="fas fa-chart-line me-2"></i>Monthly Trends</h2>
+                <div className="summary-filters">
+                    <div className="filter-group">
+                        <label className="filter-label">Time Period:</label>
+                        <select className="form-select form-select-sm" value={timeWindow} onChange={(e) => setTw(e.target.value)}>
+                            <option value="3m">Last 3 Months</option>
+                            <option value="6m">Last 6 Months</option>
+                            <option value="12m">Last 12 Months</option>
+                            <option value="year">This Year</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </div>
+                    {timeWindow === 'custom' && (
+                        <div className="filter-group" style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                            <div>
+                                <label className="filter-label">From:</label>
+                                <div style={{display: 'flex', gap: '0.25rem'}}>
+                                    <select className="form-select form-select-sm" value={customFromMonth} onChange={e => setCustomFrom(parseInt(e.target.value), customFromYear)}>
+                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
+                                    </select>
+                                    <select className="form-select form-select-sm" value={customFromYear} onChange={e => setCustomFrom(customFromMonth, parseInt(e.target.value))}>
+                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="filter-label">To:</label>
+                                <div style={{display: 'flex', gap: '0.25rem'}}>
+                                    <select className="form-select form-select-sm" value={customToMonth} onChange={e => setCustomTo(parseInt(e.target.value), customToYear)}>
+                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
+                                    </select>
+                                    <select className="form-select form-select-sm" value={customToYear} onChange={e => setCustomTo(customToMonth, parseInt(e.target.value))}>
+                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
+                                    </select>
+                                </div>
+                            </div>
                         </div>
-                        <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
-                            {categories.map(cat => (
-                                <button key={cat.id} type="button"
-                                    className={'btn btn-sm ' + (selectedCats.includes(cat.id) ? 'btn-primary' : 'btn-outline-secondary')}
-                                    style={{fontSize:'0.73rem',padding:'2px 8px'}}
-                                    onClick={() => setCats(prev => prev.includes(cat.id) ? prev.filter(id => id !== cat.id) : [...prev, cat.id])}>
-                                    {cat.name}
-                                </button>
-                            ))}
-                        </div>
+                    )}
+                    <div className="filter-group">
+                        <label className="filter-label">Category:</label>
+                        <select className="form-select form-select-sm" value={selectedCategory} onChange={e => setCat(e.target.value)}>
+                            <option value="">All Categories</option>
+                            {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                        </select>
                     </div>
                 </div>
-            )}
+            </div>
 
-            {completeMonths.length < 2 ? (
+            {completeMonths.length < minMonthsNeeded ? (
                 <div style={{textAlign:'center',padding:'3rem 1rem'}}>
                     <i className="fas fa-chart-line fa-3x text-muted" style={{display:'block',marginBottom:'1rem'}}></i>
                     <h5 className="text-muted">Not enough data yet</h5>
-                    <p className="text-muted small">Add expenses over at least 2 months to see trends.</p>
+                    <p className="text-muted small">{selectedCategory ? 'Add an expense in this category to see trends.' : 'Add expenses over at least 2 months to see trends.'}</p>
                 </div>
             ) : (
                 <React.Fragment>
-                    <div style={{padding:'0 1rem 0.5rem',overflowX:'auto'}}>
-                        <svg viewBox={`0 0 ${svgW} ${ChartH}`} style={{width:'100%',minWidth:Math.max(svgW, n*32)+'px',height:'auto',display:'block'}}>
-                            {yTicks.map((val, fi) => {
-                                const y = toY(val);
-                                return (
-                                    <React.Fragment key={fi}>
-                                        <line x1={padL} y1={y} x2={svgW - padR} y2={y} stroke={val === 0 ? '#adb5bd' : '#e9ecef'} strokeWidth={val === 0 ? 1.5 : 1}/>
-                                        <text x={padL - 3} y={y + 3.5} textAnchor="end" fontSize="8.5" fill="#6c757d">{fmtTick(val)}</text>
-                                    </React.Fragment>
-                                );
-                            })}
-                            {monthData.map((m, i) => {
-                                const cx = padL + (i + 0.5) * slotW;
-                                const incH = Math.max(0, (m.totalInc / totalRange) * chartH);
-                                const expH = Math.max(0, (m.totalExp / totalRange) * chartH);
-                                return (
-                                    <React.Fragment key={`${m.year}-${m.month}`}>
-                                        <rect x={cx - barW - 1} y={zeroY - incH} width={barW} height={incH} fill="#198754" opacity={m.isCurrent ? 0.4 : 0.82} rx="1.5"/>
-                                        <rect x={cx + 1} y={zeroY - expH} width={barW} height={expH} fill="#fd7e14" opacity={m.isCurrent ? 0.4 : 0.82} rx="1.5"/>
-                                        <text x={cx} y={ChartH - padB + 12} textAnchor="middle" fontSize="9" fill={m.isCurrent ? '#adb5bd' : '#495057'}>{m.shortLabel}</text>
-                                    </React.Fragment>
-                                );
-                            })}
-                            {n > 1 && <polyline points={netPoints} fill="none" stroke="#0d6efd" strokeWidth="2" strokeLinejoin="round"/>}
-                            {n > 1 && monthData.map((m, i) => {
-                                const cx = padL + (i + 0.5) * slotW;
-                                return <circle key={i} cx={cx} cy={toY(m.net)} r="2.5" fill={m.net >= 0 ? '#0d6efd' : '#dc3545'}/>;
-                            })}
-                            <rect x={padL} y={padT - 16} width={7} height={7} fill="#198754" rx="1"/>
-                            <text x={padL + 9} y={padT - 9} fontSize="9" fill="#495057">Income</text>
-                            <rect x={padL + 48} y={padT - 16} width={7} height={7} fill="#fd7e14" rx="1"/>
-                            <text x={padL + 57} y={padT - 9} fontSize="9" fill="#495057">Expenses</text>
-                            <line x1={padL + 106} y1={padT - 12} x2={padL + 116} y2={padT - 12} stroke="#0d6efd" strokeWidth="2"/>
-                            <circle cx={padL + 111} cy={padT - 12} r="2.5" fill="#0d6efd"/>
-                            <text x={padL + 119} y={padT - 9} fontSize="9" fill="#495057">Net</text>
-                        </svg>
+                    <div style={{padding:'0 1rem 1rem'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem'}}>
+                            <h5 style={{margin: 0}}><i className="fas fa-chart-bar me-2"></i>Income vs Expense</h5>
+                            {!selectedCategory && (
+                                <div className="btn-group btn-group-sm" role="group" aria-label="Chart series">
+                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'both' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('both')}>Both</button>
+                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'income' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('income')}>Income</button>
+                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'expense' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('expense')}>Expense</button>
+                                </div>
+                            )}
+                        </div>
+                        <IncomeExpenseTrendChart months={chartMonths} defaultCurrency={defaultCurrency} seriesFilter={effectiveSeriesFilter} />
                     </div>
 
                     <div style={{padding:'0 1rem 1rem'}}>
-                        <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 62px 52px',gap:'4px',padding:'0 10px 0.3rem',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
+                        <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',padding:'0 10px 0.3rem',alignItems:'center',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
                             <span>Month</span>
-                            <span style={{textAlign:'right',color:'#198754'}}>Income</span>
+                            {!selectedCategory && <span style={{textAlign:'right',color:'#198754'}}>Income</span>}
                             <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
-                            <span style={{textAlign:'right'}}>Net</span>
-                            <span style={{textAlign:'right'}}>Savings%</span>
+                            {!selectedCategory && <span style={{textAlign:'right'}}>Net</span>}
+                            {!selectedCategory && <span style={{textAlign:'right'}}>Savings%</span>}
                         </div>
 
                         {monthData.map(m => {
                             const expKey = `${m.prefix}:exp`;
                             const incKey = `${m.prefix}:inc`;
                             const hasCat = Object.keys(m.catBreakdown).length > 0;
-                            const hasInc = Object.keys(m.incomeBreakdown).length > 0;
+                            const hasInc = !selectedCategory && Object.keys(m.incomeBreakdown).length > 0;
                             return (
                                 <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
-                                    <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 62px 52px',gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
+                                    <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
                                         <div style={{fontWeight:600,fontSize:'0.85rem'}}>
                                             {m.label}
                                             {m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.6rem'}}>current</span>}
                                         </div>
-                                        <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>
+                                        {!selectedCategory && <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>}
                                         <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
                                             onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to)}
                                             title={m.totalExp > 0 ? `View ${m.label} expenses` : undefined}>
                                             {m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}
                                         </div>
-                                        <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
-                                            {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
-                                        </div>
-                                        <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right'}}>
-                                            {m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : 'N/A'}
-                                        </div>
+                                        {!selectedCategory && (
+                                            <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
+                                                {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
+                                            </div>
+                                        )}
+                                        {!selectedCategory && (
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right'}}>
+                                                {m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : 'N/A'}
+                                            </div>
+                                        )}
                                     </div>
                                     {(hasCat || hasInc) && (
                                         <div style={{display:'flex',gap:'4px',padding:'3px 10px 5px',borderTop:'1px solid #f0f0f0',background:'#fafafa'}}>
@@ -6634,14 +6661,14 @@ function NetWorth({ defaultCurrency, activeView }) {
             // so it must not show up as a gain/loss in the history "Change" column.
             DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' }, { skipHistory: true });
         } else {
-            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' });
+            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, category: form.category, notes: form.notes, person: form.person || 'own' }, activeView);
         }
         setShowForm(false);
         setEditingItem(null);
         reload();
     };
 
-    const handleDelete = (id) => { DataService.deleteNetWorthItem(id); setShowDeleteModal(null); reload(); };
+    const handleDelete = (id) => { DataService.deleteNetWorthItem(id, activeView); setShowDeleteModal(null); reload(); };
 
     const openValuationForm = (item) => { setValuationItem(item); setValuationValue(String(item.value)); setValuationError(''); };
 
@@ -6649,7 +6676,7 @@ function NetWorth({ defaultCurrency, activeView }) {
         e.preventDefault();
         if (!valuationValue || parseFloat(valuationValue) <= 0) { setValuationError('Value must be greater than 0'); return; }
         // A real valuation update — logged to history so the change shows as a gain/loss.
-        DataService.updateNetWorthItem(valuationItem.id, { value: parseFloat(valuationValue) });
+        DataService.updateNetWorthItem(valuationItem.id, { value: parseFloat(valuationValue) }, { activeView });
         setValuationItem(null);
         setValuationValue('');
         reload();
@@ -6661,7 +6688,11 @@ function NetWorth({ defaultCurrency, activeView }) {
     const assetsByCat = groupBy(assetItems, 'category');
     const liabsByCat = groupBy(liabilityItems, 'category');
 
-    const sortedHistory = [...history].reverse();
+    // Only show snapshots taken under a view that overlaps the currently active one — same
+    // pattern as debts' createdInView — so switching person doesn't surface the other
+    // person's net-worth movements. Legacy entries with no view tag predate this and stay
+    // visible everywhere rather than silently disappearing.
+    const sortedHistory = [...history].filter(entry => !entry.view || entry.view.some(v => activeView.includes(v))).reverse();
 
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
@@ -7306,7 +7337,7 @@ function ManageScreen({ categories, defaultCurrency, onUpdate, activeView }) {
                 </li>
             </ul>
 
-            {activeTab === 'bills' && <BillTracker categories={categories} onUpdate={onUpdate} embedded />}
+            {activeTab === 'bills' && <BillTracker categories={categories} onUpdate={onUpdate} activeView={activeView} embedded />}
             {activeTab === 'recurring' && <RecurringList onUpdate={onUpdate} activeView={activeView} embedded />}
             {activeTab === 'debts' && <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={onUpdate} activeView={activeView} embedded />}
         </div>
