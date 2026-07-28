@@ -2038,14 +2038,21 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         </div>
                         {isRecurring && (
                             <div className="mt-2">
-                                <select className="form-select mb-2" value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)}>
+                                <select className="form-select mb-2" value={recurringFreq} onChange={e => {
+                                    const freq = e.target.value;
+                                    setRecurringFreq(freq);
+                                    const minEnd = computeNextDue(new Date(), freq);
+                                    if (recurringEndDate && recurringEndDate < minEnd) setRecurringEndDate('');
+                                }}>
                                     <option value="daily">Daily</option>
                                     <option value="weekly">Weekly</option>
                                     <option value="monthly">Monthly</option>
                                     <option value="yearly">Yearly</option>
                                 </select>
                                 <label className="form-label small text-muted">End Date (Optional)</label>
-                                <input type="date" className="form-control" value={recurringEndDate} min={new Date().toISOString().split('T')[0]} onChange={e => setRecurringEndDate(e.target.value)} />
+                                {/* Must allow at least one full cycle to occur before ending — the first
+                                    occurrence isn't generated until computeNextDue(today, frequency). */}
+                                <input type="date" className="form-control" value={recurringEndDate} min={computeNextDue(new Date(), recurringFreq)} onChange={e => setRecurringEndDate(e.target.value)} />
                             </div>
                         )}
                     </div>
@@ -2680,14 +2687,19 @@ function IncomeForm({ income, onUpdate, activeView }) {
                             </div>
                             {isRecurring && (
                                 <div className="mt-2">
-                                    <select className="form-select mb-2" value={recurringFreq} onChange={e => setRecurringFreq(e.target.value)}>
+                                    <select className="form-select mb-2" value={recurringFreq} onChange={e => {
+                                        const freq = e.target.value;
+                                        setRecurringFreq(freq);
+                                        const minEnd = computeNextDue(new Date(), freq);
+                                        if (recurringEndDate && recurringEndDate < minEnd) setRecurringEndDate('');
+                                    }}>
                                         <option value="daily">Daily</option>
                                         <option value="weekly">Weekly</option>
                                         <option value="monthly">Monthly</option>
                                         <option value="yearly">Yearly</option>
                                     </select>
                                     <label className="form-label small text-muted">End Date (Optional)</label>
-                                    <input type="date" className="form-control" value={recurringEndDate} min={new Date().toISOString().split('T')[0]} onChange={e => setRecurringEndDate(e.target.value)} />
+                                    <input type="date" className="form-control" value={recurringEndDate} min={computeNextDue(new Date(), recurringFreq)} onChange={e => setRecurringEndDate(e.target.value)} />
                                 </div>
                             )}
                         </div>
@@ -2867,6 +2879,10 @@ function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both
     const barWidth = singleSeries ? Math.min(28, groupWidth - 10) : Math.min(20, groupWidth / 2 - 6);
     const barGap = 3;
     const yFor = (v) => padding.top + plotHeight - (v / rawMax) * plotHeight;
+    // Past ~6 months the bars get too narrow for their value labels, which start
+    // overlapping neighbors. Drop the always-on labels there and rely on the existing
+    // hover/tap tooltip (below) instead, rather than adding a horizontal-scroll chart.
+    const showLabels = months.length <= 6;
 
     return (
         <div style={{ position: 'relative' }}>
@@ -2889,7 +2905,7 @@ function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both
                                         fill={INCOME_COLOR} opacity={incomeHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
                                         onMouseEnter={() => setHovered({ i, series: 'income' })} onMouseLeave={() => setHovered(null)}
                                         onFocus={() => setHovered({ i, series: 'income' })} onBlur={() => setHovered(null)} />
-                                    <text x={incomeX + barWidth / 2} y={yFor(m.income) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.income, defaultCurrency)}</text>
+                                    {showLabels && <text x={incomeX + barWidth / 2} y={yFor(m.income) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.income, defaultCurrency)}</text>}
                                 </>
                             )}
                             {showExpense && (
@@ -2898,7 +2914,7 @@ function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both
                                         fill={EXPENSE_COLOR} opacity={expenseHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
                                         onMouseEnter={() => setHovered({ i, series: 'expense' })} onMouseLeave={() => setHovered(null)}
                                         onFocus={() => setHovered({ i, series: 'expense' })} onBlur={() => setHovered(null)} />
-                                    <text x={expenseX + barWidth / 2} y={yFor(m.expense) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.expense, defaultCurrency)}</text>
+                                    {showLabels && <text x={expenseX + barWidth / 2} y={yFor(m.expense) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.expense, defaultCurrency)}</text>}
                                 </>
                             )}
                             <text x={groupX + groupWidth / 2} y={height - padding.bottom + 13} textAnchor="middle" fontSize="9" fill="#6b7280">{m.label}</text>
@@ -6390,6 +6406,10 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     // Table columns collapse to Month/Expenses only under a category filter, since
     // Income/Net/Savings% all depend on income data that isn't shown in that mode.
     const gridCols = selectedCategory ? '1fr 100px' : '1fr 70px 70px 62px 52px';
+    const totalIncomeAll = monthData.reduce((s, m) => s + m.totalInc, 0);
+    const totalExpAll = monthData.reduce((s, m) => s + m.totalExp, 0);
+    const totalNetAll = totalIncomeAll - totalExpAll;
+    const totalSavingsPctAll = totalIncomeAll > 0 ? ((totalIncomeAll - totalExpAll) / totalIncomeAll) * 100 : null;
 
     return (
         <div className="screen">
@@ -6481,9 +6501,9 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
                             return (
                                 <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
                                     <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
-                                        <div style={{fontWeight:600,fontSize:'0.85rem'}}>
-                                            {m.label}
-                                            {m.isCurrent && <span className="badge bg-secondary ms-1" style={{fontSize:'0.6rem'}}>current</span>}
+                                        <div style={{minWidth:0}}>
+                                            <div style={{fontWeight:600,fontSize:'0.75rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{m.label}</div>
+                                            {m.isCurrent && <span className="badge bg-secondary" style={{fontSize:'0.55rem',marginTop:'2px',display:'inline-block'}}>current</span>}
                                         </div>
                                         {!selectedCategory && <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>}
                                         <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
@@ -6561,6 +6581,14 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
                                 </div>
                             );
                         })}
+
+                        <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',marginTop:'2px',borderTop:'2px solid #adb5bd'}}>
+                            <div style={{fontWeight:700,fontSize:'0.85rem'}}>Total</div>
+                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,color:'#198754',textAlign:'right'}}>{fmt(totalIncomeAll)}</div>}
+                            <div style={{fontSize:'0.8rem',fontWeight:700,color:'#fd7e14',textAlign:'right'}}>{fmt(totalExpAll)}</div>
+                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,textAlign:'right',color:totalNetAll>=0?'#198754':'#dc3545'}}>{fmt(totalNetAll)}</div>}
+                            {!selectedCategory && <div style={{fontSize:'0.78rem',fontWeight:700,color:'#6c757d',textAlign:'right'}}>{totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0)+'%' : 'N/A'}</div>}
+                        </div>
                     </div>
                 </React.Fragment>
             )}
@@ -6690,9 +6718,12 @@ function NetWorth({ defaultCurrency, activeView }) {
 
     // Only show snapshots taken under a view that overlaps the currently active one — same
     // pattern as debts' createdInView — so switching person doesn't surface the other
-    // person's net-worth movements. Legacy entries with no view tag predate this and stay
-    // visible everywhere rather than silently disappearing.
-    const sortedHistory = [...history].filter(entry => !entry.view || entry.view.some(v => activeView.includes(v))).reverse();
+    // person's net-worth movements. Legacy entries with no view tag predate per-person
+    // tracking and were combined totals across everyone, so they can't be truthfully
+    // attributed to any one person — treat them as belonging to the account owner ('own')
+    // rather than showing them under every person's view, which produced the same
+    // mismatched-jump symptom this fix was meant to eliminate.
+    const sortedHistory = [...history].filter(entry => entry.view ? entry.view.some(v => activeView.includes(v)) : activeView.includes('own')).reverse();
 
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
