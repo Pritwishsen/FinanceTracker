@@ -6,7 +6,39 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>Personal Finance App</title>
+    <title>Spendly Money — Track Every Penny. Own Every Byte.</title>
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="Spendly Money — Track every penny. Own every byte. Personal and family expense tracking, budgeting and net worth. Your data never leaves your hands — stored only in your own cloud or device.">
+    <meta name="keywords" content="personal finance, family budget tracker, expense tracking, net worth, budget planner, private finance app, Google Drive sync, family spending">
+    <meta name="author" content="Spendly Money">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph — controls how the app looks when shared on WhatsApp, Facebook, LinkedIn -->
+    <meta property="og:title" content="Spendly Money — Track Every Penny. Own Every Byte.">
+    <meta property="og:description" content="Personal and family expense tracking where your data never leaves your hands. Stored only in your own cloud storage or device.">
+    <meta property="og:url" content="https://spendly-money.com">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Spendly Money">
+    <meta property="og:image" content="https://spendly-money.com/og-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Spendly Money — Track Every Penny. Own Every Byte.">
+
+    <!-- Twitter / X card — controls how it looks when shared on Twitter -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Spendly Money — Track Every Penny. Own Every Byte.">
+    <meta name="twitter:description" content="Personal and family expense tracking where your data never leaves your hands.">
+    <meta name="twitter:image" content="https://spendly-money.com/og-image.png">
+
+    <!-- Canonical URL — tells Google the official URL of your app -->
+    <link rel="canonical" href="https://spendly-money.com">
+
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+    <link rel="shortcut icon" href="favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="src/styles/App.css">
@@ -1552,13 +1584,16 @@ class DataService {
     // expense category/subcategory model (renameSubcategory etc. above) but without budgets,
     // which are expense-specific.
     static _netWorthCategoryDefaults(type) {
-        return type === 'asset' ? ['Cash', 'Investments', 'Property', 'Vehicle', 'Other'] : ['Mortgage', 'Loan', 'Credit Card', 'Other'];
+        return type === 'asset'
+            ? ['Investment', 'Property', 'Pension & Retirement', 'Vehicles & Other Asset']
+            : ['Mortgage', 'Loans', 'Credit Cards', 'Overdraft', 'Money Owed to Others', 'Other Liability'];
     }
     static getNetWorthCategories(type) {
         const key = 'financeApp_' + type + 'Categories';
         const saved = localStorage.getItem(key);
         if (saved) return JSON.parse(saved);
-        const seeded = this._netWorthCategoryDefaults(type).map(name => ({ id: DataService._uniqueId(), name, subcategories: [] }));
+        const now = new Date().toISOString();
+        const seeded = this._netWorthCategoryDefaults(type).map(name => ({ id: DataService._uniqueId(), name, subcategories: [], createdAt: now, updatedAt: now }));
         localStorage.setItem(key, JSON.stringify(seeded));
         return seeded;
     }
@@ -1566,15 +1601,20 @@ class DataService {
     static addNetWorthCategory(type, name) {
         const cats = this.getNetWorthCategories(type);
         if (cats.some(c => c.name.toLowerCase() === name.toLowerCase())) return false;
-        cats.push({ id: DataService._uniqueId(), name, subcategories: [] });
+        const now = new Date().toISOString();
+        cats.push({ id: DataService._uniqueId(), name, subcategories: [], createdAt: now, updatedAt: now });
         this.saveNetWorthCategories(type, cats);
         return true;
     }
+    // updatedAt is required so a rename wins the mergeById tie-break in mergeBackups() — without
+    // it, syncing with a device that hasn't pulled the rename yet can silently revert it back to
+    // whatever that device still has locally (e.g. the original default name).
     static updateNetWorthCategory(type, id, name) {
         const cats = this.getNetWorthCategories(type);
         const cat = cats.find(c => c.id === id);
         if (!cat) return false;
         cat.name = name;
+        cat.updatedAt = new Date().toISOString();
         this.saveNetWorthCategories(type, cats);
         return true;
     }
@@ -1597,14 +1637,14 @@ class DataService {
     static addNetWorthSubcategory(type, categoryId, name) {
         const cats = this.getNetWorthCategories(type);
         const cat = cats.find(c => c.id === categoryId);
-        if (cat && !cat.subcategories.includes(name)) { cat.subcategories.push(name); this.saveNetWorthCategories(type, cats); return true; }
+        if (cat && !cat.subcategories.includes(name)) { cat.subcategories.push(name); cat.updatedAt = new Date().toISOString(); this.saveNetWorthCategories(type, cats); return true; }
         return false;
     }
     static removeNetWorthSubcategory(type, categoryId, name) {
         if (this.countNetWorthSubcategoryUsage(type, categoryId, name) > 0) return false;
         const cats = this.getNetWorthCategories(type);
         const cat = cats.find(c => c.id === categoryId);
-        if (cat) { const index = cat.subcategories.indexOf(name); if (index !== -1) { cat.subcategories.splice(index, 1); this.saveNetWorthCategories(type, cats); return true; } }
+        if (cat) { const index = cat.subcategories.indexOf(name); if (index !== -1) { cat.subcategories.splice(index, 1); cat.updatedAt = new Date().toISOString(); this.saveNetWorthCategories(type, cats); return true; } }
         return false;
     }
     static renameNetWorthSubcategory(type, categoryId, oldName, newName) {
@@ -1614,6 +1654,7 @@ class DataService {
         const index = cat.subcategories.indexOf(oldName);
         if (index === -1 || cat.subcategories.includes(newName)) return false;
         cat.subcategories[index] = newName;
+        cat.updatedAt = new Date().toISOString();
         this.saveNetWorthCategories(type, cats);
         const items = this.getNetWorthItems();
         let itemCount = 0;
@@ -2743,6 +2784,7 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [editingSubcategory, setEditingSubcategory] = useState(null);
     const [renameConfirm, setRenameConfirm] = useState(null);
+    const [renameCategoryConfirm, setRenameCategoryConfirm] = useState(null);
 
     const handleAddCategory = (e) => {
         e.preventDefault();
@@ -2752,12 +2794,23 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
         DataService.addNetWorthCategory(type, name);
         setNewCategoryName(''); setErrors({}); onUpdate();
     };
+    // Renaming a category is gated behind a confirm-with-warning modal (rather than saving
+    // straight on blur/Enter) because the name is what groups items in the Net Worth summary
+    // and history — a rename changes how existing items are displayed there, not just the label.
     const handleUpdateCategory = (categoryId, newName) => {
         const name = newName.trim();
+        const category = categories.find(c => c.id === categoryId);
         if (!name) { setErrors({ [categoryId]: 'Category name is required' }); return; }
+        if (category && name === category.name) { setEditingCategory(null); return; }
         if (categories.some(c => c.id !== categoryId && c.name.toLowerCase() === name.toLowerCase())) { setErrors({ [categoryId]: 'Category name already exists' }); return; }
-        DataService.updateNetWorthCategory(type, categoryId, name);
-        setEditingCategory(null); setErrors({}); onUpdate();
+        setErrors({});
+        setRenameCategoryConfirm({ categoryId, oldName: category.name, newName: name, itemCount: DataService.countNetWorthCategoryUsage(type, categoryId) });
+    };
+    const handleConfirmUpdateCategory = () => {
+        if (!renameCategoryConfirm) return;
+        const { categoryId, newName } = renameCategoryConfirm;
+        DataService.updateNetWorthCategory(type, categoryId, newName);
+        setRenameCategoryConfirm(null); setEditingCategory(null); onUpdate();
     };
     const handleDeleteCategory = (categoryId) => {
         const usage = DataService.countNetWorthCategoryUsage(type, categoryId);
@@ -2902,6 +2955,23 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-secondary" onClick={() => setRenameConfirm(null)}>Cancel</button>
                                 <button type="button" className="btn btn-primary" onClick={handleConfirmRenameSubcategory}>Rename</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {renameCategoryConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header"><h5 className="modal-title">Rename Category</h5></div>
+                            <div className="modal-body">
+                                <p>Rename <strong>{renameCategoryConfirm.oldName}</strong> to <strong>{renameCategoryConfirm.newName}</strong>?</p>
+                                <p className="text-warning"><i className="fas fa-exclamation-triangle me-1"></i>This changes how {renameCategoryConfirm.itemCount > 0 ? <><strong>{renameCategoryConfirm.itemCount}</strong> existing item(s)</> : 'items'} are grouped and labeled in your Net Worth summary and history — it isn't just a display label change.</p>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setRenameCategoryConfirm(null)}>Cancel</button>
+                                <button type="button" className="btn btn-primary" onClick={handleConfirmUpdateCategory}>Rename</button>
                             </div>
                         </div>
                     </div>
