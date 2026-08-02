@@ -1097,6 +1097,83 @@ class DataService {
         return linkedCount;
     }
 
+    // Bank account types that represent debt rather than money on hand. Anything else
+    // (including 'Other') is treated as an asset-type account.
+    static LIABILITY_ACCOUNT_TYPES = ['Credit Card', 'Loan'];
+    // Finds a Net Worth category by case-insensitive name, creating it if missing —
+    // addNetWorthCategory already no-ops when the name exists, so this is safe to call
+    // unconditionally (self-healing if the category was ever renamed away or deleted).
+    static getOrCreateNetWorthCategoryByName(type, name) {
+        let cats = this.getNetWorthCategories(type);
+        let cat = cats.find(c => c.name.toLowerCase() === name.toLowerCase());
+        if (!cat) { this.addNetWorthCategory(type, name); cats = this.getNetWorthCategories(type); cat = cats.find(c => c.name.toLowerCase() === name.toLowerCase()); }
+        return cat;
+    }
+    // Money currently in a bank account: Opening Amount + everything linked to it. Linked
+    // records are converted into the account's own currency rather than assumed equal —
+    // the Expense/Income "Account" picker only currency-*defaults* to the primary account
+    // (see resolveDefaultAccountId), it doesn't stop a user from manually linking a
+    // mismatched-currency record. For Credit Card/Loan accounts the sign is reversed:
+    // expenses (charges) increase what's owed, income (payments) reduces it.
+    static computeBankAccountBalance(account) {
+        const convert = (amount, currency) => {
+            if (currency === account.currency) return amount;
+            const rates = CurrencyService.fallbackRates[currency];
+            const rate = rates ? (rates[account.currency] || 1) : 1;
+            return amount * rate;
+        };
+        const linkedIncome = this.data.income.filter(i => i.accountId === account.id).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
+        const linkedExpenses = this.data.expenses.filter(e => e.accountId === account.id).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
+        const opening = parseFloat(account.openingAmount) || 0;
+        return this.LIABILITY_ACCOUNT_TYPES.includes(account.accountType)
+            ? opening + linkedExpenses - linkedIncome
+            : opening + linkedIncome - linkedExpenses;
+    }
+    // Every non-primary asset-type bank account, shaped as a read-only Net Worth asset item
+    // under the "Bank & Savings" category — the primary account is deliberately excluded
+    // here since its balance is instead folded into computeWallet(), to avoid counting it twice.
+    static getBankAssetItems(activeView) {
+        const cat = this.getOrCreateNetWorthCategoryByName('asset', 'Bank & Savings');
+        if (!cat) return [];
+        return this.getBankAccounts()
+            .filter(a => !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType) && !a.isPrimary)
+            .filter(a => !activeView || matchesActiveView(a.person, activeView))
+            .map(a => ({ id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, isBankAccount: true }));
+    }
+    // Every Credit Card/Loan bank account (primary or not — Wallet-folding only ever applies
+    // to asset-type primaries), shaped as a read-only Net Worth liability item under the
+    // matching existing default category ("Credit Cards" / "Loans").
+    static getBankLiabilityItems(activeView) {
+        const categoryNameFor = { 'Credit Card': 'Credit Cards', 'Loan': 'Loans' };
+        return this.getBankAccounts()
+            .filter(a => this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType))
+            .filter(a => !activeView || matchesActiveView(a.person, activeView))
+            .map(a => {
+                const cat = this.getOrCreateNetWorthCategoryByName('liability', categoryNameFor[a.accountType]);
+                return { id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat ? cat.id : null, subcategory: a.accountType, type: 'liability', person: a.person, isBankAccount: true };
+            })
+            .filter(item => item.categoryId != null);
+    }
+    // Replaces the old "Cash Flow" (all-time income − all-time expenses) with a figure that
+    // doesn't double-count money already represented by a Bank & Savings/Liability row:
+    // unlinked income/expenses (no bank account at all) plus each active person's own
+    // Primary account balance (only when it's an asset-type account — a Primary Credit
+    // Card/Loan stays purely a Liability, it's not "spending money").
+    static computeWallet(activeView, defaultCurrency) {
+        const convert = (amount, currency) => {
+            const rates = CurrencyService.fallbackRates[currency];
+            const rate = rates ? (rates[defaultCurrency] || 1) : 1;
+            return amount * rate;
+        };
+        const unlinkedIncome = this.data.income.filter(i => !i.accountId && (!activeView || matchesActiveView(i.paidBy, activeView))).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
+        const unlinkedExpenses = this.data.expenses.filter(e => !e.accountId && (!activeView || matchesActiveView(e.paidBy, activeView))).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
+        const primaryBalances = this.getBankAccounts()
+            .filter(a => a.isPrimary && !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType))
+            .filter(a => !activeView || matchesActiveView(a.person, activeView))
+            .reduce((s, a) => s + convert(this.computeBankAccountBalance(a), a.currency), 0);
+        return (unlinkedIncome - unlinkedExpenses) + primaryBalances;
+    }
+
     static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id); }
     static _lastId = 0;
     static _uniqueId() {
@@ -7500,13 +7577,6 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [valuationItem, setValuationItem] = useState(null);
     const [valuationValue, setValuationValue] = useState('');
     const [valuationError, setValuationError] = useState('');
-    const [allExpenses, setAllExpenses] = useState(() => DataService.data.expenses || []);
-    const [allIncome, setAllIncome] = useState(() => DataService.data.income || []);
-
-    useEffect(() => {
-        setAllExpenses(DataService.data.expenses || []);
-        setAllIncome(DataService.data.income || []);
-    }, []);
 
     // Reseed the form's person whenever the active view changes (only when not mid-edit),
     // so a freshly-opened Add form defaults to whoever's view is currently active.
@@ -7530,25 +7600,31 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
     };
 
-    // Cash Flow (income − expenses) filtered by the global active view
-    const filteredExpenses = allExpenses.filter(r => matchesActiveView(r.paidBy, activeView));
-    const filteredIncome = allIncome.filter(r => matchesActiveView(r.paidBy, activeView));
-    const totalIncomeConverted = filteredIncome.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
-    const totalExpensesConverted = filteredExpenses.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
-    const cashFlow = totalIncomeConverted - totalExpensesConverted;
+    // Wallet: unlinked income/expenses + each active person's Primary account balance —
+    // deliberately excludes non-primary bank accounts (those show as their own Asset/
+    // Liability rows below) so nothing gets counted twice. Replaces the old blunt
+    // "Cash Flow" (all-time income − all-time expenses) now that bank-linked money has
+    // a more precise home.
+    const wallet = DataService.computeWallet(activeView, defaultCurrency);
 
     // Debts "I Owe" → shown as liabilities, filtered by the global active view
     const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled && (matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v))));
 
-    // Filter items by the global active view
-    const visibleItems = items.filter(i => matchesActiveView(i.person, activeView));
+    // Filter items by the global active view, merged with read-only rows computed live from
+    // linked bank accounts (see DataService.getBankAssetItems/getBankLiabilityItems) so they
+    // flow through the same totals/grouping/rendering as manually-added items.
+    const visibleItems = [
+        ...items.filter(i => matchesActiveView(i.person, activeView)),
+        ...DataService.getBankAssetItems(activeView),
+        ...DataService.getBankLiabilityItems(activeView)
+    ];
 
     const totalAssets = visibleItems.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalManualLiabilities = visibleItems.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalDebtLiabilities = debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
     const totalLiabilities = totalManualLiabilities + totalDebtLiabilities;
-    // Net Worth = Total Assets + Net Savings (Cash Flow) − Total Liabilities
-    const netWorth = totalAssets + cashFlow - totalLiabilities;
+    // Net Worth = Total Assets + Wallet − Total Liabilities
+    const netWorth = totalAssets + wallet - totalLiabilities;
 
     const openAddForm = () => {
         setEditingItem(null);
@@ -7623,23 +7699,41 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}</div>
-                <div style={{fontSize:'0.92rem',fontWeight:700,color:colorClass}}>{fmt(item.value, item.currency)}</div>
+                {/* A linked account can compute negative (overdrawn) — the asset total still
+                    correctly negates by the full amount (unchanged), but showing e.g. "-£50"
+                    as the headline reads as if that's cash on hand. Show £0 with the shortfall
+                    called out separately instead, banking-statement style. */}
+                {item.isBankAccount && item.type === 'asset' && item.value < 0 ? (
+                    <div style={{fontSize:'0.92rem',fontWeight:700,color:'#dc3545'}}>{fmt(0, item.currency)} <span style={{fontSize:'0.8rem',fontWeight:600}}>(Overdraft {fmt(Math.abs(item.value), item.currency)})</span></div>
+                ) : (
+                    <div style={{fontSize:'0.92rem',fontWeight:700,color:item.value < 0 ? '#dc3545' : colorClass}}>{fmt(item.value, item.currency)}</div>
+                )}
                 {item.currency !== defaultCurrency && (
-                    <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
+                    item.isBankAccount && item.type === 'asset' && item.value < 0 ? (
+                        <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(0, defaultCurrency)} (Overdraft {fmt(Math.abs(convertToDefault(item.value, item.currency)), defaultCurrency)})</div>
+                    ) : (
+                        <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
+                    )
                 )}
                 {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
             </div>
-            <div style={{display:'flex',gap:'4px',flexShrink:0}}>
-                <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Update valuation (logs a change)" onClick={() => openValuationForm(item)}>
-                    <i className="fas fa-chart-line"></i>
-                </button>
-                <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Edit base amount (no change logged)" onClick={() => openEditForm(item)}>
-                    <i className="fas fa-pencil-alt"></i>
-                </button>
-                <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(item.id)}>
-                    <i className="fas fa-trash"></i>
-                </button>
-            </div>
+            {item.isBankAccount ? (
+                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from this account's linked transactions — edit its Opening Amount in Settings → Bank Accounts to adjust">
+                    <i className="fas fa-link me-1"></i>Linked account
+                </div>
+            ) : (
+                <div style={{display:'flex',gap:'4px',flexShrink:0}}>
+                    <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Update valuation (logs a change)" onClick={() => openValuationForm(item)}>
+                        <i className="fas fa-chart-line"></i>
+                    </button>
+                    <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Edit base amount (no change logged)" onClick={() => openEditForm(item)}>
+                        <i className="fas fa-pencil-alt"></i>
+                    </button>
+                    <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(item.id)}>
+                        <i className="fas fa-trash"></i>
+                    </button>
+                </div>
+            )}
         </div>
     );
 
@@ -7655,10 +7749,10 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <div style={{fontSize:'0.88rem',fontWeight:800,color:'#198754',lineHeight:1.1}}>{fmt(totalAssets, defaultCurrency)}</div>
                         <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>All assets</div>
                     </div>
-                    <div style={{background:cashFlow>=0?'#f0fff4':'#fff5f5',border:`1px solid ${cashFlow>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>CASH FLOW</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:cashFlow>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(cashFlow, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Income − Expenses</div>
+                    <div style={{background:wallet>=0?'#f0fff4':'#fff5f5',border:`1px solid ${wallet>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>WALLET</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:wallet>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(wallet, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Unlinked cash + Primary account</div>
                     </div>
                     <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
                         <div style={{fontSize:'0.6rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>LIABILITIES</div>
@@ -7670,7 +7764,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'10px 32px',textAlign:'center'}}>
                         <div style={{fontSize:'0.65rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.05em',marginBottom:'3px'}}>NET WORTH</div>
                         <div style={{fontSize:'1.2rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Flow − Liabilities</div>
+                        <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Wallet − Liabilities</div>
                     </div>
                 </div>
             </div>
@@ -8597,6 +8691,10 @@ function App() {
         setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
         setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
         setCategories(categoriesData);
+        // Ensure "Bank & Savings" exists before this state is read by the Net Worth screen's
+        // category grouping — the lazy get-or-create inside getBankAssetItems() runs too late
+        // for that (it fires during NetWorth's own render, after this state is already set).
+        DataService.getOrCreateNetWorthCategoryByName('asset', 'Bank & Savings');
         setAssetCategories(DataService.getNetWorthCategories('asset'));
         setLiabilityCategories(DataService.getNetWorthCategories('liability'));
         setDefaultCurrency(settings.currency || 'GBP');
