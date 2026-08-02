@@ -332,6 +332,32 @@ function resolveActiveViewValue(activeView) {
     const v = activeView[0];
     return v === 'own' ? '' : v;
 }
+// A person's primary account only counts as the default for a new expense/income record
+// when its currency matches the record's — otherwise the Account field is left unset so a
+// GBP primary account never gets silently attached to e.g. a USD transaction.
+function resolveDefaultAccountId(person, currency) {
+    const primary = DataService.getPrimaryAccountForPerson(person || 'own');
+    return (primary && primary.currency === currency) ? primary.id : '';
+}
+// Trim/lowercase before comparing — matches the normalization matchesActiveView already
+// uses elsewhere, since CSV-imported paidBy values aren't validated against the People
+// list and can carry stray whitespace/casing that would otherwise silently fail to match.
+// Returns one entry per person with a primary bank account (even if their unlinked count
+// is 0), so callers can distinguish "no primary account" from "primary but nothing to link".
+function computeLinkCandidates(bankAccounts, expenses, income) {
+    const normalize = (v) => (v || 'own').trim().toLowerCase();
+    const seen = new Set();
+    const candidates = [];
+    bankAccounts.filter(a => a.isPrimary).forEach(primary => {
+        if (seen.has(primary.person)) return;
+        seen.add(primary.person);
+        const target = normalize(primary.person);
+        const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId && (e.currency || 'GBP') === primary.currency).length;
+        const incomeCount = income.filter(i => normalize(i.whosIncome || i.paidBy) === target && !i.accountId && (i.currency || 'GBP') === primary.currency).length;
+        candidates.push({ person: primary.person, expenseCount, incomeCount });
+    });
+    return candidates;
+}
 
 // Given a list of cloud history files (each { id, name }) sorted newest-first
 // (name is date-prefixed and zero-padded, so lexicographic order == chronological
@@ -1061,7 +1087,7 @@ class DataService {
             const target = normalize(person);
             [...expenses, ...income].forEach(record => {
                 const recordPerson = record.whosIncome || record.paidBy;
-                if (normalize(recordPerson) === target && !record.accountId) {
+                if (normalize(recordPerson) === target && !record.accountId && (record.currency || 'GBP') === primary.currency) {
                     record.accountId = primary.id;
                     record.updatedAt = now;
                     linkedCount++;
@@ -1935,7 +1961,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             paidBy: initialPaidBy,
             currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP',
             tags: editExpense ? (editExpense.tags || []) : [],
-            accountId: editExpense ? (editExpense.accountId || '') : (DataService.getPrimaryAccountForPerson(initialPaidBy || 'own') || {}).id || ''
+            accountId: editExpense ? (editExpense.accountId || '') : resolveDefaultAccountId(initialPaidBy, 'GBP')
         };
     });
     const [tagInputRaw, setTagInputRaw] = useState(() => {
@@ -1962,18 +1988,19 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
     useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
     useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
-    // Re-defaults the Account field to the newly-selected person's primary account whenever
-    // "Who's Expense" changes — but not on mount, since formData.accountId is already seeded
-    // correctly there (from editExpense.accountId, or the initial person's primary). The user
-    // can still override the auto-filled account via the Account dropdown before submitting.
-    const prevPaidByRef = React.useRef(formData.paidBy);
+    // Re-defaults the Account field to the newly-selected person's primary account (only when
+    // its currency matches formData.currency) whenever "Who's Expense" or the currency changes.
+    // Skipped entirely when editing an existing record so it never clobbers editExpense's/
+    // editSplitGroup's own accountId. Safe to also run on mount since it's idempotent (the
+    // equality check below is a no-op when it recomputes the same value formData already has)
+    // — including once the async settings-currency fetch below changes formData.currency after
+    // mount, which previously could leave a stale, currency-mismatched account selected.
+    // The user can still override the auto-filled account via the Account dropdown afterward.
     useEffect(() => {
-        if (prevPaidByRef.current !== formData.paidBy) {
-            const primary = DataService.getPrimaryAccountForPerson(formData.paidBy || 'own');
-            setFormData(prev => ({ ...prev, accountId: primary ? primary.id : '' }));
-            prevPaidByRef.current = formData.paidBy;
-        }
-    }, [formData.paidBy]);
+        if (editExpense || editSplitGroup) return;
+        const nextId = resolveDefaultAccountId(formData.paidBy, formData.currency);
+        setFormData(prev => (prev.accountId === nextId ? prev : { ...prev, accountId: nextId }));
+    }, [formData.paidBy, formData.currency]);
 
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -2009,8 +2036,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     // resolveSplitParticipantPaidBy's own/'' normalization.
     const resolveSplitParticipantAccountId = (p) => {
         const paidBy = resolveSplitParticipantPaidBy(p);
-        const primary = DataService.getPrimaryAccountForPerson(paidBy || 'own');
-        return primary ? primary.id : '';
+        return resolveDefaultAccountId(paidBy, formData.currency);
     };
 
     // Used after adding (not editing) an expense so the user can log another one without
@@ -2021,13 +2047,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     // case of wanting to jump back to today after a batch of backdated entries.
     const resetFormForNewEntry = () => {
         const newPaidBy = resolveActiveViewValue(activeView);
-        const primary = DataService.getPrimaryAccountForPerson(newPaidBy || 'own');
         setFormData(prev => ({
             amount: '', date: prev.date, description: '',
             categoryId: '', subcategory: '', paidBy: newPaidBy,
-            currency: prev.currency, tags: [], accountId: primary ? primary.id : ''
+            currency: prev.currency, tags: [], accountId: resolveDefaultAccountId(newPaidBy, prev.currency)
         }));
-        prevPaidByRef.current = newPaidBy;
         setTagInputRaw('');
         setErrors({});
         setIsSplit(false);
@@ -3099,7 +3123,7 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
 
 function IncomeForm({ income, onUpdate, activeView }) {
     const [people, setPeople] = useState([]);
-    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: (DataService.getPrimaryAccountForPerson(initialPaidBy || 'own') || {}).id || '' }; });
+    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP') }; });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -3123,16 +3147,15 @@ function IncomeForm({ income, onUpdate, activeView }) {
     // participants are active — drop any stale selection once it drops back to one.
     useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
 
-    // Re-defaults the Account field to the newly-selected person's primary account whenever
-    // "Who's Income" changes — see the matching comment in ExpenseForm for the full rationale.
-    const prevPaidByRef = React.useRef(formData.paidBy);
+    // Re-defaults the Account field to the newly-selected person's primary account (only when
+    // its currency matches formData.currency) whenever "Who's Income" or the currency changes —
+    // see the matching effect in ExpenseForm for the full rationale. Skipped while editing an
+    // existing record so it never clobbers that record's own accountId.
     useEffect(() => {
-        if (prevPaidByRef.current !== formData.paidBy) {
-            const primary = DataService.getPrimaryAccountForPerson(formData.paidBy || 'own');
-            setFormData(prev => ({ ...prev, accountId: primary ? primary.id : '' }));
-            prevPaidByRef.current = formData.paidBy;
-        }
-    }, [formData.paidBy]);
+        if (editingIncome) return;
+        const nextId = resolveDefaultAccountId(formData.paidBy, formData.currency);
+        setFormData(prev => (prev.accountId === nextId ? prev : { ...prev, accountId: nextId }));
+    }, [formData.paidBy, formData.currency]);
 
     useEffect(() => {
         if (!openMenuId) return;
@@ -3150,14 +3173,14 @@ function IncomeForm({ income, onUpdate, activeView }) {
             const incomeData = { ...formData, amount: parseFloat(formData.amount) };
             if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); if (isRecurring) { DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }); } }
             setShowSuccess(true);
-            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); const primary = DataService.getPrimaryAccountForPerson(newPaidBy || 'own'); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: newPaidBy, currency: 'GBP', accountId: primary ? primary.id : '' }); prevPaidByRef.current = newPaidBy; setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
+            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: newPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(newPaidBy, 'GBP') }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
         setIsSubmitting(false);
     };
-    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '' }); prevPaidByRef.current = incomeItem.paidBy || ''; };
+    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '' }); };
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
     const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: new Date().toISOString().split('T')[0] }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
-    const handleCancelEdit = () => { setEditingIncome(null); const primary = DataService.getPrimaryAccountForPerson('own'); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP', accountId: primary ? primary.id : '' }); prevPaidByRef.current = ''; setErrors({}); };
+    const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP', accountId: resolveDefaultAccountId('own', 'GBP') }); setErrors({}); };
     const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
 
     const filteredIncome = useMemo(() => {
@@ -3965,6 +3988,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [showDeleteAccountConfirm, setShowDeleteAccountConfirm] = useState(null);
     const [showLinkAccountsConfirm, setShowLinkAccountsConfirm] = useState(false);
     const [linkCandidates, setLinkCandidates] = useState([]);
+    const [linkableExpenses, setLinkableExpenses] = useState([]);
+    const [linkableIncome, setLinkableIncome] = useState([]);
     const [displayName, setDisplayName] = useState('');
     const [nameError, setNameError] = useState('');
     const [nameSaved, setNameSaved] = useState(false);
@@ -3984,7 +4009,16 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [desktopNotifEnabled, setDesktopNotifEnabled] = useState(false);
     const [notifPermission, setNotifPermission] = useState(() => ('Notification' in window ? Notification.permission : 'unsupported'));
 
-    useEffect(() => { DataService.initialize().then(() => { setPeople(DataService.getPeople()); setBankAccounts(DataService.getBankAccounts()); }); }, []);
+    useEffect(() => { DataService.initialize().then(async () => {
+        setPeople(DataService.getPeople());
+        setBankAccounts(DataService.getBankAccounts());
+        const [exp, inc] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
+        setLinkableExpenses(exp); setLinkableIncome(inc);
+    }); }, []);
+    const linkCandidatesAll = React.useMemo(
+        () => computeLinkCandidates(bankAccounts, linkableExpenses, linkableIncome),
+        [bankAccounts, linkableExpenses, linkableIncome]
+    );
     useEffect(() => {
         const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
         setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
@@ -4169,22 +4203,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         setBankAccounts(DataService.getBankAccounts());
         setShowDeleteAccountConfirm(null);
     };
-    const handleOpenLinkAccounts = async () => {
-        const [expenses, income] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
-        // Trim/lowercase before comparing — matches the normalization matchesActiveView already
-        // uses elsewhere, since CSV-imported paidBy values aren't validated against the People
-        // list and can carry stray whitespace/casing that would otherwise silently fail to match.
-        const normalize = (v) => (v || 'own').trim().toLowerCase();
-        const seenPeople = new Set();
-        const candidates = [];
-        bankAccounts.filter(a => a.isPrimary).forEach(primary => {
-            if (seenPeople.has(primary.person)) return;
-            seenPeople.add(primary.person);
-            const target = normalize(primary.person);
-            const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId).length;
-            const incomeCount = income.filter(i => normalize(i.whosIncome || i.paidBy) === target && !i.accountId).length;
-            if (expenseCount + incomeCount > 0) candidates.push({ person: primary.person, expenseCount, incomeCount, selected: true });
-        });
+    const handleOpenLinkAccounts = (personFilter = null) => {
+        const candidates = linkCandidatesAll
+            .filter(c => c.expenseCount + c.incomeCount > 0)
+            .filter(c => !personFilter || c.person === personFilter)
+            .map(c => ({ ...c, selected: true }));
         setLinkCandidates(candidates);
         setShowLinkAccountsConfirm(true);
     };
@@ -4193,7 +4216,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     };
     const handleConfirmLinkAccounts = async () => {
         const selected = linkCandidates.filter(c => c.selected).map(c => c.person);
-        if (selected.length > 0) await DataService.bulkLinkAccounts(selected);
+        if (selected.length > 0) {
+            await DataService.bulkLinkAccounts(selected);
+            const [exp, inc] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
+            setLinkableExpenses(exp); setLinkableIncome(inc);
+        }
         setShowLinkAccountsConfirm(false);
         setLinkCandidates([]);
     };
@@ -4434,6 +4461,17 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         </div>
                     </div>
                 </div>
+                {accountForm.isPrimary && (() => {
+                    const existingPrimary = bankAccounts.find(a => a.isPrimary && a.person === accountForm.person && (!editingAccount || a.id !== editingAccount.id));
+                    if (!existingPrimary) return null;
+                    const personLabel = accountForm.person === 'own' ? 'your' : `${accountForm.person}'s`;
+                    return (
+                        <div className="text-warning" style={{fontSize: '0.8rem', marginTop: '0.4rem'}}>
+                            <i className="fas fa-exclamation-triangle me-1"></i>
+                            This will replace '{existingPrimary.accountName}' as {personLabel} primary account.
+                        </div>
+                    );
+                })()}
                 <div style={{marginTop: '0.5rem', display: 'flex', gap: '0.5rem'}}>
                     <button type="submit" className="btn btn-primary btn-sm">
                         <i className={'fas fa-' + (editingAccount ? 'save' : 'plus') + ' me-1'}></i>{editingAccount ? 'Save' : 'Add'}
@@ -4450,25 +4488,46 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         <i className="fas fa-university fa-2x" style={{marginBottom: '0.5rem', display: 'block', opacity: 0.5}}></i>
                         No bank accounts added yet.
                     </div>
-                ) : (
-                    bankAccounts.map(account => (
-                        <div key={account.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: account.isPrimary ? '#fff3cd' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (account.isPrimary ? '#ffc107' : '#e9ecef')}}>
-                            <div>
-                                <span style={{fontWeight: '600'}}>{account.accountName}</span>
-                                {account.isPrimary && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Primary">★</span>}
-                                <br />
-                                <span style={{color: '#6c757d', fontSize: '0.85rem'}}>
-                                    {account.accountType} · {account.currency} · {account.country} · {account.person === 'own' ? 'Me / My Own' : account.person}
-                                    {account.accountRef && ` · ${account.accountRef}`}
-                                </span>
+                ) : (() => {
+                    const byPerson = new Map();
+                    bankAccounts.forEach(a => {
+                        if (!byPerson.has(a.person)) byPerson.set(a.person, []);
+                        byPerson.get(a.person).push(a);
+                    });
+                    const orderedPersons = ['own', ...people.filter(p => !p.systemManaged).map(p => p.name)].filter(p => byPerson.has(p));
+                    byPerson.forEach((_, p) => { if (!orderedPersons.includes(p)) orderedPersons.push(p); });
+                    return orderedPersons.map(person => (
+                        <div key={person} style={{marginBottom: '1rem'}}>
+                            <div style={{fontWeight: '700', fontSize: '0.8rem', color: '#6c757d', textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: '0.35rem'}}>
+                                {person === 'own' ? 'Me / My Own' : person}
                             </div>
-                            <div style={{display: 'flex', gap: '0.25rem'}}>
-                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
-                                <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
-                            </div>
+                            {byPerson.get(person).map(account => {
+                                const candidate = account.isPrimary ? linkCandidatesAll.find(c => c.person === account.person) : null;
+                                const hasUnlinked = !!candidate && (candidate.expenseCount + candidate.incomeCount) > 0;
+                                return (
+                                    <div key={account.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: account.isPrimary ? '#fff3cd' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (account.isPrimary ? '#ffc107' : '#e9ecef')}}>
+                                        <div>
+                                            <span style={{fontWeight: '600'}}>{account.accountName}</span>
+                                            {account.isPrimary && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Primary">★</span>}
+                                            <br />
+                                            <span style={{color: '#6c757d', fontSize: '0.85rem'}}>
+                                                {account.accountType} · {account.currency} · {account.country}
+                                                {account.accountRef && ` · ${account.accountRef}`}
+                                            </span>
+                                        </div>
+                                        <div style={{display: 'flex', gap: '0.25rem'}}>
+                                            {account.isPrimary && (
+                                                <button className="btn btn-sm btn-outline-primary" disabled={!hasUnlinked} onClick={() => handleOpenLinkAccounts(account.person)} title={hasUnlinked ? 'Link existing transactions' : 'No unlinked transactions'}><i className="fas fa-link"></i></button>
+                                            )}
+                                            <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
+                                            <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
-                    ))
-                )}
+                    ));
+                })()}
             </div>
 
             {showDeleteAccountConfirm && (
@@ -4488,7 +4547,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
 
             {bankAccounts.some(a => a.isPrimary) && (
                 <div style={{marginTop: '0.5rem'}}>
-                    <button type="button" className="btn btn-outline-primary btn-sm" onClick={handleOpenLinkAccounts}>
+                    <button type="button" className="btn btn-outline-primary btn-sm" disabled={!linkCandidatesAll.some(c => c.expenseCount + c.incomeCount > 0)} onClick={() => handleOpenLinkAccounts()}>
                         <i className="fas fa-link me-1"></i>Link Existing Transactions
                     </button>
                 </div>
@@ -4899,7 +4958,7 @@ function BulkUpload({ categories, onUpdate }) {
 
             if (activeTab === 'expenses') {
                 const colMap = {};
-                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by'];
+                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'bank'];
                 expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Category, Sub Category');
@@ -4938,6 +4997,15 @@ function BulkUpload({ categories, onUpdate }) {
 
                     const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '');
 
+                    const bankVal = colMap['bank'] !== undefined ? (vals[colMap['bank']] || '').trim() : '';
+                    let accountId = '';
+                    if (bankVal) {
+                        const matchedAccount = DataService.getAccountsForPerson(paidByVal || 'own').find(a => a.accountName.toLowerCase() === bankVal.toLowerCase());
+                        if (!matchedAccount) errors.push('Bank account not found: ' + bankVal);
+                        else if (matchedAccount.currency !== currency) errors.push(`Bank currency (${matchedAccount.currency}) does not match transaction currency (${currency})`);
+                        else accountId = matchedAccount.id;
+                    }
+
                     rows.push({
                         rowNum: i,
                         date: parsedDate,
@@ -4948,6 +5016,8 @@ function BulkUpload({ categories, onUpdate }) {
                         categoryName: matchedCat ? matchedCat.name : catVal,
                         subcategory: matchedSub || subVal,
                         paidBy: paidByVal,
+                        bank: bankVal,
+                        accountId: accountId,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -4955,7 +5025,7 @@ function BulkUpload({ categories, onUpdate }) {
                 setParsedRows(rows);
             } else {
                 const colMap = {};
-                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income"];
+                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank'];
                 incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['source of income'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Source of Income');
@@ -4985,6 +5055,15 @@ function BulkUpload({ categories, onUpdate }) {
                     const currency = currencyVal || 'GBP';
                     if (currencyVal && !validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
 
+                    const bankVal = colMap['bank'] !== undefined ? (vals[colMap['bank']] || '').trim() : '';
+                    let accountId = '';
+                    if (bankVal) {
+                        const matchedAccount = DataService.getAccountsForPerson(whosVal || 'own').find(a => a.accountName.toLowerCase() === bankVal.toLowerCase());
+                        if (!matchedAccount) errors.push('Bank account not found: ' + bankVal);
+                        else if (matchedAccount.currency !== currency) errors.push(`Bank currency (${matchedAccount.currency}) does not match transaction currency (${currency})`);
+                        else accountId = matchedAccount.id;
+                    }
+
                     rows.push({
                         rowNum: i,
                         date: parsedDate,
@@ -4993,6 +5072,8 @@ function BulkUpload({ categories, onUpdate }) {
                         source: sourceVal.trim(),
                         description: descVal,
                         paidBy: whosVal,
+                        bank: bankVal,
+                        accountId: accountId,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -5021,12 +5102,12 @@ function BulkUpload({ categories, onUpdate }) {
             const exampleCat = categories[0];
             const exampleSub = exampleCat && exampleCat.subcategories && exampleCat.subcategories[0];
             downloadCSV('financetracker-expenses-template.csv',
-                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By'],
-                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '']]);
+                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Bank'],
+                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '']]);
         } else {
             downloadCSV('financetracker-income-template.csv',
-                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income"],
-                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '']]);
+                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank'],
+                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '']]);
         }
     };
 
@@ -5052,7 +5133,8 @@ function BulkUpload({ categories, onUpdate }) {
                         description: row.description,
                         categoryId: row.categoryId,
                         subcategory: row.subcategory,
-                        paidBy: row.paidBy
+                        paidBy: row.paidBy,
+                        accountId: row.accountId
                     });
                 } else {
                     await DataService.addIncome({
@@ -5061,7 +5143,8 @@ function BulkUpload({ categories, onUpdate }) {
                         date: row.date,
                         source: row.source,
                         description: row.description,
-                        paidBy: row.paidBy
+                        paidBy: row.paidBy,
+                        accountId: row.accountId
                     });
                 }
                 imported++;
@@ -5146,8 +5229,8 @@ function BulkUpload({ categories, onUpdate }) {
                 </div>
                 <div className="form-text">
                     {activeTab === 'expenses'
-                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By'
-                        : "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income"}
+                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Bank'
+                        : "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank"}
                     {' '}· Max {BULK_UPLOAD_MAX_ROWS} rows, 5MB.
                 </div>
             </div>
@@ -5185,9 +5268,9 @@ function BulkUpload({ categories, onUpdate }) {
                                 <tr>
                                     <th>#</th>
                                     {activeTab === 'expenses' ? (
-                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
                                     ) : (
-                                        <>{['Date', 'Source', 'Amount', 'Currency', 'Description', "Who's Income", 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                        <>{['Date', 'Source', 'Amount', 'Currency', 'Description', "Who's Income", 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
                                     )}
                                 </tr>
                             </thead>
@@ -5204,6 +5287,7 @@ function BulkUpload({ categories, onUpdate }) {
                                                 <td>{row.categoryName || '-'}</td>
                                                 <td>{row.subcategory || '-'}</td>
                                                 <td>{row.paidBy || '-'}</td>
+                                                <td>{row.bank || '-'}</td>
                                             </>
                                         ) : (
                                             <>
@@ -5213,6 +5297,7 @@ function BulkUpload({ categories, onUpdate }) {
                                                 <td>{row.currency}</td>
                                                 <td>{row.description || '-'}</td>
                                                 <td>{row.paidBy || '-'}</td>
+                                                <td>{row.bank || '-'}</td>
                                             </>
                                         )}
                                         <td>{row.error ? <span className="text-danger" style={{fontSize: '0.8rem'}}>{row.error}</span> : <i className="fas fa-check text-success"></i>}</td>
