@@ -353,7 +353,7 @@ function computeLinkCandidates(bankAccounts, expenses, income) {
         seen.add(primary.person);
         const target = normalize(primary.person);
         const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId && (e.currency || 'GBP') === primary.currency).length;
-        const incomeCount = income.filter(i => normalize(i.whosIncome || i.paidBy) === target && !i.accountId && (i.currency || 'GBP') === primary.currency).length;
+        const incomeCount = income.filter(i => normalize(i.paidBy) === target && !i.accountId && (i.currency || 'GBP') === primary.currency).length;
         candidates.push({ person: primary.person, expenseCount, incomeCount });
     });
     return candidates;
@@ -1086,8 +1086,7 @@ class DataService {
             if (!primary) return;
             const target = normalize(person);
             [...expenses, ...income].forEach(record => {
-                const recordPerson = record.whosIncome || record.paidBy;
-                if (normalize(recordPerson) === target && !record.accountId && (record.currency || 'GBP') === primary.currency) {
+                if (normalize(record.paidBy) === target && !record.accountId && (record.currency || 'GBP') === primary.currency) {
                     record.accountId = primary.id;
                     record.updatedAt = now;
                     linkedCount++;
@@ -1784,6 +1783,24 @@ class DataService {
             });
         });
         if (changed) this.saveNetWorthItems(items);
+    }
+    // One-time migration: income created via debt settlement historically stored the
+    // person in `whosIncome` instead of `paidBy` like every other income path, which
+    // meant every reader had to remember a `whosIncome || paidBy` fallback (missed at
+    // least twice — bank-account linking, and the multi-person list card's person
+    // label). Idempotent — no-ops once every record has been migrated, safe to call
+    // unconditionally on every app load.
+    static async migrateIncomeWhosIncome() {
+        await this.initialize();
+        let changed = false;
+        this.data.income.forEach(item => {
+            if (item.whosIncome !== undefined) {
+                if (!item.paidBy) item.paidBy = item.whosIncome;
+                delete item.whosIncome;
+                changed = true;
+            }
+        });
+        if (changed) this.saveIncome();
     }
     static clearAllUserData() {
         // Wipe every financeApp_* key and cloud file-ID cache from localStorage
@@ -2524,7 +2541,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                     visibleExpenses.map(expense => {
                         const catName = getCategoryName(expense.categoryId);
                         const metaParts = [catName, expense.subcategory, ValidationUtils.formatDate(expense.date)];
-                        if (activeView.length > 1 && expense.paidBy) metaParts.push(expense.paidBy);
+                        const personLabel = activeView.length > 1 ? expense.paidBy : '';
                         return (
                         <div key={expense.id} className="expense-item">
                             <div className="expense-avatar" style={{background: getCategoryColor(catName)}}>
@@ -2542,6 +2559,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                     ))}
                                 </div>
                             </div>
+                            {personLabel && <span className="person-badge" title={personLabel}>{personLabel}</span>}
                             <div className="expense-right">
                                 <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}</div>
                                 <div className="expense-menu-wrap">
@@ -3354,7 +3372,7 @@ function IncomeForm({ income, onUpdate, activeView }) {
                     <div className="income-list">
                         {visibleIncome.map(incomeItem => {
                             const metaParts = [incomeItem.description, ValidationUtils.formatDate(incomeItem.date)];
-                            if (activeView.length > 1 && incomeItem.paidBy) metaParts.push(incomeItem.paidBy);
+                            const personLabel = activeView.length > 1 ? incomeItem.paidBy : '';
                             return (
                             <div key={incomeItem.id} className="income-item">
                                 <div className="income-avatar" style={{background: getSourceColor(incomeItem.source)}}>
@@ -3364,6 +3382,7 @@ function IncomeForm({ income, onUpdate, activeView }) {
                                     <div className="income-source">{incomeItem.source}</div>
                                     <div className="income-meta">{metaParts.filter(Boolean).join(' · ')}</div>
                                 </div>
+                                {personLabel && <span className="person-badge" title={personLabel}>{personLabel}</span>}
                                 <div className="income-right">
                                     <div className="income-amount">{ValidationUtils.formatCurrency(incomeItem.amount, incomeItem.currency || 'GBP')}</div>
                                     <div className="income-menu-wrap">
@@ -6889,7 +6908,7 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
         const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Tags','Notes'];
         const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income"];
         const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', (e.tags || []).join(';'), e.notes || '']);
-        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.whosIncome || i.paidBy || '']);
+        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.paidBy || '']);
         if (filteredExp.length > 0) exportToCSV(`financetracker-expenses-${todayStr()}.csv`, expHeaders, expRows);
         if (filteredInc.length > 0) setTimeout(() => exportToCSV(`financetracker-income-${todayStr()}.csv`, incHeaders, incRows), filteredExp.length > 0 ? 200 : 0);
     };
@@ -7513,7 +7532,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 
     // Cash Flow (income − expenses) filtered by the global active view
     const filteredExpenses = allExpenses.filter(r => matchesActiveView(r.paidBy, activeView));
-    const filteredIncome = allIncome.filter(r => matchesActiveView(r.whosIncome || r.paidBy, activeView));
+    const filteredIncome = allIncome.filter(r => matchesActiveView(r.paidBy, activeView));
     const totalIncomeConverted = filteredIncome.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
     const totalExpensesConverted = filteredExpenses.reduce((s, r) => s + convertToDefault(r.convertedAmount || r.amount || 0, r.currency || defaultCurrency), 0);
     const cashFlow = totalIncomeConverted - totalExpensesConverted;
@@ -7983,7 +8002,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
             const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
             await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId ? Number(linkedCatId) : null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: resolveActiveViewValue(activeView), tags: [] });
         } else {
-            await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, whosIncome: resolveActiveViewValue(activeView) });
+            await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, paidBy: resolveActiveViewValue(activeView) });
         }
         setLinkedCatId('');
         setLinkedSubcat('');
@@ -8576,7 +8595,7 @@ function App() {
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
         ]);
         setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
-        setIncome(incomeData.filter(i => matchesActiveView(i.whosIncome || i.paidBy, view)));
+        setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
         setCategories(categoriesData);
         setAssetCategories(DataService.getNetWorthCategories('asset'));
         setLiabilityCategories(DataService.getNetWorthCategories('liability'));
@@ -8595,6 +8614,7 @@ function App() {
             try {
                 await DataService.processRecurringSchedules();
                 DataService.migrateLegacyNetWorthCategories();
+                await DataService.migrateIncomeWhosIncome();
                 await reloadCoreData(activeView);
                 await refreshNotifications();
             } catch (error) { console.error('Error loading data:', error); }
