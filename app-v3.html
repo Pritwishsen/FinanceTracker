@@ -1767,17 +1767,52 @@ class DataService {
     // which are expense-specific.
     static _netWorthCategoryDefaults(type) {
         return type === 'asset'
-            ? ['Investment', 'Property', 'Pension & Retirement', 'Vehicles & Other Asset']
-            : ['Mortgage', 'Loans', 'Credit Cards', 'Overdraft', 'Money Owed to Others', 'Other Liability'];
+            ? [
+                { name: 'Investment', locked: true },
+                { name: 'Property', locked: true },
+                { name: 'Pension & Retirement', locked: true },
+                { name: 'Vehicles', locked: true },
+                { name: 'Bank & Savings', locked: true },
+                { name: 'Other Asset', locked: false }
+            ]
+            : [
+                { name: 'Mortgage', locked: true },
+                { name: 'Loans', locked: true },
+                { name: 'Credit Cards', locked: true },
+                { name: 'Overdraft', locked: true },
+                { name: 'Money Owed to Others', locked: true },
+                { name: 'Other Liability', locked: false }
+            ];
     }
+    // Guarantees every locked default category exists and is flagged `locked` — including
+    // re-adding one that a user renamed away (their renamed category and its items are left
+    // exactly as-is; the canonical name just reappears fresh/empty). Idempotent, safe to call
+    // on every read, same pattern as migrateLegacyNetWorthCategories. "Other Asset"/"Other
+    // Liability" are deliberately excluded — seeded once, then fully left to the user.
     static getNetWorthCategories(type) {
         const key = 'financeApp_' + type + 'Categories';
         const saved = localStorage.getItem(key);
-        if (saved) return JSON.parse(saved);
         const now = new Date().toISOString();
-        const seeded = this._netWorthCategoryDefaults(type).map(name => ({ id: DataService._uniqueId(), name, subcategories: [], createdAt: now, updatedAt: now }));
-        localStorage.setItem(key, JSON.stringify(seeded));
-        return seeded;
+        const defaults = this._netWorthCategoryDefaults(type);
+        if (!saved) {
+            const seeded = defaults.map(def => ({ id: DataService._uniqueId(), name: def.name, locked: def.locked, subcategories: [], createdAt: now, updatedAt: now }));
+            localStorage.setItem(key, JSON.stringify(seeded));
+            return seeded;
+        }
+        const cats = JSON.parse(saved);
+        let changed = false;
+        defaults.filter(def => def.locked).forEach(def => {
+            const match = cats.find(c => c.name.trim().toLowerCase() === def.name.toLowerCase());
+            if (!match) {
+                cats.push({ id: DataService._uniqueId(), name: def.name, locked: true, subcategories: [], createdAt: now, updatedAt: now });
+                changed = true;
+            } else if (match.locked !== true) {
+                match.locked = true;
+                changed = true;
+            }
+        });
+        if (changed) localStorage.setItem(key, JSON.stringify(cats));
+        return cats;
     }
     static saveNetWorthCategories(type, cats) { localStorage.setItem('financeApp_' + type + 'Categories', JSON.stringify(cats)); }
     static addNetWorthCategory(type, name) {
@@ -1794,7 +1829,7 @@ class DataService {
     static updateNetWorthCategory(type, id, name) {
         const cats = this.getNetWorthCategories(type);
         const cat = cats.find(c => c.id === id);
-        if (!cat) return false;
+        if (!cat || cat.locked) return false;
         cat.name = name;
         cat.updatedAt = new Date().toISOString();
         this.saveNetWorthCategories(type, cats);
@@ -1810,7 +1845,7 @@ class DataService {
         if (this.countNetWorthCategoryUsage(type, id) > 0) return false;
         const cats = this.getNetWorthCategories(type);
         const index = cats.findIndex(c => c.id === id);
-        if (index === -1) return false;
+        if (index === -1 || cats[index].locked) return false;
         cats.splice(index, 1);
         this.saveNetWorthCategories(type, cats);
         this.recordDeletion(type + 'Categories', id);
@@ -3124,9 +3159,16 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
                                     <div className="category-info"><h6>{category.name}</h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
                                 )}
                                 <div className="category-actions">
-                                    <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingCategory(editingCategory === category.id ? null : category.id)} title="Edit"><i className="fas fa-edit"></i></button>
+                                    {!category.locked && (
+                                        <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingCategory(editingCategory === category.id ? null : category.id)} title="Edit"><i className="fas fa-edit"></i></button>
+                                    )}
                                     <button className="btn btn-sm btn-outline-success" onClick={() => setAddingSubcategoryTo(addingSubcategoryTo === category.id ? null : category.id)} title="Add Subcategory"><i className="fas fa-plus"></i></button>
-                                    <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(category.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                                    {!category.locked && (
+                                        <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(category.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                                    )}
+                                    {category.locked && (
+                                        <span className="text-muted" style={{fontSize:'0.78rem', padding:'0 4px'}} title="Default category — can't be renamed or deleted"><i className="fas fa-lock"></i></span>
+                                    )}
                                 </div>
                             </div>
                             {addingSubcategoryTo === category.id && (
@@ -7626,6 +7668,28 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     // Net Worth = Total Assets + Wallet − Total Liabilities
     const netWorth = totalAssets + wallet - totalLiabilities;
 
+    // Per-category Total Assets breakdown for the summary tiles — matches default asset
+    // category names case-insensitively (categories are user-renameable, so this degrades
+    // gracefully: a renamed/deleted category's items just fall into "Other Asset" below).
+    const findAssetCatId = (name) => {
+        const c = assetCategories.find(c => c.name.trim().toLowerCase() === name.toLowerCase());
+        return c ? c.id : null;
+    };
+    const sumAssetsInCat = (catId) => catId == null ? 0 :
+        visibleItems.filter(i => i.type === 'asset' && i.categoryId === catId)
+            .reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+
+    const savingsValue = sumAssetsInCat(findAssetCatId('Bank & Savings'));
+    const investmentValue = sumAssetsInCat(findAssetCatId('Investment'));
+    const propertyValue = sumAssetsInCat(findAssetCatId('Property'));
+    const pensionValue = sumAssetsInCat(findAssetCatId('Pension & Retirement'));
+    // Remainder, not a name-matched sum — guarantees the tiles always foot to totalAssets
+    // and automatically covers "Vehicles & Other Asset" plus any user-added categories.
+    // Rounded to cents so floating-point subtraction of near-equal sums (e.g. an exact
+    // wash to zero) can't leave a residue like -1e-11 that displays as "-£0.00" in red.
+    const otherAssetValueRaw = totalAssets - savingsValue - investmentValue - propertyValue - pensionValue;
+    const otherAssetValue = Math.round(otherAssetValueRaw * 100) / 100 === 0 ? 0 : otherAssetValueRaw;
+
     const openAddForm = () => {
         setEditingItem(null);
         const firstAssetCat = assetCategories && assetCategories[0];
@@ -7741,31 +7805,54 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
 
-            {/* Summary banner — Total Assets | Cash Flow | Liabilities, then Net Worth centred */}
+            {/* Summary banner — Net Worth on top, then Wallet/Savings/Investment,
+                Property/Pension/Other Asset, then Liabilities on its own row */}
             <div style={{padding:'0 1rem 0.5rem'}}>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
-                    <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#198754',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>TOTAL ASSETS</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:'#198754',lineHeight:1.1}}>{fmt(totalAssets, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>All assets</div>
-                    </div>
-                    <div style={{background:wallet>=0?'#f0fff4':'#fff5f5',border:`1px solid ${wallet>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>WALLET</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:wallet>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(wallet, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Unlinked cash + Primary account</div>
-                    </div>
-                    <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>LIABILITIES</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:'#dc3545',lineHeight:1.1}}>{fmt(totalLiabilities, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Total owed</div>
-                    </div>
-                </div>
-                <div style={{display:'flex',justifyContent:'center'}}>
+                <div style={{display:'flex',justifyContent:'center',marginBottom:'8px'}}>
                     <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'10px 32px',textAlign:'center'}}>
                         <div style={{fontSize:'0.65rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.05em',marginBottom:'3px'}}>NET WORTH</div>
                         <div style={{fontSize:'1.2rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
                         <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Wallet − Liabilities</div>
                     </div>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                    <div style={{background:wallet>=0?'#f0fff4':'#fff5f5',border:`1px solid ${wallet>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>WALLET</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:wallet>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(wallet, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Unlinked cash + Primary account</div>
+                    </div>
+                    <div style={{background:savingsValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${savingsValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>SAVINGS</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:savingsValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(savingsValue, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Bank accounts</div>
+                    </div>
+                    <div style={{background:investmentValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${investmentValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>INVESTMENT</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:investmentValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(investmentValue, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Investment accounts</div>
+                    </div>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                    <div style={{background:propertyValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${propertyValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>PROPERTY</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:propertyValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(propertyValue, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Property value</div>
+                    </div>
+                    <div style={{background:pensionValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${pensionValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>PENSION & RETIREMENT</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:pensionValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(pensionValue, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Pension accounts</div>
+                    </div>
+                    <div style={{background:otherAssetValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${otherAssetValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>OTHER ASSET</div>
+                        <div style={{fontSize:'0.88rem',fontWeight:800,color:otherAssetValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(otherAssetValue, defaultCurrency)}</div>
+                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Everything else</div>
+                    </div>
+                </div>
+                <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
+                    <div style={{fontSize:'0.6rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>LIABILITIES</div>
+                    <div style={{fontSize:'0.88rem',fontWeight:800,color:'#dc3545',lineHeight:1.1}}>{fmt(totalLiabilities, defaultCurrency)}</div>
+                    <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Total owed</div>
                 </div>
             </div>
 
@@ -8691,10 +8778,8 @@ function App() {
         setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
         setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
         setCategories(categoriesData);
-        // Ensure "Bank & Savings" exists before this state is read by the Net Worth screen's
-        // category grouping — the lazy get-or-create inside getBankAssetItems() runs too late
-        // for that (it fires during NetWorth's own render, after this state is already set).
-        DataService.getOrCreateNetWorthCategoryByName('asset', 'Bank & Savings');
+        // getNetWorthCategories('asset') guarantees "Bank & Savings" (a locked default)
+        // exists before this state is read by the Net Worth screen's category grouping.
         setAssetCategories(DataService.getNetWorthCategories('asset'));
         setLiabilityCategories(DataService.getNetWorthCategories('liability'));
         setDefaultCurrency(settings.currency || 'GBP');
