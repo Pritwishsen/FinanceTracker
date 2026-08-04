@@ -1091,6 +1091,8 @@ class DataService {
         if (!transfer) return false;
         this.saveTransfers(transfers.filter(t => t.id !== id));
         if (transfer.feeExpenseId) this.deleteExpense(transfer.feeExpenseId);
+        if (transfer.principalExpenseId) this.deleteExpense(transfer.principalExpenseId);
+        if (transfer.recipientIncomeId) this.deleteIncome(transfer.recipientIncomeId);
         return true;
     }
     static async bulkLinkAccounts(personNames) {
@@ -1165,6 +1167,19 @@ class DataService {
             .filter(a => !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType) && !a.isPrimary)
             .filter(a => !activeView || matchesActiveView(a.person, activeView))
             .map(a => ({ id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, isBankAccount: true }));
+    }
+    // Display-only mirror of getBankAssetItems, for the opposite set of accounts (primary,
+    // asset-type). Its balance is already counted via computeWallet()'s Wallet figure — this
+    // exists purely so the account is visible in the Bank & Savings list. Callers MUST NOT
+    // spread this into visibleItems/assetItems/totalAssets/savingsValue (that would double-count
+    // against Wallet); inject it only into the render loop, after totals are already computed.
+    static getPrimaryWalletBankItems(activeView) {
+        const cat = this.getOrCreateNetWorthCategoryByName('asset', 'Bank & Savings');
+        if (!cat) return [];
+        return this.getBankAccounts()
+            .filter(a => a.isPrimary && !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType))
+            .filter(a => !activeView || matchesActiveView(a.person, activeView))
+            .map(a => ({ id: 'bank-primary-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, isBankAccount: true, isPrimaryWallet: true }));
     }
     // Every Credit Card/Loan bank account (primary or not — Wallet-folding only ever applies
     // to asset-type primaries), shaped as a read-only Net Worth liability item under the
@@ -4119,35 +4134,43 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
             </div>
             {(() => {
                 // Scoped to the active view via the FROM account's owner, same convention
-                // Wallet/Net Worth use for "which accounts belong to who's currently active".
-                const visibleTransfers = transfers.filter(t => {
+                // Wallet/Net Worth use for "which accounts belong to who's currently active",
+                // and to the Summary screen's own Time Period filter, same as expenses/income.
+                const dateFilteredTransfers = filterByDateRange(transfers);
+                const visibleTransfers = dateFilteredTransfers.filter(t => {
                     const from = bankAccountsForTransfers.find(a => a.id === t.fromAccountId);
                     return from && matchesActiveView(from.person, activeView);
                 });
-                const overseasTransfers = visibleTransfers.filter(t => t.isOverseas);
-                const accountTransfers = visibleTransfers.filter(t => !t.isOverseas);
+                const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
+                const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
+                const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas);
                 const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
                 const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
                 const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
                 const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
-                if (overseasTransfers.length === 0 && accountTransfers.length === 0) return null;
+                const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
+                if (transfers.length === 0) return null;
                 return (
                     <React.Fragment>
-                        {overseasTransfers.length > 0 && (
-                            <div style={{marginTop: '1.25rem'}}>
-                                <h5>Overseas Transfers</h5>
+                        <div style={{marginTop: '1.25rem'}}>
+                            <h5>Overseas Transfers</h5>
+                            {overseasTransfers.length > 0 ? (
+                                <React.Fragment>
                                 <div style={{overflowX: 'auto'}}>
                                     <table className="table table-sm" style={{fontSize: '0.82rem'}}>
                                         <thead>
-                                            <tr><th>From Account</th><th>Amount</th><th>Transferred Amount</th><th>Conversion Rate</th><th>Fee</th><th>To Whom</th><th>Target Account</th><th></th></tr>
+                                            <tr><th>From Account</th><th>Amount</th><th>Date</th><th>Transferred Amount</th><th>Conversion Rate</th><th>Fee</th><th>To Whom</th><th>Target Account</th><th></th></tr>
                                         </thead>
                                         <tbody>
                                             {overseasTransfers.map(t => (
                                                 <tr key={t.id}>
                                                     <td>{accountLabel(t.fromAccountId)}</td>
                                                     <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
+                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td>{ValidationUtils.formatCurrency(t.toAmount, currencyOf(t.toAccountId))}</td>
-                                                    <td>{t.conversionRate}</td>
+                                                    <td>1 {currencyOf(t.fromAccountId)} = {t.conversionRate} {currencyOf(t.toAccountId)}</td>
                                                     <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ownerLabel(t.toAccountId)}</td>
                                                     <td>{accountLabel(t.toAccountId)}</td>
@@ -4157,11 +4180,33 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                         </tbody>
                                     </table>
                                 </div>
-                            </div>
-                        )}
-                        {accountTransfers.length > 0 && (
-                            <div style={{marginTop: '1.25rem'}}>
-                                <h5>Account Transfers</h5>
+                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                    {Object.keys(overseasTransferAmountTotals).length === 1 ? (
+                                        <div><strong>Total Transferred:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferAmountTotals)[0], Object.keys(overseasTransferAmountTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total Transferred:</strong>
+                                            {Object.entries(overseasTransferAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                    {Object.keys(overseasTransferFeeTotals).length === 1 ? (
+                                        <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferFeeTotals)[0], Object.keys(overseasTransferFeeTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total Fees:</strong>
+                                            {Object.entries(overseasTransferFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                </div>
+                                </React.Fragment>
+                            ) : (
+                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No overseas transfers in the selected period.</div>
+                            )}
+                        </div>
+                        <div style={{marginTop: '1.25rem'}}>
+                            <h5>Account Transfers</h5>
+                            {accountTransfers.length > 0 ? (
+                                <React.Fragment>
                                 <div style={{overflowX: 'auto'}}>
                                     <table className="table table-sm" style={{fontSize: '0.82rem'}}>
                                         <thead>
@@ -4181,8 +4226,21 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                         </tbody>
                                     </table>
                                 </div>
-                            </div>
-                        )}
+                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                    {Object.keys(accountTransferTotals).length === 1 ? (
+                                        <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(accountTransferTotals)[0], Object.keys(accountTransferTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total:</strong>
+                                            {Object.entries(accountTransferTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                </div>
+                                </React.Fragment>
+                            ) : (
+                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No account transfers in the selected period.</div>
+                            )}
+                        </div>
                     </React.Fragment>
                 );
             })()}
@@ -4233,7 +4291,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [linkCandidates, setLinkCandidates] = useState([]);
     const [linkableExpenses, setLinkableExpenses] = useState([]);
     const [linkableIncome, setLinkableIncome] = useState([]);
-    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: new Date().toISOString().split('T')[0], amount: '', conversionRate: '', fee: '', categoryId: '', subcategory: '', notes: '' };
+    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: new Date().toISOString().split('T')[0], amount: '', conversionRate: '', fee: '', toAmount: '', categoryId: '', subcategory: '', principalCategoryId: '', principalSubcategory: '', notes: '' };
     const [showTransferForm, setShowTransferForm] = useState(false);
     const [transferForm, setTransferForm] = useState(emptyTransferForm);
     const [transferErrors, setTransferErrors] = useState({});
@@ -4477,7 +4535,9 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const transferFromAccount = bankAccounts.find(a => a.id === parseInt(transferForm.fromAccountId));
     const transferToAccount = bankAccounts.find(a => a.id === parseInt(transferForm.toAccountId));
     const isOverseasTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.currency !== transferToAccount.currency);
+    const isCrossPersonTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.person !== transferToAccount.person);
     const transferFeeCategory = categories.find(c => c.id === parseInt(transferForm.categoryId));
+    const transferPrincipalCategory = categories.find(c => c.id === parseInt(transferForm.principalCategoryId));
 
     // Pre-fills the "today's rate" placeholder for an overseas transfer whenever both
     // accounts (and therefore both currencies) are chosen — live-fetch-capable, falls
@@ -4491,10 +4551,25 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         return () => { cancelled = true; };
     }, [transferFromAccount && transferFromAccount.currency, transferToAccount && transferToAccount.currency, isOverseasTransfer]);
 
+    // Recomputes the suggested Transferred Amount whenever its source inputs change, but
+    // deliberately excludes transferForm.toAmount from its own deps so a manual override
+    // isn't immediately clobbered — it's only refreshed when amount/fee/rate change again.
+    useEffect(() => {
+        if (!isOverseasTransfer) return;
+        const amount = parseFloat(transferForm.amount) || 0;
+        const fee = parseFloat(transferForm.fee) || 0;
+        const rate = parseFloat(transferForm.conversionRate) || liveConversionRate;
+        if (!amount || !rate) return;
+        const computed = Math.round((amount - fee) * rate * 100) / 100;
+        setTransferForm(prev => ({ ...prev, toAmount: String(computed) }));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [transferForm.amount, transferForm.fee, transferForm.conversionRate, liveConversionRate, isOverseasTransfer]);
+
     const handleTransferFieldChange = (field, value) => {
         setTransferForm(prev => {
             const next = { ...prev, [field]: value };
             if (field === 'categoryId') next.subcategory = '';
+            if (field === 'principalCategoryId') next.principalSubcategory = '';
             if (field === 'fromAccountId' && value === prev.toAccountId) next.toAccountId = '';
             return next;
         });
@@ -4507,6 +4582,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         setTransferErrors({});
     };
 
+    const transferFormRef = React.useRef(null);
+    const handleQuickTransfer = (account) => {
+        setTransferForm({ ...emptyTransferForm, fromAccountId: String(account.id) });
+        setTransferErrors({});
+        setShowTransferForm(true);
+        setTimeout(() => { if (transferFormRef.current) transferFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
+    };
+
     const handleSubmitTransfer = async (e) => {
         e.preventDefault();
         const errors = {};
@@ -4516,9 +4599,13 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         if (transferForm.fromAccountId && transferForm.fromAccountId === transferForm.toAccountId) errors.toAccountId = 'Must differ from the source account';
         if (!amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
         const feeAmount = parseFloat(transferForm.fee) || 0;
-        if (isOverseasTransfer && feeAmount > 0) {
+        if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
             if (!transferForm.categoryId) errors.categoryId = 'Category is required for a fee';
             if (transferFeeCategory && transferFeeCategory.subcategories.length > 0 && !transferForm.subcategory) errors.subcategory = 'Subcategory is required for a fee';
+        }
+        if (isCrossPersonTransfer) {
+            if (!transferForm.principalCategoryId) errors.principalCategoryId = 'Category is required';
+            if (transferPrincipalCategory && transferPrincipalCategory.subcategories.length > 0 && !transferForm.principalSubcategory) errors.principalSubcategory = 'Subcategory is required';
         }
         if (Object.keys(errors).length > 0) { setTransferErrors(errors); return; }
 
@@ -4527,9 +4614,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             const rate = isOverseasTransfer
                 ? (parseFloat(transferForm.conversionRate) || liveConversionRate || await CurrencyService.getConversionRate(transferFromAccount.currency, transferToAccount.currency))
                 : 1;
-            const toAmount = Math.round(amount * rate * 100) / 100;
+            const toAmount = isOverseasTransfer
+                ? (parseFloat(transferForm.toAmount) || Math.round((amount - feeAmount) * rate * 100) / 100)
+                : amount;
             let feeExpenseId = null;
-            if (isOverseasTransfer && feeAmount > 0) {
+            if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
                 const feeExpense = await DataService.addExpense({
                     amount: feeAmount,
                     currency: transferFromAccount.currency,
@@ -4543,6 +4632,33 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 });
                 feeExpenseId = feeExpense.id;
             }
+            let principalExpenseId = null;
+            let recipientIncomeId = null;
+            if (isCrossPersonTransfer) {
+                const toPersonLabel = transferToAccount.person === 'own' ? 'Me' : transferToAccount.person;
+                const fromPersonLabel = transferFromAccount.person === 'own' ? 'Me' : transferFromAccount.person;
+                const principalExpense = await DataService.addExpense({
+                    amount: amount + (isOverseasTransfer ? feeAmount : 0),
+                    currency: transferFromAccount.currency,
+                    date: transferForm.date,
+                    description: `Transfer to ${toPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`,
+                    categoryId: parseInt(transferForm.principalCategoryId),
+                    subcategory: transferForm.principalSubcategory || '',
+                    paidBy: transferFromAccount.person === 'own' ? '' : transferFromAccount.person,
+                    tags: ['transfer-principal']
+                });
+                principalExpenseId = principalExpense.id;
+                const recipientIncome = await DataService.addIncome({
+                    amount: toAmount,
+                    currency: transferToAccount.currency,
+                    date: transferForm.date,
+                    source: `Transfer from ${fromPersonLabel}`,
+                    description: `Transfer from ${fromPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`,
+                    paidBy: transferToAccount.person === 'own' ? '' : transferToAccount.person,
+                    tags: ['transfer-incoming']
+                });
+                recipientIncomeId = recipientIncome.id;
+            }
             DataService.addTransfer({
                 date: transferForm.date,
                 fromAccountId: transferFromAccount.id,
@@ -4553,6 +4669,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 conversionRate: rate,
                 fee: isOverseasTransfer ? feeAmount : 0,
                 feeExpenseId,
+                principalExpenseId,
+                recipientIncomeId,
                 notes: transferForm.notes || ''
             });
             setShowTransferForm(false);
@@ -4858,6 +4976,9 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                             {account.isPrimary && (
                                                 <button className="btn btn-sm btn-outline-primary" disabled={!hasUnlinked} onClick={() => handleOpenLinkAccounts(account.person)} title={hasUnlinked ? 'Link existing transactions' : 'No unlinked transactions'}><i className="fas fa-link"></i></button>
                                             )}
+                                            {bankAccounts.length >= 2 && (
+                                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickTransfer(account)} title="Transfer money"><i className="fas fa-exchange-alt"></i></button>
+                                            )}
                                             <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
                                             <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
                                         </div>
@@ -4881,14 +5002,6 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                             </div>
                         </div>
                     </div>
-                </div>
-            )}
-
-            {bankAccounts.some(a => a.isPrimary) && (
-                <div style={{marginTop: '0.5rem'}}>
-                    <button type="button" className="btn btn-outline-primary btn-sm" disabled={!linkCandidatesAll.some(c => c.expenseCount + c.incomeCount > 0)} onClick={() => handleOpenLinkAccounts()}>
-                        <i className="fas fa-link me-1"></i>Link Existing Transactions
-                    </button>
                 </div>
             )}
 
@@ -4934,14 +5047,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             )}
 
             {showTransferForm && (
-                <div style={{marginTop: '0.75rem', background: '#f8f9fa', borderRadius: '10px', padding: '0.75rem'}}>
+                <div ref={transferFormRef} style={{marginTop: '0.75rem', background: '#f8f9fa', borderRadius: '10px', padding: '0.75rem'}}>
                     <h6 style={{marginBottom: '0.6rem', fontSize: '0.9rem', fontWeight: 600}}>Transfer Money</h6>
                     <form onSubmit={handleSubmitTransfer}>
                         <div className="form-group mb-2">
                             <label>From Account</label>
                             <select className={'form-select ' + (transferErrors.fromAccountId ? 'is-invalid' : '')} value={transferForm.fromAccountId} onChange={e => handleTransferFieldChange('fromAccountId', e.target.value)}>
                                 <option value="">Select account</option>
-                                {bankAccounts.map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency})</option>))}
+                                {bankAccounts.map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency}) — {ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(a), a.currency)}</option>))}
                             </select>
                             {transferErrors.fromAccountId && <div className="invalid-feedback d-block">{transferErrors.fromAccountId}</div>}
                         </div>
@@ -4949,7 +5062,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                             <label>To Account</label>
                             <select className={'form-select ' + (transferErrors.toAccountId ? 'is-invalid' : '')} value={transferForm.toAccountId} onChange={e => handleTransferFieldChange('toAccountId', e.target.value)}>
                                 <option value="">Select account</option>
-                                {bankAccounts.filter(a => String(a.id) !== String(transferForm.fromAccountId)).map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency})</option>))}
+                                {bankAccounts.filter(a => String(a.id) !== String(transferForm.fromAccountId)).map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency}) — {ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(a), a.currency)}</option>))}
                             </select>
                             {transferErrors.toAccountId && <div className="invalid-feedback d-block">{transferErrors.toAccountId}</div>}
                         </div>
@@ -4962,20 +5075,50 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                             <input type="number" step="0.01" className={'form-control ' + (transferErrors.amount ? 'is-invalid' : '')} value={transferForm.amount} onChange={e => handleTransferFieldChange('amount', e.target.value)} />
                             {transferErrors.amount && <div className="invalid-feedback d-block">{transferErrors.amount}</div>}
                         </div>
+                        {isCrossPersonTransfer && (
+                            <React.Fragment>
+                                <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>
+                                    <i className="fas fa-user-friends me-1"></i>Transfer to {transferToAccount.person === 'own' ? 'Me' : transferToAccount.person} — logged as an expense for you and income for them
+                                </div>
+                                <div className="form-group mb-2">
+                                    <label>Category</label>
+                                    <select className={'form-select ' + (transferErrors.principalCategoryId ? 'is-invalid' : '')} value={transferForm.principalCategoryId} onChange={e => handleTransferFieldChange('principalCategoryId', e.target.value)}>
+                                        <option value="">Select a category</option>
+                                        {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                                    </select>
+                                    {transferErrors.principalCategoryId && <div className="invalid-feedback d-block">{transferErrors.principalCategoryId}</div>}
+                                </div>
+                                {transferPrincipalCategory && transferPrincipalCategory.subcategories.length > 0 && (
+                                    <div className="form-group mb-2">
+                                        <label>Subcategory</label>
+                                        <select className={'form-select ' + (transferErrors.principalSubcategory ? 'is-invalid' : '')} value={transferForm.principalSubcategory} onChange={e => handleTransferFieldChange('principalSubcategory', e.target.value)}>
+                                            <option value="">Select a subcategory</option>
+                                            {transferPrincipalCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
+                                        </select>
+                                        {transferErrors.principalSubcategory && <div className="invalid-feedback d-block">{transferErrors.principalSubcategory}</div>}
+                                    </div>
+                                )}
+                            </React.Fragment>
+                        )}
                         {isOverseasTransfer && (
                             <React.Fragment>
                                 <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>
                                     <i className="fas fa-globe me-1"></i>Overseas transfer — {transferFromAccount.currency} → {transferToAccount.currency}
                                 </div>
                                 <div className="form-group mb-2">
-                                    <label>Conversion Rate <span className="text-muted">(optional{liveConversionRate ? ` — today's: ${liveConversionRate}` : ''})</span></label>
+                                    <label>Conversion Rate (1 {transferFromAccount.currency} = ? {transferToAccount.currency}) <span className="text-muted">(optional{liveConversionRate ? ` — today's: ${liveConversionRate}` : ''})</span></label>
                                     <input type="number" step="0.0001" className="form-control" placeholder={liveConversionRate ? String(liveConversionRate) : "today's rate"} value={transferForm.conversionRate} onChange={e => handleTransferFieldChange('conversionRate', e.target.value)} />
                                 </div>
                                 <div className="form-group mb-2">
                                     <label>Fee {transferFromAccount ? `(${transferFromAccount.currency})` : ''}</label>
                                     <input type="number" step="0.01" className="form-control" placeholder="0" value={transferForm.fee} onChange={e => handleTransferFieldChange('fee', e.target.value)} />
                                 </div>
-                                {parseFloat(transferForm.fee) > 0 && (
+                                <div className="form-group mb-2">
+                                    <label>Transferred Amount {transferToAccount ? `(${transferToAccount.currency})` : ''}</label>
+                                    <input type="number" step="0.01" className="form-control" value={transferForm.toAmount} onChange={e => handleTransferFieldChange('toAmount', e.target.value)} />
+                                    <small className="text-muted">Auto-calculated as (Amount − Fee) × Conversion Rate; you can override it.</small>
+                                </div>
+                                {!isCrossPersonTransfer && parseFloat(transferForm.fee) > 0 && (
                                     <React.Fragment>
                                         <div className="form-group mb-2">
                                             <label>Fee Category</label>
@@ -8033,6 +8176,9 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const liabilityItems = visibleItems.filter(i => i.type === 'liability');
     const assetsByCat = groupBy(assetItems, 'categoryId');
     const liabsByCat = groupBy(liabilityItems, 'categoryId');
+    // Display-only — see getPrimaryWalletBankItems's comment. Never fold into assetItems/totalAssets.
+    const primaryWalletItems = DataService.getPrimaryWalletBankItems(activeView);
+    const primaryWalletItemsByCat = groupBy(primaryWalletItems, 'categoryId');
 
     // Only show snapshots taken under a view that overlaps the currently active one — same
     // pattern as debts' createdInView — so switching person doesn't surface the other
@@ -8046,9 +8192,9 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
     const renderItemCard = (item, colorClass) => (
-        <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
+        <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid ' + (item.isPrimaryWallet ? '#ffc107' : '#e9ecef'),background:item.isPrimaryWallet ? '#fff3cd' : '#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}</div>
+                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}</div>
                 {/* A linked account can compute negative (overdrawn) — the asset total still
                     correctly negates by the full amount (unchanged), but showing e.g. "-£50"
                     as the headline reads as if that's cash on hand. Show £0 with the shortfall
@@ -8067,7 +8213,11 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 )}
                 {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
             </div>
-            {item.isBankAccount ? (
+            {item.isPrimaryWallet ? (
+                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="This account's balance is already included in the Wallet total above — not added again to Total Assets">
+                    <i className="fas fa-wallet me-1"></i>In Wallet
+                </div>
+            ) : item.isBankAccount ? (
                 <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from this account's linked transactions — edit its Opening Amount in Settings → Bank Accounts to adjust">
                     <i className="fas fa-link me-1"></i>Linked account
                 </div>
@@ -8224,12 +8374,13 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <span className="badge bg-success" style={{fontSize:'0.62rem'}}>{assetItems.length}</span>
                         <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</span>
                     </div>
-                    {assetItems.length === 0
+                    {assetItems.length === 0 && primaryWalletItems.length === 0
                         ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No assets added yet.</div>
-                        : assetCategories.filter(c => assetsByCat[c.id]).map(cat => (
+                        : assetCategories.filter(c => assetsByCat[c.id] || primaryWalletItemsByCat[c.id]).map(cat => (
                             <div key={cat.id} style={{marginBottom:'8px'}}>
                                 <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat.name]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat.name}</div>
-                                {assetsByCat[cat.id].map(item => renderItemCard(item, '#198754'))}
+                                {(assetsByCat[cat.id]||[]).map(item => renderItemCard(item, '#198754'))}
+                                {(primaryWalletItemsByCat[cat.id]||[]).map(item => renderItemCard(item, '#198754'))}
                             </div>
                         ))
                     }
