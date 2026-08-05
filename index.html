@@ -1095,6 +1095,26 @@ class DataService {
         if (transfer.recipientIncomeId) this.deleteIncome(transfer.recipientIncomeId);
         return true;
     }
+    static getReconciliations() { return JSON.parse(localStorage.getItem('financeApp_reconciliations') || '[]'); }
+    static saveReconciliations(reconciliations) { localStorage.setItem('financeApp_reconciliations', JSON.stringify(reconciliations)); }
+    static addReconciliation(reconciliation) {
+        const reconciliations = this.getReconciliations();
+        const record = { id: DataService._uniqueId(), createdAt: new Date().toISOString(), ...reconciliation };
+        reconciliations.push(record);
+        this.saveReconciliations(reconciliations);
+        return record;
+    }
+    static deleteReconciliation(id) {
+        const reconciliations = this.getReconciliations();
+        const reconciliation = reconciliations.find(r => r.id === id);
+        if (!reconciliation) return false;
+        this.saveReconciliations(reconciliations.filter(r => r.id !== id));
+        if (reconciliation.transactionId) {
+            if (reconciliation.transactionType === 'expense') this.deleteExpense(reconciliation.transactionId);
+            else if (reconciliation.transactionType === 'income') this.deleteIncome(reconciliation.transactionId);
+        }
+        return true;
+    }
     static async bulkLinkAccounts(personNames) {
         await this.initialize();
         const accounts = this.getBankAccounts();
@@ -1152,10 +1172,21 @@ class DataService {
         const transfers = this.getTransfers();
         const transfersOut = transfers.filter(t => t.fromAccountId === account.id).reduce((s, t) => s + t.fromAmount, 0);
         const transfersIn = transfers.filter(t => t.toAccountId === account.id).reduce((s, t) => s + t.toAmount, 0);
+        // Unlogged reconciliations never touch linkedIncome/linkedExpenses, so their correction
+        // is folded in directly here. delta = actualBalance - computedBalance at the moment it
+        // was recorded, so summing it back in reproduces actualBalance regardless of asset vs
+        // liability formula, and telescopes correctly across sequential reconciliations since
+        // this function is always recomputed fresh. Logged ones are excluded — they already
+        // moved the balance via their real Expense/Income record, so including both would
+        // double-count.
+        const unloggedReconciliationDelta = this.getReconciliations()
+            .filter(r => r.accountId === account.id && !r.loggedAsTransaction)
+            .reduce((s, r) => s + r.delta, 0);
         const opening = parseFloat(account.openingAmount) || 0;
-        return this.LIABILITY_ACCOUNT_TYPES.includes(account.accountType)
+        const base = this.LIABILITY_ACCOUNT_TYPES.includes(account.accountType)
             ? opening + linkedExpenses - linkedIncome + transfersOut - transfersIn
             : opening + linkedIncome - linkedExpenses + transfersIn - transfersOut;
+        return base + unloggedReconciliationDelta;
     }
     // Every non-primary asset-type bank account, shaped as a read-only Net Worth asset item
     // under the "Bank & Savings" category — the primary account is deliberately excluded
@@ -1584,7 +1615,7 @@ class DataService {
     // by isBackupOwnedByCurrentUser() on this user's future signed-in sessions. Falls back
     // to reading localStorage for callers with no user in scope (local-only backup paths).
     static createBackup(currentUser) {
-        const keys = ['expenses', 'income', 'categories', 'assetCategories', 'liabilityCategories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings', 'bankAccounts', '_deletionLog'];
+        const keys = ['expenses', 'income', 'categories', 'assetCategories', 'liabilityCategories', 'settings', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings', 'bankAccounts', 'transfers', 'reconciliations', '_deletionLog'];
         const data = {};
         keys.forEach(key => { const v = localStorage.getItem('financeApp_' + key); data[key] = v ? JSON.parse(v) : null; });
         const user = currentUser !== undefined ? currentUser : (() => { try { return JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null'); } catch(_) { return null; } })();
@@ -1672,10 +1703,10 @@ class DataService {
         const ld = (localBackup && localBackup.data) || {};
         const cd = (cloudBackup && cloudBackup.data) || {};
         const merged = { ...cd };
-        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','assetCategories','liabilityCategories','networth','bankAccounts'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
+        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
         // Apply merged deletion log — items deleted on either device are removed
         const deletionLog = mergeDeletionLogs(ld._deletionLog, cd._deletionLog);
-        ['expenses','income','goals','bills','recurring','debts','categories','assetCategories','liabilityCategories','networth','bankAccounts'].forEach(key => {
+        ['expenses','income','goals','bills','recurring','debts','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(key => {
             if (deletionLog[key] && merged[key]) {
                 merged[key] = merged[key].filter(item => !deletionLog[key][String(item.id)]);
             }
@@ -1712,7 +1743,7 @@ class DataService {
             const last = JSON.parse(localStorage.getItem('financeApp_latestBackup') || 'null');
             if (!last) return true;
             const current = this.createBackup();
-            const keys = ['expenses', 'income', 'categories', 'assetCategories', 'liabilityCategories', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings', 'bankAccounts'];
+            const keys = ['expenses', 'income', 'categories', 'assetCategories', 'liabilityCategories', 'goals', 'bills', 'recurring', 'debts', 'networth', 'netWorthHistory', 'notifSettings', 'bankAccounts', 'transfers', 'reconciliations'];
             return keys.some(k => JSON.stringify(current.data[k]) !== JSON.stringify(last.data[k]));
         } catch (_) { return true; }
     }
@@ -3725,6 +3756,12 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         setTransfers(DataService.getTransfers());
         if (onUpdate) onUpdate();
     };
+    const [reconciliations, setReconciliations] = useState(() => DataService.getReconciliations());
+    const handleDeleteReconciliation = (id) => {
+        DataService.deleteReconciliation(id);
+        setReconciliations(DataService.getReconciliations());
+        if (onUpdate) onUpdate();
+    };
     // Custom time period: month+year only (no day-level picker), one pair for each end
     // of the range. Defaults to the current month so opening "Custom" starts sane.
     const [customFromMonth, setCustomFromMonth] = useState(() => new Date().getMonth());
@@ -4244,6 +4281,49 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     </React.Fragment>
                 );
             })()}
+            {(() => {
+                const dateFilteredReconciliations = filterByDateRange(reconciliations);
+                const visibleReconciliations = dateFilteredReconciliations.filter(r => matchesActiveView(r.person, activeView));
+                const sortedReconciliations = [...visibleReconciliations].sort((a, b) => new Date(b.date) - new Date(a.date));
+                const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
+                const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
+                const personLabel = (person) => (!person || person === 'own') ? 'Me' : person;
+                const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
+                if (reconciliations.length === 0) return null;
+                return (
+                    <div style={{marginTop: '1.25rem'}}>
+                        <h5>Balance Reconciliations</h5>
+                        {sortedReconciliations.length > 0 ? (
+                            <div style={{overflowX: 'auto'}}>
+                                <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                    <thead>
+                                        <tr><th>Account</th><th>User</th><th>Date</th><th>Reconciled Amount</th><th>Balance Before</th><th>Balance After</th><th>Logged?</th><th></th></tr>
+                                    </thead>
+                                    <tbody>
+                                        {sortedReconciliations.map(r => (
+                                            <tr key={r.id}>
+                                                <td>{accountLabel(r.accountId)}</td>
+                                                <td>{personLabel(r.person)}</td>
+                                                <td>{ValidationUtils.formatDate(r.date)}</td>
+                                                <td style={{color: r.delta > 0 ? '#198754' : '#dc3545', fontWeight: 600}}>{r.delta > 0 ? '+' : '-'}{ValidationUtils.formatCurrency(Math.abs(r.delta), currencyOf(r.accountId))}</td>
+                                                <td>{ValidationUtils.formatCurrency(r.balanceBefore, currencyOf(r.accountId))}</td>
+                                                <td>{ValidationUtils.formatCurrency(r.balanceAfter, currencyOf(r.accountId))}</td>
+                                                <td>{r.loggedAsTransaction
+                                                    ? <span className={'badge ' + (r.transactionType === 'expense' ? 'bg-danger' : 'bg-success')}>{r.transactionType === 'expense' ? 'Expense' : 'Income'}</span>
+                                                    : <span className="badge bg-secondary">Not logged</span>}
+                                                </td>
+                                                <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : (
+                            <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No balance reconciliations in the selected period.</div>
+                        )}
+                    </div>
+                );
+            })()}
             {filteredExpenses.length === 0 && filteredIncome.length === 0 && (
                 <div className="empty-state"><i className="fas fa-chart-bar fa-3x"></i><h4>No financial data for this period</h4><p>Add some income and expenses to see your financial summary.</p></div>
             )}
@@ -4296,6 +4376,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [transferForm, setTransferForm] = useState(emptyTransferForm);
     const [transferErrors, setTransferErrors] = useState({});
     const [transferSubmitting, setTransferSubmitting] = useState(false);
+    const emptyReconcileForm = { accountId: '', actualBalance: '', notes: '', logAsTransaction: false, categoryId: '', subcategory: '' };
+    const [showReconcileForm, setShowReconcileForm] = useState(false);
+    const [reconcileForm, setReconcileForm] = useState(emptyReconcileForm);
+    const [reconcileErrors, setReconcileErrors] = useState({});
+    const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
     const [liveConversionRate, setLiveConversionRate] = useState(null);
     const [displayName, setDisplayName] = useState('');
     const [nameError, setNameError] = useState('');
@@ -4538,6 +4623,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const isCrossPersonTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.person !== transferToAccount.person);
     const transferFeeCategory = categories.find(c => c.id === parseInt(transferForm.categoryId));
     const transferPrincipalCategory = categories.find(c => c.id === parseInt(transferForm.principalCategoryId));
+    const reconcileAccount = bankAccounts.find(a => a.id === parseInt(reconcileForm.accountId));
+    const reconcileCategory = categories.find(c => c.id === parseInt(reconcileForm.categoryId));
 
     // Pre-fills the "today's rate" placeholder for an overseas transfer whenever both
     // accounts (and therefore both currencies) are chosen — live-fetch-capable, falls
@@ -4588,6 +4675,112 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         setTransferErrors({});
         setShowTransferForm(true);
         setTimeout(() => { if (transferFormRef.current) transferFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
+    };
+
+    const handleReconcileFieldChange = (field, value) => {
+        setReconcileForm(prev => {
+            const next = { ...prev, [field]: value };
+            if (field === 'categoryId') next.subcategory = '';
+            return next;
+        });
+        if (reconcileErrors[field]) setReconcileErrors(prev => ({ ...prev, [field]: '' }));
+    };
+
+    const handleCancelReconcile = () => {
+        setShowReconcileForm(false);
+        setReconcileForm(emptyReconcileForm);
+        setReconcileErrors({});
+    };
+
+    const reconcileFormRef = React.useRef(null);
+    const handleQuickReconcile = (account) => {
+        setReconcileForm({ ...emptyReconcileForm, accountId: String(account.id) });
+        setReconcileErrors({});
+        setShowReconcileForm(true);
+        setTimeout(() => { if (reconcileFormRef.current) reconcileFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
+    };
+
+    const handleSubmitReconcile = async (e) => {
+        e.preventDefault();
+        const errors = {};
+        if (!reconcileForm.accountId) errors.accountId = 'Choose an account';
+        const actualBalance = parseFloat(reconcileForm.actualBalance);
+        if (reconcileForm.actualBalance === '' || isNaN(actualBalance)) errors.actualBalance = 'Enter the actual balance';
+        if (Object.keys(errors).length > 0) { setReconcileErrors(errors); return; }
+
+        setReconcileSubmitting(true);
+        try {
+            const balanceBefore = DataService.computeBankAccountBalance(reconcileAccount);
+            const delta = Math.round((actualBalance - balanceBefore) * 100) / 100;
+            if (delta === 0) {
+                setReconcileErrors({ general: 'Already matches — no adjustment needed.' });
+                return;
+            }
+            const isLiability = DataService.LIABILITY_ACCOUNT_TYPES.includes(reconcileAccount.accountType);
+            const asExpense = isLiability ? delta > 0 : delta < 0;
+            const today = new Date().toISOString().split('T')[0];
+            const description = `Balance reconciliation: ${reconcileAccount.accountName}` + (reconcileForm.notes ? ` — ${reconcileForm.notes}` : '');
+
+            if (reconcileForm.logAsTransaction && asExpense) {
+                const catErrors = {};
+                if (!reconcileForm.categoryId) catErrors.categoryId = 'Category is required';
+                if (reconcileCategory && reconcileCategory.subcategories.length > 0 && !reconcileForm.subcategory) catErrors.subcategory = 'Subcategory is required';
+                if (Object.keys(catErrors).length > 0) { setReconcileErrors(catErrors); return; }
+            }
+
+            let transactionId = null;
+            let transactionType = null;
+            if (reconcileForm.logAsTransaction) {
+                if (asExpense) {
+                    const created = await DataService.addExpense({
+                        amount: Math.abs(delta),
+                        currency: reconcileAccount.currency,
+                        date: today,
+                        description,
+                        categoryId: parseInt(reconcileForm.categoryId),
+                        subcategory: reconcileForm.subcategory || '',
+                        paidBy: reconcileAccount.person === 'own' ? '' : reconcileAccount.person,
+                        accountId: reconcileAccount.id,
+                        tags: ['balance-adjustment']
+                    });
+                    transactionId = created.id;
+                    transactionType = 'expense';
+                } else {
+                    const created = await DataService.addIncome({
+                        amount: Math.abs(delta),
+                        currency: reconcileAccount.currency,
+                        date: today,
+                        source: description,
+                        description,
+                        paidBy: reconcileAccount.person === 'own' ? '' : reconcileAccount.person,
+                        accountId: reconcileAccount.id,
+                        tags: ['balance-adjustment']
+                    });
+                    transactionId = created.id;
+                    transactionType = 'income';
+                }
+            }
+
+            DataService.addReconciliation({
+                accountId: reconcileAccount.id,
+                person: reconcileAccount.person,
+                date: today,
+                balanceBefore,
+                delta,
+                balanceAfter: actualBalance,
+                notes: reconcileForm.notes || '',
+                loggedAsTransaction: !!reconcileForm.logAsTransaction,
+                transactionType,
+                transactionId
+            });
+
+            setShowReconcileForm(false);
+            setReconcileForm(emptyReconcileForm);
+            setReconcileErrors({});
+            if (onUpdate) onUpdate();
+        } finally {
+            setReconcileSubmitting(false);
+        }
     };
 
     const handleSubmitTransfer = async (e) => {
@@ -4979,6 +5172,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                             {bankAccounts.length >= 2 && (
                                                 <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickTransfer(account)} title="Transfer money"><i className="fas fa-exchange-alt"></i></button>
                                             )}
+                                            <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickReconcile(account)} title="Reconcile balance"><i className="fas fa-balance-scale"></i></button>
                                             <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
                                             <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
                                         </div>
@@ -5149,6 +5343,85 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         <button type="submit" className="btn btn-primary btn-sm" disabled={transferSubmitting}>
                             {transferSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Transferring…</> : 'Transfer'}
                         </button>
+                    </form>
+                </div>
+            )}
+
+            {showReconcileForm && (
+                <div ref={reconcileFormRef} style={{marginTop: '0.75rem', background: '#f8f9fa', borderRadius: '10px', padding: '0.75rem'}}>
+                    <h6 style={{marginBottom: '0.6rem', fontSize: '0.9rem', fontWeight: 600}}>Reconcile Balance</h6>
+                    <form onSubmit={handleSubmitReconcile}>
+                        <div className="form-group mb-2">
+                            <label>Account</label>
+                            <input type="text" className="form-control" value={reconcileAccount ? `${reconcileAccount.accountName} (${reconcileAccount.currency})` : ''} disabled />
+                        </div>
+                        <div className="form-group mb-2">
+                            <label>Currently Tracked Balance</label>
+                            <input type="text" className="form-control" value={reconcileAccount ? ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(reconcileAccount), reconcileAccount.currency) : ''} disabled />
+                        </div>
+                        <div className="form-group mb-2">
+                            <label>Actual Balance {reconcileAccount ? `(${reconcileAccount.currency})` : ''}</label>
+                            <input type="number" step="0.01" className={'form-control ' + (reconcileErrors.actualBalance ? 'is-invalid' : '')} value={reconcileForm.actualBalance} onChange={e => handleReconcileFieldChange('actualBalance', e.target.value)} />
+                            {reconcileErrors.actualBalance && <div className="invalid-feedback d-block">{reconcileErrors.actualBalance}</div>}
+                        </div>
+                        <div className="form-check mb-2">
+                            <input className="form-check-input" type="checkbox" id="reconcileLogAsTransaction" checked={reconcileForm.logAsTransaction} onChange={e => handleReconcileFieldChange('logAsTransaction', e.target.checked)} />
+                            <label className="form-check-label" htmlFor="reconcileLogAsTransaction">Also record this as an Expense/Income transaction</label>
+                        </div>
+                        {reconcileAccount && reconcileForm.actualBalance !== '' && !isNaN(parseFloat(reconcileForm.actualBalance)) && (() => {
+                            const computedBalance = DataService.computeBankAccountBalance(reconcileAccount);
+                            const delta = Math.round((parseFloat(reconcileForm.actualBalance) - computedBalance) * 100) / 100;
+                            if (delta === 0) {
+                                return <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}><i className="fas fa-check me-1"></i>Already matches — no adjustment needed.</div>;
+                            }
+                            const isLiability = DataService.LIABILITY_ACCOUNT_TYPES.includes(reconcileAccount.accountType);
+                            const asExpense = isLiability ? delta > 0 : delta < 0;
+                            if (!reconcileForm.logAsTransaction) {
+                                return (
+                                    <div className="alert alert-secondary py-2" style={{fontSize: '0.82rem'}}>
+                                        <i className="fas fa-info-circle me-1"></i>This will adjust the tracked balance by {ValidationUtils.formatCurrency(Math.abs(delta), reconcileAccount.currency)} and update Net Worth — it won't appear in your Expense/Income history.
+                                    </div>
+                                );
+                            }
+                            return (
+                                <React.Fragment>
+                                    <div className="alert alert-warning py-2" style={{fontSize: '0.82rem'}}>
+                                        <i className="fas fa-exclamation-triangle me-1"></i>This will record {asExpense ? 'an expense' : 'an income'} of {ValidationUtils.formatCurrency(Math.abs(delta), reconcileAccount.currency)}.
+                                    </div>
+                                    {asExpense && (
+                                        <React.Fragment>
+                                            <div className="form-group mb-2">
+                                                <label>Category</label>
+                                                <select className={'form-select ' + (reconcileErrors.categoryId ? 'is-invalid' : '')} value={reconcileForm.categoryId} onChange={e => handleReconcileFieldChange('categoryId', e.target.value)}>
+                                                    <option value="">Select a category</option>
+                                                    {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                                                </select>
+                                                {reconcileErrors.categoryId && <div className="invalid-feedback d-block">{reconcileErrors.categoryId}</div>}
+                                            </div>
+                                            {reconcileCategory && reconcileCategory.subcategories.length > 0 && (
+                                                <div className="form-group mb-2">
+                                                    <label>Subcategory</label>
+                                                    <select className={'form-select ' + (reconcileErrors.subcategory ? 'is-invalid' : '')} value={reconcileForm.subcategory} onChange={e => handleReconcileFieldChange('subcategory', e.target.value)}>
+                                                        <option value="">Select a subcategory</option>
+                                                        {reconcileCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
+                                                    </select>
+                                                    {reconcileErrors.subcategory && <div className="invalid-feedback d-block">{reconcileErrors.subcategory}</div>}
+                                                </div>
+                                            )}
+                                        </React.Fragment>
+                                    )}
+                                </React.Fragment>
+                            );
+                        })()}
+                        {reconcileErrors.general && <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>{reconcileErrors.general}</div>}
+                        <div className="form-group mb-2">
+                            <label>Notes (optional)</label>
+                            <input type="text" className="form-control" value={reconcileForm.notes} onChange={e => handleReconcileFieldChange('notes', e.target.value)} />
+                        </div>
+                        <button type="submit" className="btn btn-primary btn-sm" disabled={reconcileSubmitting}>
+                            {reconcileSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Reconciling…</> : 'Reconcile'}
+                        </button>{' '}
+                        <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelReconcile}>Cancel</button>
                     </form>
                 </div>
             )}
