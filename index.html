@@ -2940,18 +2940,21 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
     const [showBudgets, setShowBudgets] = useState(false);
     const [budgetChanges, setBudgetChanges] = useState({});
     const [categoryBudgetModes, setCategoryBudgetModes] = useState({});
-    const [editingPerson, setEditingPerson] = useState(() => activeView.length === 1 ? resolveActiveViewValue(activeView) : ''); // '' = own, PersonSelect convention
-    const editingPersonKey = editingPerson === '' ? 'own' : editingPerson; // personBudgets key convention
-    // Re-derive which categories are in subcategory-budget mode whenever the person being
-    // edited changes, and drop any unsaved edits so they can't leak onto the wrong person.
+    // Budgets are only editable while a single person is active — with multiple people
+    // selected there's no unambiguous "whose budget" for a plain input to mean, and letting
+    // the user switch between people mid-edit risks silently discarding unsaved changes for
+    // whoever they switch away from. editingPersonKey is null whenever editing is blocked.
+    const isSingleView = activeView.length === 1;
+    const editingPersonKey = isSingleView ? (resolveActiveViewValue(activeView) === '' ? 'own' : resolveActiveViewValue(activeView)) : null;
     useEffect(() => {
+        if (!editingPersonKey) { setCategoryBudgetModes({}); setBudgetChanges({}); return; }
         const modes = {};
         categories.forEach(cat => { if (cat.personBudgets && cat.personBudgets[editingPersonKey] && cat.personBudgets[editingPersonKey].useSubcategoryBudgets) modes[cat.id] = true; });
         setCategoryBudgetModes(modes);
         setBudgetChanges({});
     }, [editingPersonKey, categories]);
-    const hasBudgetCurrencyMismatch = categories.some(cat => { const pb = cat.personBudgets && cat.personBudgets[editingPersonKey]; return pb && pb.budgetCurrency && pb.budgetCurrency !== defaultCurrency && (pb.monthlyBudget > 0 || (pb.subcategoryBudgets && Object.values(pb.subcategoryBudgets).some(v => v > 0))); });
-    const handleResetAllBudgets = async () => { try { await DataService.resetAllBudgets(defaultCurrency, editingPersonKey); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budgets' }); } };
+    const hasBudgetCurrencyMismatch = !!editingPersonKey && categories.some(cat => { const pb = cat.personBudgets && cat.personBudgets[editingPersonKey]; return pb && pb.budgetCurrency && pb.budgetCurrency !== defaultCurrency && (pb.monthlyBudget > 0 || (pb.subcategoryBudgets && Object.values(pb.subcategoryBudgets).some(v => v > 0))); });
+    const handleResetAllBudgets = async () => { if (!editingPersonKey) return; try { await DataService.resetAllBudgets(defaultCurrency, editingPersonKey); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budgets' }); } };
 
     const handleAddCategory = (e) => { e.preventDefault(); const validation = ValidationUtils.validateCategory({ name: newCategoryName }); if (!validation.isValid) { setErrors(validation.errors); return; } const existingCategory = categories.find(cat => cat.name.toLowerCase() === newCategoryName.trim().toLowerCase()); if (existingCategory) { setErrors({ name: 'Category name already exists' }); return; } DataService.addCategory({ name: newCategoryName.trim() }); setNewCategoryName(''); setErrors({}); onUpdate(); };
     const handleUpdateCategory = (categoryId, newName) => { const validation = ValidationUtils.validateCategory({ name: newName }); if (!validation.isValid) { setErrors({ [categoryId]: validation.errors.name }); return; } const existingCategory = categories.find(cat => cat.id !== categoryId && cat.name.toLowerCase() === newName.trim().toLowerCase()); if (existingCategory) { setErrors({ [categoryId]: 'Category name already exists' }); return; } DataService.updateCategory(categoryId, { name: newName.trim() }); setEditingCategory(null); setErrors({}); onUpdate(); };
@@ -2996,6 +2999,16 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
     const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
     const getCategoryTotalBudget = (category) => { if (categoryBudgetModes[category.id]) { return category.subcategories.reduce((sum, sub) => sum + (parseFloat(getCurrentBudgetValue(category.id, 'subcategory', sub)) || 0), 0); } return parseFloat(getCurrentBudgetValue(category.id, 'category')) || 0; };
     const totalBudget = categories.reduce((sum, category) => sum + getCategoryTotalBudget(category), 0);
+    // Read-only preview of what Summary's Monthly Budget Overview will show for a category —
+    // sums each active person's effective budget the same way (no currency conversion,
+    // mirroring DataService.getBudgetSummary's existing simplification) so the two screens agree.
+    const getCombinedCategoryBudget = (category) => activeView.reduce((sum, p) => {
+        const pb = category.personBudgets && category.personBudgets[p];
+        if (!pb) return sum;
+        const amt = (pb.useSubcategoryBudgets && pb.subcategoryBudgets) ? Object.values(pb.subcategoryBudgets).reduce((s, v) => s + (v || 0), 0) : (pb.monthlyBudget || 0);
+        return sum + amt;
+    }, 0);
+    const combinedTotalBudget = categories.reduce((sum, category) => sum + getCombinedCategoryBudget(category), 0);
 
     return (
         <div className="screen">
@@ -3004,10 +3017,9 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                 {hasUnsavedChanges && (<button className="btn btn-success btn-sm" onClick={saveBudgetChanges}><i className="fas fa-save"></i> Save Budget Changes</button>)}
             </div>
             {errors.delete && (<div className="alert alert-danger">{errors.delete}</div>)}
-            {activeView.length > 1 && (
-                <div className="form-group mb-3" style={{maxWidth: '260px'}}>
-                    <label className="budget-label">Editing budget for:</label>
-                    <PersonSelect value={editingPerson} onChange={setEditingPerson} activeView={activeView} />
+            {!isSingleView && (
+                <div className="alert alert-info" style={{marginBottom: '1rem'}}>
+                    <i className="fas fa-info-circle me-2"></i>Showing the combined budget across everyone selected in Active View — matches Summary's Monthly Budget Overview. Switch to an individual view to edit a person's budget.
                 </div>
             )}
             {hasBudgetCurrencyMismatch && (
@@ -3048,6 +3060,7 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                                     <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(category.id)} title="Delete"><i className="fas fa-trash"></i></button>
                                 </div>
                             </div>
+                            {isSingleView && (
                             <div className="category-budget-inline">
                                 {category.subcategories.length > 0 && (
                                     <div className="budget-mode-toggle">
@@ -3100,6 +3113,32 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                                     return totalCategoryBudget > 0 ? (<div className="category-total-budget"><div className="total-budget-display"><strong>Total for {category.name}: {ValidationUtils.formatCurrency(totalCategoryBudget, displayCurrency)}</strong></div></div>) : null;
                                 })()}
                             </div>
+                            )}
+                            {!isSingleView && (() => {
+                                const subcatModePeople = activeView.filter(p => category.personBudgets && category.personBudgets[p] && category.personBudgets[p].useSubcategoryBudgets);
+                                return (
+                                    <div className="category-budget-inline" style={{opacity: 0.75}}>
+                                        <div className="budget-input-row">
+                                            <label className="budget-label"><i className="fas fa-calculator"></i> Combined Category Budget (read-only):</label>
+                                            <div className="total-budget-display"><strong>{ValidationUtils.formatCurrency(getCombinedCategoryBudget(category), defaultCurrency)}</strong></div>
+                                        </div>
+                                        {subcatModePeople.length > 0 && category.subcategories.length > 0 && (
+                                            <div className="subcategory-budgets">
+                                                <div className="subcategory-budget-header"><h6>Subcategory Budgets (combined):</h6></div>
+                                                {category.subcategories.map(subcategory => {
+                                                    const subTotal = subcatModePeople.reduce((sum, p) => sum + ((category.personBudgets[p].subcategoryBudgets && category.personBudgets[p].subcategoryBudgets[subcategory]) || 0), 0);
+                                                    return (
+                                                        <div key={subcategory} className="budget-input-row subcategory-budget-row">
+                                                            <label className="budget-label subcategory-label">{subcategory}:</label>
+                                                            <div className="total-budget-display">{ValidationUtils.formatCurrency(subTotal, defaultCurrency)}</div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })()}
                             {addingSubcategoryTo === category.id && (
                                 <div className="add-subcategory-form">
                                     <div className="input-group input-group-sm">
@@ -3140,9 +3179,13 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                     <div className="summary-content">
                         <div className="summary-icon"><i className="fas fa-calculator"></i></div>
                         <div className="summary-info">
-                            <h5>Total Monthly Budget</h5>
-                            <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget, hasBudgetCurrencyMismatch ? categories.find(c => c.personBudgets && c.personBudgets[editingPersonKey] && c.personBudgets[editingPersonKey].budgetCurrency)?.personBudgets[editingPersonKey].budgetCurrency || defaultCurrency : defaultCurrency)}</div>
-                            <div className="summary-note">{categories.filter(cat => getCategoryTotalBudget(cat) > 0).length} of {categories.length} categories have budgets set</div>
+                            <h5>Total Monthly Budget{!isSingleView ? ' (combined, read-only)' : ''}</h5>
+                            {isSingleView ? (
+                                <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget, hasBudgetCurrencyMismatch ? categories.find(c => c.personBudgets && c.personBudgets[editingPersonKey] && c.personBudgets[editingPersonKey].budgetCurrency)?.personBudgets[editingPersonKey].budgetCurrency || defaultCurrency : defaultCurrency)}</div>
+                            ) : (
+                                <div className="total-amount">{ValidationUtils.formatCurrency(combinedTotalBudget, defaultCurrency)}</div>
+                            )}
+                            <div className="summary-note">{categories.filter(cat => (isSingleView ? getCategoryTotalBudget(cat) : getCombinedCategoryBudget(cat)) > 0).length} of {categories.length} categories have budgets set</div>
                         </div>
                     </div>
                 </div>
@@ -3962,7 +4005,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                             const effSub = getEffectiveSubcategoryBudget(category, subcatName, now, person);
                             subcatBudget += await convertBudgetAmount(effSub.amount, effSub.currency);
                         }
-                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0, hasBudget: true }); }
+                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0, hasBudget: subcatBudget > 0 }); }
                     }
                 } else {
                     // Nobody currently active budgets this category at the subcategory level. Still
@@ -3973,7 +4016,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                         if (subcatSpent > 0) { subcats.push({ name: subcatName, budget: 0, spent: subcatSpent, remaining: 0, percentage: 0, hasBudget: false }); }
                     }
                 }
-                return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, subcategories: subcats };
+                return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, hasBudget: budget > 0, subcategories: subcats };
             });
             const summary = (await Promise.all(summaryPromises)).filter(item => item.budget > 0 || item.spent > 0);
             setBudgetData(summary);
@@ -4202,11 +4245,20 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                 </button>
                                             )}
                                         </div>
-                                        <div className="budget-bar"><div className={'budget-bar-fill ' + (budgetItem.percentage > 100 ? 'over-budget' : budgetItem.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(budgetItem.percentage, 100) + '%' }}></div></div>
-                                        <div className="budget-amounts">
-                                            <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}</span>
-                                            <span className={'budget-remaining ' + (budgetItem.remaining >= 0 ? 'positive' : 'negative')}>{budgetItem.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining), defaultCurrency)}</span>
-                                        </div>
+                                        {budgetItem.hasBudget ? (
+                                            <React.Fragment>
+                                                <div className="budget-bar"><div className={'budget-bar-fill ' + (budgetItem.percentage > 100 ? 'over-budget' : budgetItem.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(budgetItem.percentage, 100) + '%' }}></div></div>
+                                                <div className="budget-amounts">
+                                                    <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}</span>
+                                                    <span className={'budget-remaining ' + (budgetItem.remaining >= 0 ? 'positive' : 'negative')}>{budgetItem.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining), defaultCurrency)}</span>
+                                                </div>
+                                            </React.Fragment>
+                                        ) : (
+                                            <div className="budget-amounts">
+                                                <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}</span>
+                                                <span className="budget-remaining" style={{color: '#6c757d'}}>No budget set</span>
+                                            </div>
+                                        )}
                                         {isExpanded && hasSubcats && (
                                             <div style={{marginTop: '0.6rem', paddingLeft: '0.85rem', borderLeft: '2px solid #e9ecef'}}>
                                                 {budgetItem.subcategories.map(sub => (
