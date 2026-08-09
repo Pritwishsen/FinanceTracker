@@ -1197,7 +1197,7 @@ class DataService {
         return this.getBankAccounts()
             .filter(a => !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType) && !a.isPrimary)
             .filter(a => !activeView || matchesActiveView(a.person, activeView))
-            .map(a => ({ id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, isBankAccount: true }));
+            .map(a => ({ id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, country: a.country, isBankAccount: true }));
     }
     // Display-only mirror of getBankAssetItems, for the opposite set of accounts (primary,
     // asset-type). Its balance is already counted via computeWallet()'s Wallet figure — this
@@ -1210,7 +1210,7 @@ class DataService {
         return this.getBankAccounts()
             .filter(a => a.isPrimary && !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType))
             .filter(a => !activeView || matchesActiveView(a.person, activeView))
-            .map(a => ({ id: 'bank-primary-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, isBankAccount: true, isPrimaryWallet: true }));
+            .map(a => ({ id: 'bank-primary-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat.id, subcategory: a.accountType, type: 'asset', person: a.person, country: a.country, isBankAccount: true, isPrimaryWallet: true }));
     }
     // Every Credit Card/Loan bank account (primary or not — Wallet-folding only ever applies
     // to asset-type primaries), shaped as a read-only Net Worth liability item under the
@@ -1222,7 +1222,7 @@ class DataService {
             .filter(a => !activeView || matchesActiveView(a.person, activeView))
             .map(a => {
                 const cat = this.getOrCreateNetWorthCategoryByName('liability', categoryNameFor[a.accountType]);
-                return { id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat ? cat.id : null, subcategory: a.accountType, type: 'liability', person: a.person, isBankAccount: true };
+                return { id: 'bank-' + a.id, name: a.accountName, value: this.computeBankAccountBalance(a), currency: a.currency, categoryId: cat ? cat.id : null, subcategory: a.accountType, type: 'liability', person: a.person, country: a.country, isBankAccount: true };
             })
             .filter(item => item.categoryId != null);
     }
@@ -1817,8 +1817,8 @@ class DataService {
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); this.recordDeletion('debts', id); } }
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
-    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person }, activeView) {
-        const item = { id: DataService._uniqueId(), name, value: parseFloat(value), currency, categoryId, subcategory: subcategory || '', type, notes: notes||'', person: person||'own', updatedAt: new Date().toISOString() };
+    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person, country }, activeView) {
+        const item = { id: DataService._uniqueId(), name, value: parseFloat(value), originalAmount: parseFloat(value), currency, categoryId, subcategory: subcategory || '', type, notes: notes||'', person: person||'own', country: country || '', updatedAt: new Date().toISOString() };
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(activeView); return item;
     }
@@ -2041,6 +2041,16 @@ class DataService {
             changed = true;
         });
         if (changed) this.saveCategories();
+    }
+    // One-time migration stamping originalAmount = value onto any pre-existing net worth item
+    // that predates this field. Idempotent — safe to call unconditionally on every reload.
+    static migrateNetWorthOriginalAmounts() {
+        const items = this.getNetWorthItems();
+        let changed = false;
+        items.forEach(item => {
+            if (item.originalAmount == null) { item.originalAmount = item.value; changed = true; }
+        });
+        if (changed) this.saveNetWorthItems(items);
     }
     static clearAllUserData() {
         // Wipe every financeApp_* key and cloud file-ID cache from localStorage
@@ -4318,12 +4328,14 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 });
                 const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
                 const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
-                const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas);
+                const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas && !t.toAssetId);
+                const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId);
                 const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
                 const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
                 const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
                 const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
                 const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
                 if (transfers.length === 0) return null;
@@ -4414,6 +4426,44 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                 </React.Fragment>
                             ) : (
                                 <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No account transfers in the selected period.</div>
+                            )}
+                        </div>
+                        <div style={{marginTop: '1.25rem'}}>
+                            <h5>Asset Funding</h5>
+                            {assetFundingTransfers.length > 0 ? (
+                                <React.Fragment>
+                                <div style={{overflowX: 'auto'}}>
+                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                        <thead>
+                                            <tr><th>From Account</th><th>Asset</th><th>Amount</th><th>Date</th><th>Note</th><th></th></tr>
+                                        </thead>
+                                        <tbody>
+                                            {assetFundingTransfers.map(t => (
+                                                <tr key={t.id}>
+                                                    <td>{accountLabel(t.fromAccountId)}</td>
+                                                    <td><i className="fas fa-chart-line me-1"></i>{t.toAssetName || 'Unknown asset'}</td>
+                                                    <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
+                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                    <td><span className="badge bg-secondary">Logged for audit</span></td>
+                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                    {Object.keys(assetFundingTotals).length === 1 ? (
+                                        <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(assetFundingTotals)[0], Object.keys(assetFundingTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total:</strong>
+                                            {Object.entries(assetFundingTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                </div>
+                                </React.Fragment>
+                            ) : (
+                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No asset funding transfers in the selected period.</div>
                             )}
                         </div>
                     </React.Fragment>
@@ -8446,12 +8496,12 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     );
 }
 
-function NetWorth({ defaultCurrency, activeView, assetCategories = [], liabilityCategories = [] }) {
+function NetWorth({ defaultCurrency, activeView, assetCategories = [], liabilityCategories = [], onUpdate }) {
     const [items, setItems] = useState(() => DataService.getNetWorthItems());
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView) });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: '', fundAccountId: '' });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -8459,6 +8509,11 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [valuationItem, setValuationItem] = useState(null);
     const [valuationValue, setValuationValue] = useState('');
     const [valuationError, setValuationError] = useState('');
+    const [bankAccounts] = useState(() => DataService.getBankAccounts());
+    const [addMoneyItem, setAddMoneyItem] = useState(null);
+    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '' });
+    const [addMoneyErrors, setAddMoneyErrors] = useState({});
+    const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
 
     // Reseed the form's person whenever the active view changes (only when not mid-edit),
     // so a freshly-opened Add form defaults to whoever's view is currently active.
@@ -8533,24 +8588,24 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const openAddForm = () => {
         setEditingItem(null);
         const firstAssetCat = assetCategories && assetCategories[0];
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView) });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: '', fundAccountId: '' });
         setFormErrors({});
         setShowForm(true);
     };
 
     const openEditForm = (item) => {
         setEditingItem(item);
-        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own' });
+        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '' });
         setFormErrors({});
         setShowForm(true);
     };
 
     const handleTypeChange = (type) => {
         const firstCat = categoriesForType(type)[0];
-        setForm(f => ({ ...f, type, categoryId: firstCat ? firstCat.id : '', subcategory: '' }));
+        setForm(f => ({ ...f, type, categoryId: firstCat ? firstCat.id : '', subcategory: '', fundAccountId: '' }));
     };
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         const errors = {};
         if (!form.name.trim()) errors.name = 'Name is required';
@@ -8559,9 +8614,27 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         if (editingItem) {
             // Base-amount correction (typo/data-entry fix) — not a real valuation movement,
             // so it must not show up as a gain/loss in the history "Change" column.
-            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own' }, { skipHistory: true });
+            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own', country: form.country || '' }, { skipHistory: true });
         } else {
-            DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own' }, activeView);
+            const newItem = DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own', country: form.country || '' }, activeView);
+            if (form.type === 'asset' && form.fundAccountId) {
+                const account = bankAccounts.find(a => a.id === parseInt(form.fundAccountId));
+                if (account) {
+                    const amount = parseFloat(form.value);
+                    // Funded via the Transfer ledger (not an Expense) — this is an investment
+                    // move, not spending; it's logged in Summary's Asset Funding table instead.
+                    DataService.addTransfer({
+                        date: new Date().toISOString().split('T')[0],
+                        fromAccountId: account.id, toAccountId: null,
+                        fromAmount: amount, toAmount: amount,
+                        isOverseas: false, conversionRate: 1, fee: 0,
+                        feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+                        toAssetId: newItem.id, toAssetName: newItem.name,
+                        notes: 'Investment funding — logged for audit'
+                    });
+                    if (onUpdate) await onUpdate();
+                }
+            }
         }
         setShowForm(false);
         setEditingItem(null);
@@ -8582,6 +8655,42 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         reload();
     };
 
+    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '' }); setAddMoneyErrors({}); };
+
+    const handleAddMoneySubmit = async (e) => {
+        e.preventDefault();
+        const errors = {};
+        const amount = parseFloat(addMoneyForm.amount);
+        if (!addMoneyForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
+        if (Object.keys(errors).length > 0) { setAddMoneyErrors(errors); return; }
+        setAddMoneySubmitting(true);
+        try {
+            const currentOriginal = addMoneyItem.originalAmount != null ? addMoneyItem.originalAmount : addMoneyItem.value;
+            DataService.updateNetWorthItem(addMoneyItem.id, { originalAmount: currentOriginal + amount, value: addMoneyItem.value + amount }, { activeView });
+            if (addMoneyForm.accountId) {
+                const account = bankAccounts.find(a => a.id === parseInt(addMoneyForm.accountId));
+                if (account) {
+                    DataService.addTransfer({
+                        date: new Date().toISOString().split('T')[0],
+                        fromAccountId: account.id, toAccountId: null,
+                        fromAmount: amount, toAmount: amount,
+                        isOverseas: false, conversionRate: 1, fee: 0,
+                        feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+                        toAssetId: addMoneyItem.id, toAssetName: addMoneyItem.name,
+                        notes: 'Investment funding — logged for audit'
+                    });
+                    if (onUpdate) await onUpdate();
+                }
+            }
+            setAddMoneyItem(null);
+            setAddMoneyForm({ amount: '', accountId: '' });
+            setAddMoneyErrors({});
+            reload();
+        } finally {
+            setAddMoneySubmitting(false);
+        }
+    };
+
     const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
     const assetItems = visibleItems.filter(i => i.type === 'asset');
     const liabilityItems = visibleItems.filter(i => i.type === 'liability');
@@ -8590,6 +8699,24 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     // Display-only — see getPrimaryWalletBankItems's comment. Never fold into assetItems/totalAssets.
     const primaryWalletItems = DataService.getPrimaryWalletBankItems(activeView);
     const primaryWalletItemsByCat = groupBy(primaryWalletItems, 'categoryId');
+
+    // Country breakdown: a new categorization axis, separate from totalAssets/netWorth, so
+    // primaryWalletItems (normally excluded elsewhere to avoid double-counting into Wallet) is
+    // safe to include here — it's real money in a real country. Debts have no country field
+    // (out of scope) so "I Owe" liabilities aren't represented here. No currency conversion —
+    // summed per country per currency, using the same fmt() every item card already uses.
+    const countryBreakdown = {};
+    [...visibleItems, ...primaryWalletItems].forEach(item => {
+        const country = item.country || 'Not specified';
+        if (!countryBreakdown[country]) countryBreakdown[country] = {};
+        if (!countryBreakdown[country][item.currency]) countryBreakdown[country][item.currency] = { asset: 0, liability: 0 };
+        countryBreakdown[country][item.currency][item.type] += item.value;
+    });
+    const countryNames = Object.keys(countryBreakdown).sort((a, b) => {
+        if (a === 'Not specified') return 1;
+        if (b === 'Not specified') return -1;
+        return a.localeCompare(b);
+    });
 
     // Only show snapshots taken under a view that overlaps the currently active one — same
     // pattern as debts' createdInView — so switching person doesn't surface the other
@@ -8622,6 +8749,20 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
                     )
                 )}
+                {item.type === 'asset' && !item.isBankAccount && !item.isPrimaryWallet && item.originalAmount != null && (() => {
+                    const original = item.originalAmount;
+                    const pnlPct = original > 0 ? ((item.value - original) / original) * 100 : null;
+                    return (
+                        <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>
+                            Original: {fmt(original, item.currency)}
+                            {pnlPct !== null && (
+                                <span style={{marginLeft:'6px',fontWeight:600,color: pnlPct > 0 ? '#198754' : pnlPct < 0 ? '#dc3545' : '#6c757d'}}>
+                                    {pnlPct > 0 ? '+' : ''}{pnlPct.toFixed(1)}%
+                                </span>
+                            )}
+                        </div>
+                    );
+                })()}
                 {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
             </div>
             {item.isPrimaryWallet ? (
@@ -8634,6 +8775,11 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 </div>
             ) : (
                 <div style={{display:'flex',gap:'4px',flexShrink:0}}>
+                    {item.type === 'asset' && (
+                        <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Add money" onClick={() => openAddMoneyForm(item)}>
+                            <i className="fas fa-piggy-bank"></i>
+                        </button>
+                    )}
                     <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Update valuation (logs a change)" onClick={() => openValuationForm(item)}>
                         <i className="fas fa-chart-line"></i>
                     </button>
@@ -8703,6 +8849,28 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 </div>
             </div>
 
+            {/* Breakdown by Country — original currency, no conversion */}
+            {countryNames.length > 0 && (
+                <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
+                    <h6 style={{marginBottom:'0.6rem',fontSize:'0.85rem',fontWeight:600}}><i className="fas fa-globe me-2"></i>Net Worth by Country</h6>
+                    {countryNames.map(country => (
+                        <div key={country} style={{marginBottom:'0.5rem',paddingBottom:'0.5rem',borderBottom:'1px solid #e9ecef'}}>
+                            <div style={{fontWeight:600,fontSize:'0.82rem',marginBottom:'0.25rem',color: country === 'Not specified' ? '#6c757d' : 'inherit'}}>{country}</div>
+                            {Object.entries(countryBreakdown[country]).map(([currency, totals]) => (
+                                <div key={currency} style={{display:'flex',justifyContent:'space-between',fontSize:'0.78rem',marginBottom:'0.15rem'}}>
+                                    <span style={{color:'#6c757d'}}>{currency}</span>
+                                    <span>
+                                        {totals.asset > 0 && <span style={{color:'#198754'}}>{fmt(totals.asset, currency)} assets</span>}
+                                        {totals.asset > 0 && totals.liability > 0 && '   '}
+                                        {totals.liability > 0 && <span style={{color:'#dc3545'}}>{fmt(totals.liability, currency)} liabilities</span>}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    ))}
+                </div>
+            )}
+
             {/* Add button */}
             <div style={{padding:'0.25rem 1rem 0.75rem',display:'flex',gap:'8px'}}>
                 <button type="button" className={'btn btn-sm flex-fill ' + (showForm ? 'btn-secondary' : 'btn-primary')}
@@ -8759,11 +8927,33 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                 </div>
                             );
                         })()}
+                        <div className="mb-2">
+                            <select className="form-select form-select-sm" value={form.country} onChange={e => setForm(f => ({...f, country: e.target.value}))}>
+                                <option value="">Country: Not specified</option>
+                                {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                        </div>
                         {activeView.length > 1 && (
                             <div className="mb-2">
                                 <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
                                 <PersonSelect value={form.person} onChange={v => setForm(f => ({...f, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
                             </div>
+                        )}
+                        {!editingItem && form.type === 'asset' && (
+                            <React.Fragment>
+                                <div className="mb-2">
+                                    <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Fund from bank account (optional)</label>
+                                    <select className="form-select form-select-sm" value={form.fundAccountId} onChange={e => setForm(f => ({...f, fundAccountId: e.target.value}))}>
+                                        <option value="">Don't deduct from a bank account</option>
+                                        {bankAccounts.filter(a => a.currency === form.currency).map(a => (<option key={a.id} value={a.id}>{a.accountName} ({a.currency})</option>))}
+                                    </select>
+                                </div>
+                                {form.fundAccountId && (
+                                    <div className="alert alert-warning py-2" style={{fontSize:'0.78rem'}}>
+                                        <i className="fas fa-exclamation-triangle me-1"></i>This will deduct {fmt(parseFloat(form.value) || 0, form.currency)} from the selected account and log it in Summary as a transfer — kept for audit, not counted as an expense.
+                                    </div>
+                                )}
+                            </React.Fragment>
                         )}
                         <div className="mb-3">
                             <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
@@ -8943,6 +9133,42 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setValuationItem(null)}>Cancel</button>
                                 <button type="submit" className="btn btn-success btn-sm"><i className="fas fa-chart-line me-1"></i>Save Valuation</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+            {/* Add Money modal */}
+            {addMoneyItem && (
+                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <form className="modal-content" onSubmit={handleAddMoneySubmit}>
+                            <div className="modal-header"><h5 className="modal-title">Add Money — {addMoneyItem.name}</h5></div>
+                            <div className="modal-body">
+                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current: {fmt(addMoneyItem.value, addMoneyItem.currency)}. This adds fresh money — both the original and current amount increase.</p>
+                                <div className="mb-2">
+                                    <label className="form-label">Amount to add ({addMoneyItem.currency})</label>
+                                    <input type="number" step="0.01" className={'form-control' + (addMoneyErrors.amount ? ' is-invalid' : '')} value={addMoneyForm.amount} onChange={e => setAddMoneyForm(f => ({...f, amount: e.target.value}))} autoFocus />
+                                    {addMoneyErrors.amount && <div className="invalid-feedback">{addMoneyErrors.amount}</div>}
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Fund from bank account (optional)</label>
+                                    <select className="form-select" value={addMoneyForm.accountId} onChange={e => setAddMoneyForm(f => ({...f, accountId: e.target.value}))}>
+                                        <option value="">Don't deduct from a bank account</option>
+                                        {bankAccounts.filter(a => a.currency === addMoneyItem.currency).map(a => (<option key={a.id} value={a.id}>{a.accountName} ({a.currency})</option>))}
+                                    </select>
+                                </div>
+                                {addMoneyForm.accountId && (
+                                    <div className="alert alert-warning py-2" style={{fontSize:'0.82rem'}}>
+                                        <i className="fas fa-exclamation-triangle me-1"></i>This will deduct {fmt(parseFloat(addMoneyForm.amount) || 0, addMoneyItem.currency)} from the selected account and log it in Summary as a transfer to "{addMoneyItem.name}" — kept for audit, not counted as an expense.
+                                    </div>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setAddMoneyItem(null)}>Cancel</button>
+                                <button type="submit" className="btn btn-success btn-sm" disabled={addMoneySubmitting}>
+                                    {addMoneySubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Adding…</> : <><i className="fas fa-piggy-bank me-1"></i>Add Money</>}
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -9627,6 +9853,7 @@ function App() {
         // regardless of which path (mount vs. restore vs. merge) last populated the data.
         await DataService.initialize();
         DataService.migrateCategoryBudgetsToPersonScope();
+        DataService.migrateNetWorthOriginalAmounts();
         const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
         ]);
@@ -10000,7 +10227,7 @@ function App() {
             case 'manage': case 'bills': case 'recurring': case 'debts':
                 return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
-            case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} />;
+            case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
