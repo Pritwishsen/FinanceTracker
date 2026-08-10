@@ -143,8 +143,25 @@ class CurrencyService {
         return fallback;
     }
 
+    static _customRateAmount(amount, fromCurrency, toCurrency) {
+        const custom = DataService.getCustomCurrencies().find(c => c.code === fromCurrency);
+        if (custom && custom.rateAgainst === toCurrency) return Math.round(amount * custom.rate * 100) / 100;
+        const customTo = DataService.getCustomCurrencies().find(c => c.code === toCurrency);
+        if (customTo && customTo.rateAgainst === fromCurrency) return Math.round((amount / customTo.rate) * 100) / 100;
+        return null;
+    }
+
     static async convertCurrency(amount, fromCurrency, toCurrency) {
         if (fromCurrency === toCurrency) return amount;
+        // A custom currency isn't reliably known to the live-rate API (fetchExchangeRates
+        // masks unrecognized base currencies by silently substituting GBP's fallback table —
+        // see lookupLiveRate for the honest version). Trust the stored rate snapshot instead
+        // of risking that masked, mislabeled fallback for either side of the pair.
+        const isCustomPair = DataService.getCustomCurrencies().some(c => c.code === fromCurrency || c.code === toCurrency);
+        if (isCustomPair) {
+            const custom = this._customRateAmount(amount, fromCurrency, toCurrency);
+            return custom !== null ? custom : amount;
+        }
         try {
             const rates = await this.fetchExchangeRates(fromCurrency);
             if (rates[toCurrency]) {
@@ -167,12 +184,16 @@ class CurrencyService {
 
     static getCurrencySymbol(currencyCode) {
         const c = this.supportedCurrencies[currencyCode];
-        return c ? c.symbol : currencyCode;
+        if (c) return c.symbol;
+        const custom = DataService.getCustomCurrencies().find(cc => cc.code === currencyCode);
+        return custom ? (custom.symbol || custom.code) : currencyCode;
     }
 
     static getCurrencyName(currencyCode) {
         const c = this.supportedCurrencies[currencyCode];
-        return c ? c.name : currencyCode;
+        if (c) return c.name;
+        const custom = DataService.getCustomCurrencies().find(cc => cc.code === currencyCode);
+        return custom ? custom.name : currencyCode;
     }
 
     static formatCurrency(amount, currencyCode) {
@@ -187,6 +208,42 @@ class CurrencyService {
         } catch (error) {
             return 1;
         }
+    }
+
+    static async lookupLiveRate(fromCode, toCode) {
+        if (fromCode === toCode) return 1;
+        try {
+            const response = await fetch('https://api.exchangerate-api.com/v4/latest/' + fromCode);
+            if (!response.ok) return null;
+            const data = await response.json();
+            const rate = data.rates && data.rates[toCode];
+            return typeof rate === 'number' ? rate : null;
+        } catch (error) { return null; }
+    }
+
+    static deriveSymbol(code) {
+        try {
+            const parts = new Intl.NumberFormat('en-GB', { style: 'currency', currency: code, currencyDisplay: 'narrowSymbol' }).formatToParts(0);
+            const sym = parts.find(p => p.type === 'currency');
+            return sym ? sym.value : code;
+        } catch (error) { return code; }
+    }
+
+    static getAllCurrencies() {
+        const builtIn = Object.entries(this.supportedCurrencies).map(([code, v]) => ({ code, name: v.name, symbol: v.symbol }));
+        const custom = DataService.getCustomCurrencies().map(c => ({ code: c.code, name: c.name, symbol: c.symbol || c.code }));
+        return [...builtIn, ...custom];
+    }
+
+    static convertToDefaultSync(value, fromCurrency, toCurrency) {
+        if (fromCurrency === toCurrency) return value;
+        const rates = this.fallbackRates[fromCurrency];
+        if (rates && rates[toCurrency]) return value * rates[toCurrency];
+        const custom = DataService.getCustomCurrencies().find(c => c.code === fromCurrency);
+        if (custom && custom.rateAgainst === toCurrency) return value * custom.rate;
+        const customTo = DataService.getCustomCurrencies().find(c => c.code === toCurrency);
+        if (customTo && customTo.rateAgainst === fromCurrency) return value / customTo.rate;
+        return value;
     }
 }
 window.CurrencyService = CurrencyService;
@@ -221,12 +278,13 @@ const ValidationUtils = {
             'EUR': { locale: 'en-EU', currency: 'EUR' },
             'INR': { locale: 'en-IN', currency: 'INR' }
         };
-        const config = currencyMap[currency] || currencyMap['USD'];
-        return new Intl.NumberFormat(config.locale, { style: 'currency', currency: config.currency }).format(amount);
+        const config = currencyMap[currency];
+        if (config) return new Intl.NumberFormat(config.locale, { style: 'currency', currency: config.currency }).format(amount);
+        return CurrencyService.getCurrencySymbol(currency) + amount.toFixed(2);
     },
     getCurrencySymbol: (currency = 'USD') => {
         const symbols = { 'USD': '$', 'GBP': '£', 'EUR': '€', 'INR': '₹' };
-        return symbols[currency] || '$';
+        return symbols[currency] || CurrencyService.getCurrencySymbol(currency);
     },
     formatDate: (date) => {
         return new Date(date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -1008,6 +1066,38 @@ class DataService {
         const deleted = this.data.settings.people.splice(index, 1)[0];
         this.saveSettings();
         return deleted;
+    }
+    static getCustomCurrencies() { return this.data.settings.customCurrencies || []; }
+    static addCustomCurrency({ code, name, symbol, rate, rateAgainst, isLive }) {
+        const upperCode = code.trim().toUpperCase();
+        if (!/^[A-Z]{3}$/.test(upperCode)) throw new Error('Currency code must be 3 letters');
+        const allCodes = [...Object.keys(CurrencyService.supportedCurrencies), ...this.getCustomCurrencies().map(c => c.code)];
+        if (allCodes.includes(upperCode)) throw new Error('This currency code already exists');
+        if (!this.data.settings.customCurrencies) this.data.settings.customCurrencies = [];
+        const currency = { id: DataService._uniqueId(), code: upperCode, name: name.trim(), symbol, rate, rateAgainst, isLive: !!isLive, rateUpdatedAt: new Date().toISOString() };
+        this.data.settings.customCurrencies.push(currency);
+        this.saveSettings();
+        return currency;
+    }
+    static updateCustomCurrencyRate(id, { rate, rateAgainst, isLive }) {
+        const currency = this.getCustomCurrencies().find(c => c.id === id);
+        if (!currency) return null;
+        currency.rate = rate; currency.rateAgainst = rateAgainst; currency.isLive = !!isLive; currency.rateUpdatedAt = new Date().toISOString();
+        this.saveSettings();
+        return currency;
+    }
+    static deleteCustomCurrency(id) {
+        this.data.settings.customCurrencies = this.getCustomCurrencies().filter(c => c.id !== id);
+        this.saveSettings();
+    }
+    static refreshCustomCurrencySymbols() {
+        const currencies = this.getCustomCurrencies();
+        let changed = false;
+        currencies.forEach(c => {
+            const symbol = CurrencyService.deriveSymbol(c.code);
+            if (c.symbol !== symbol) { c.symbol = symbol; changed = true; }
+        });
+        if (changed) this.saveSettings();
     }
     static migratePersonName(oldName, newName) {
         this.data.expenses.forEach(exp => { if (exp.paidBy === oldName) exp.paidBy = newName; });
@@ -2450,10 +2540,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 <div className="form-group">
                     <label htmlFor="currency">Currency *</label>
                     <select id="currency" className="form-select" value={formData.currency} onChange={(e) => handleInputChange('currency', e.target.value)}>
-                        <option value="USD">US Dollar ($)</option>
-                        <option value="GBP">British Pound (£)</option>
-                        <option value="EUR">Euro (€)</option>
-                        <option value="INR">Indian Rupee (₹)</option>
+                        {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.symbol})</option>))}
                     </select>
                 </div>
                 <div className="form-group">
@@ -3553,7 +3640,7 @@ function IncomeForm({ income, onUpdate, activeView }) {
                     <div className="form-group">
                         <label htmlFor="currency">Currency *</label>
                         <select id="currency" className="form-select" value={formData.currency} onChange={(e) => handleInputChange('currency', e.target.value)}>
-                            <option value="USD">US Dollar ($)</option><option value="GBP">British Pound (£)</option><option value="EUR">Euro (€)</option><option value="INR">Indian Rupee (₹)</option>
+                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.symbol})</option>))}
                         </select>
                     </div>
                     <div className="form-group">
@@ -4441,7 +4528,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                             {assetFundingTransfers.map(t => (
                                                 <tr key={t.id}>
                                                     <td>{accountLabel(t.fromAccountId)}</td>
-                                                    <td><i className="fas fa-chart-line me-1"></i>{t.toAssetName || 'Unknown asset'}</td>
+                                                    <td>{t.toAssetName || 'Unknown asset'}</td>
                                                     <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td><span className="badge bg-secondary">Logged for audit</span></td>
@@ -4549,6 +4636,13 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [editingPerson, setEditingPerson] = useState(null);
     const [personErrors, setPersonErrors] = useState({});
     const [showDeletePersonConfirm, setShowDeletePersonConfirm] = useState(null);
+    const [currencyForm, setCurrencyForm] = useState({ name: '', code: '' });
+    const [currencyCheck, setCurrencyCheck] = useState(null);
+    const [manualRate, setManualRate] = useState('');
+    const [currencyFormError, setCurrencyFormError] = useState('');
+    const [currencyChecking, setCurrencyChecking] = useState(false);
+    const [customCurrencies, setCustomCurrencies] = useState(() => DataService.getCustomCurrencies());
+    const [editingRateFor, setEditingRateFor] = useState(null);
     const emptyAccountForm = { accountName: '', accountRef: '', accountType: BANK_ACCOUNT_TYPES[0], country: COUNTRIES[0], currency: 'GBP', person: 'own', openingAmount: '', isPrimary: false };
     const [bankAccounts, setBankAccounts] = useState([]);
     const [accountForm, setAccountForm] = useState(emptyAccountForm);
@@ -5063,12 +5157,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         }
     };
 
-    const supportedCurrencies = [
-        { code: 'GBP', name: 'British Pound', symbol: '£' },
-        { code: 'EUR', name: 'Euro', symbol: '€' },
-        { code: 'INR', name: 'Indian Rupee', symbol: '₹' },
-        { code: 'USD', name: 'US Dollar', symbol: '$' }
-    ];
+    const supportedCurrencies = CurrencyService.getAllCurrencies();
 
     const handleSelectChange = async (e) => {
         const newCurrency = e.target.value;
@@ -5085,6 +5174,71 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const getCurrencySymbol = (code) => {
         const c = supportedCurrencies.find(cur => cur.code === code);
         return c ? c.symbol : code;
+    };
+
+    const staleCustomCurrencies = customCurrencies.filter(c => !c.isLive && c.rateAgainst !== currentCurrency);
+    const builtInCurrencyList = Object.entries(CurrencyService.supportedCurrencies).map(([code, v]) => ({ code, name: v.name, symbol: v.symbol }));
+
+    const handleCheckCurrency = async (e) => {
+        e.preventDefault();
+        setCurrencyFormError('');
+        const name = currencyForm.name.trim();
+        const code = currencyForm.code.trim().toUpperCase();
+        if (!name) { setCurrencyFormError('Currency name is required'); return; }
+        if (!/^[A-Z]{3}$/.test(code)) { setCurrencyFormError('Currency code must be 3 letters'); return; }
+        if (CurrencyService.getAllCurrencies().some(c => c.code === code)) { setCurrencyFormError('This currency code already exists'); return; }
+        setCurrencyChecking(true);
+        try {
+            const rate = await CurrencyService.lookupLiveRate(code, currentCurrency);
+            if (rate != null) setCurrencyCheck({ name, code, rate });
+            else { setCurrencyCheck({ name, code, needsManual: true }); setManualRate(''); }
+        } finally {
+            setCurrencyChecking(false);
+        }
+    };
+
+    const handleConfirmAddCurrency = () => {
+        const { name, code, rate } = currencyCheck;
+        DataService.addCustomCurrency({ code, name, symbol: CurrencyService.deriveSymbol(code), rate, rateAgainst: currentCurrency, isLive: true });
+        setCustomCurrencies(DataService.getCustomCurrencies());
+        setCurrencyForm({ name: '', code: '' });
+        setCurrencyCheck(null);
+    };
+
+    const handleSaveManualRate = (e) => {
+        e.preventDefault();
+        const rate = parseFloat(manualRate);
+        if (!manualRate || rate <= 0) { setCurrencyFormError('Enter a conversion rate greater than 0'); return; }
+        if (editingRateFor) {
+            DataService.updateCustomCurrencyRate(editingRateFor.id, { rate, rateAgainst: currentCurrency, isLive: false });
+            setEditingRateFor(null);
+        } else {
+            const { name, code } = currencyCheck;
+            DataService.addCustomCurrency({ code, name, symbol: CurrencyService.deriveSymbol(code), rate, rateAgainst: currentCurrency, isLive: false });
+        }
+        setCustomCurrencies(DataService.getCustomCurrencies());
+        setCurrencyForm({ name: '', code: '' });
+        setCurrencyCheck(null);
+        setManualRate('');
+        setCurrencyFormError('');
+    };
+
+    const handleCancelCurrencyAdd = () => {
+        setCurrencyCheck(null);
+        setManualRate('');
+        setCurrencyFormError('');
+        setEditingRateFor(null);
+    };
+
+    const handleDeleteCustomCurrency = (id) => {
+        DataService.deleteCustomCurrency(id);
+        setCustomCurrencies(DataService.getCustomCurrencies());
+    };
+
+    const openUpdateRate = (currency) => {
+        setEditingRateFor(currency);
+        setManualRate('');
+        setCurrencyFormError('');
     };
 
     return (
@@ -5158,6 +5312,119 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 <div style={{color: '#6c757d', fontSize: '0.85rem', marginTop: '0.25rem'}}>
                     {supportedCurrencies.find(c => c.code === currentCurrency) ? supportedCurrencies.find(c => c.code === currentCurrency).name : ''}
                 </div>
+            </div>
+
+            <div style={{marginTop: '1.5rem', marginBottom: '1rem'}}>
+                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
+                    <i className="fas fa-plus-circle"></i> Add Currency
+                </h5>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
+                    Add a currency not in the list above. It'll become available everywhere you can pick a currency.
+                </p>
+            </div>
+
+            {staleCustomCurrencies.length > 0 && (
+                <div className="alert alert-warning" style={{fontSize: '0.85rem'}}>
+                    <i className="fas fa-exclamation-triangle me-1"></i>
+                    These currencies need an updated rate for {currentCurrency}:{' '}
+                    {staleCustomCurrencies.map((c, i) => (
+                        <React.Fragment key={c.id}>
+                            {i > 0 && ', '}
+                            <a href="#" onClick={e => { e.preventDefault(); openUpdateRate(c); }}>{c.name}</a>
+                        </React.Fragment>
+                    ))}.
+                </div>
+            )}
+
+            {editingRateFor ? (
+                <form onSubmit={handleSaveManualRate} style={{marginBottom: '1rem'}}>
+                    <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>
+                        1 {editingRateFor.code} = ___ {currentCurrency}
+                    </label>
+                    <input type="number" step="0.0001" min="0" className={'form-control' + (currencyFormError ? ' is-invalid' : '')} value={manualRate} onChange={e => setManualRate(e.target.value)} placeholder="Conversion rate" autoFocus />
+                    {currencyFormError && <div className="invalid-feedback">{currencyFormError}</div>}
+                    <div className="alert alert-warning py-2" style={{fontSize: '0.8rem', marginTop: '0.5rem'}}>
+                        <i className="fas fa-exclamation-triangle me-1"></i>This rate won't update automatically — it'll be used for offline conversion until you update it again.
+                    </div>
+                    <div style={{display: 'flex', gap: '0.5rem'}}>
+                        <button type="submit" className="btn btn-primary btn-sm">Save Rate</button>
+                        <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
+                    </div>
+                </form>
+            ) : currencyCheck ? (
+                currencyCheck.needsManual ? (
+                    <form onSubmit={handleSaveManualRate} style={{marginBottom: '1rem'}}>
+                        <p style={{fontSize: '0.9rem'}}>No live conversion rate found for <strong>{currencyCheck.code}</strong>.</p>
+                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>
+                            1 {currencyCheck.code} = ___ {currentCurrency}
+                        </label>
+                        <input type="number" step="0.0001" min="0" className={'form-control' + (currencyFormError ? ' is-invalid' : '')} value={manualRate} onChange={e => setManualRate(e.target.value)} placeholder="Conversion rate" autoFocus />
+                        {currencyFormError && <div className="invalid-feedback">{currencyFormError}</div>}
+                        <div className="alert alert-warning py-2" style={{fontSize: '0.8rem', marginTop: '0.5rem'}}>
+                            <i className="fas fa-exclamation-triangle me-1"></i>No live rate is available for this currency. This rate won't update automatically — it'll be used for offline conversion until you update it.
+                        </div>
+                        <div style={{display: 'flex', gap: '0.5rem'}}>
+                            <button type="submit" className="btn btn-primary btn-sm">Add Currency</button>
+                            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
+                        </div>
+                    </form>
+                ) : (
+                    <div style={{marginBottom: '1rem'}}>
+                        <p style={{fontSize: '0.9rem'}}>
+                            1 {currencyCheck.code} = {currencyCheck.rate} {currentCurrency} (today's rate). Add <strong>{currencyCheck.name}</strong>?
+                        </p>
+                        <div style={{display: 'flex', gap: '0.5rem'}}>
+                            <button type="button" className="btn btn-primary btn-sm" onClick={handleConfirmAddCurrency}>Confirm & Add</button>
+                            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
+                        </div>
+                    </div>
+                )
+            ) : (
+                <form onSubmit={handleCheckCurrency} style={{marginBottom: '1rem'}}>
+                    <div className="row g-2 align-items-end">
+                        <div className="col">
+                            <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Currency Name *</label>
+                            <input type="text" className="form-control" value={currencyForm.name} onChange={e => setCurrencyForm(f => ({...f, name: e.target.value}))} placeholder="e.g., Japanese Yen" />
+                        </div>
+                        <div className="col-auto" style={{width: '110px'}}>
+                            <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Code *</label>
+                            <input type="text" className="form-control" value={currencyForm.code} maxLength={3} onChange={e => setCurrencyForm(f => ({...f, code: e.target.value.toUpperCase()}))} placeholder="JPY" />
+                        </div>
+                        <div className="col-auto">
+                            <button type="submit" className="btn btn-primary btn-sm" disabled={currencyChecking}>
+                                {currencyChecking ? <><span className="spinner-border spinner-border-sm me-1"></span>Checking…</> : 'Check Rate'}
+                            </button>
+                        </div>
+                    </div>
+                    {currencyFormError && <div className="text-danger mt-1" style={{fontSize: '0.875rem'}}>{currencyFormError}</div>}
+                </form>
+            )}
+
+            <div>
+                {builtInCurrencyList.map(c => (
+                    <div key={c.code} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef'}}>
+                        <div>
+                            <span style={{fontWeight: '600'}}>{c.symbol} {c.code} - {c.name}</span>
+                            <span className="badge bg-primary ms-2" style={{fontSize: '0.65rem'}}>Default</span>
+                        </div>
+                    </div>
+                ))}
+                {customCurrencies.map(c => (
+                    <div key={c.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef'}}>
+                        <div>
+                            <span style={{fontWeight: '600'}}>{c.symbol} {c.code} - {c.name}</span>
+                            {c.isLive ? (
+                                <span className="badge bg-success ms-2" style={{fontSize: '0.65rem'}}>Live rate</span>
+                            ) : (
+                                <span className="badge bg-secondary ms-2" style={{fontSize: '0.65rem'}}>Manual: 1 {c.code} = {c.rate} {c.rateAgainst}</span>
+                            )}
+                        </div>
+                        <div style={{display: 'flex', gap: '0.25rem'}}>
+                            <button className="btn btn-sm btn-outline-primary" onClick={() => openUpdateRate(c)} title="Update rate"><i className="fas fa-pencil-alt"></i></button>
+                            <button className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteCustomCurrency(c.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                        </div>
+                    </div>
+                ))}
             </div>
 
             <hr style={{margin: '1.5rem 0'}} />
@@ -5920,7 +6187,7 @@ function BulkUpload({ categories, onUpdate }) {
     const fileInputRef = React.useRef(null);
     const ROWS_PER_PAGE = 50;
 
-    const validCurrencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const validCurrencies = CurrencyService.getAllCurrencies().map(c => c.code);
 
     const parseCSVLine = (line) => {
         const result = [];
@@ -6437,7 +6704,7 @@ function SavingsGoals({ defaultCurrency, activeView }) {
         return { text: diffDays + ' days remaining', overdue: false };
     };
 
-    const currencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const fmt = (amount, currency) => ValidationUtils.formatCurrency(amount, currency || defaultCurrency);
     const visibleGoals = goals.filter(g => matchesActiveView(g.owner, activeView));
 
@@ -6735,7 +7002,7 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
         setLogExpenseConfirm(null);
     };
 
-    const currencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const frequencies = ['Weekly', 'Monthly', 'Quarterly', 'Yearly'];
     const fmtCurrency = (amt, cur) => ValidationUtils.formatCurrency(amt, cur || 'GBP');
 
@@ -8521,16 +8788,12 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         if (!editingItem) setForm(f => ({...f, person: resolveActiveViewValue(activeView)}));
     }, [activeView]);
 
-    const CURRENCIES = ['GBP', 'EUR', 'USD', 'INR'];
+    const CURRENCIES = CurrencyService.getAllCurrencies().map(c => c.code);
     const categoriesForType = (type) => (type === 'asset' ? assetCategories : liabilityCategories) || [];
 
     const reload = () => { setItems(DataService.getNetWorthItems()); setHistory(DataService.getNetWorthHistory()); };
 
-    const convertToDefault = (value, currency) => {
-        const rates = CurrencyService.fallbackRates[currency];
-        const rate = rates ? (rates[defaultCurrency] || 1) : 1;
-        return value * rate;
-    };
+    const convertToDefault = (value, currency) => CurrencyService.convertToDefaultSync(value, currency, defaultCurrency);
 
     const fmt = (amount, currency) => {
         try { return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(amount); }
@@ -9194,7 +9457,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
 
     const reload = () => setDebts(DataService.getDebts());
     const today = new Date().toISOString().split('T')[0];
-    const currencies = ['GBP', 'EUR', 'USD', 'INR'];
+    const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const isOverdue = (d) => d.dueDate && d.dueDate < today && !d.isSettled;
 
     // Global Active View replaces this screen's own person filter: a debt is visible if
@@ -9854,6 +10117,7 @@ function App() {
         await DataService.initialize();
         DataService.migrateCategoryBudgetsToPersonScope();
         DataService.migrateNetWorthOriginalAmounts();
+        DataService.refreshCustomCurrencySymbols();
         const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
         ]);
@@ -10213,7 +10477,15 @@ function App() {
     };
     const handleCloudGateSkip = () => { setCloudSyncGate('idle'); setCloudGateError(''); };
 
-    const handleCurrencyChange = (newCurrency) => { setDefaultCurrency(newCurrency); handleDataUpdate(); };
+    const handleCurrencyChange = (newCurrency) => {
+        setDefaultCurrency(newCurrency);
+        DataService.getCustomCurrencies().filter(c => c.isLive).forEach(async c => {
+            const rate = await CurrencyService.lookupLiveRate(c.code, newCurrency);
+            if (rate != null) DataService.updateCustomCurrencyRate(c.id, { rate, rateAgainst: newCurrency, isLive: true });
+            else DataService.updateCustomCurrencyRate(c.id, { rate: c.rate, rateAgainst: c.rateAgainst, isLive: false });
+        });
+        handleDataUpdate();
+    };
 
     const renderScreen = () => {
         switch (currentScreen) {
