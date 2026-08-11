@@ -1254,14 +1254,14 @@ class DataService {
             const rate = rates ? (rates[account.currency] || 1) : 1;
             return amount * rate;
         };
-        const linkedIncome = this.data.income.filter(i => i.accountId === account.id).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
-        const linkedExpenses = this.data.expenses.filter(e => e.accountId === account.id).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
+        const linkedIncome = this.data.income.filter(i => String(i.accountId) === String(account.id)).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
+        const linkedExpenses = this.data.expenses.filter(e => String(e.accountId) === String(account.id)).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
         // fromAmount/toAmount are always stored in the respective account's own currency
         // (see addTransfer callers), so no conversion is needed here — avoids compounding
         // conversion error on top of the rate already applied once at transfer creation.
         const transfers = this.getTransfers();
-        const transfersOut = transfers.filter(t => t.fromAccountId === account.id).reduce((s, t) => s + t.fromAmount, 0);
-        const transfersIn = transfers.filter(t => t.toAccountId === account.id).reduce((s, t) => s + t.toAmount, 0);
+        const transfersOut = transfers.filter(t => String(t.fromAccountId) === String(account.id)).reduce((s, t) => s + t.fromAmount, 0);
+        const transfersIn = transfers.filter(t => String(t.toAccountId) === String(account.id)).reduce((s, t) => s + t.toAmount, 0);
         // Unlogged reconciliations never touch linkedIncome/linkedExpenses, so their correction
         // is folded in directly here. delta = actualBalance - computedBalance at the moment it
         // was recorded, so summing it back in reproduces actualBalance regardless of asset vs
@@ -1270,7 +1270,7 @@ class DataService {
         // moved the balance via their real Expense/Income record, so including both would
         // double-count.
         const unloggedReconciliationDelta = this.getReconciliations()
-            .filter(r => r.accountId === account.id && !r.loggedAsTransaction)
+            .filter(r => String(r.accountId) === String(account.id) && !r.loggedAsTransaction)
             .reduce((s, r) => s + r.delta, 0);
         const opening = parseFloat(account.openingAmount) || 0;
         const base = this.LIABILITY_ACCOUNT_TYPES.includes(account.accountType)
