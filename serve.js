@@ -259,7 +259,7 @@ var server = http.createServer(function(req, res) {
 
   var filePath = path.join(ROOT, safePath);
 
-  if (!filePath.startsWith(ROOT)) {
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('Forbidden');
     return;

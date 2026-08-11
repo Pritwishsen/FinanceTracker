@@ -2360,7 +2360,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     }, [formData.paidBy, formData.currency]);
 
     const handleInputChange = (field, value) => {
-        setFormData(prev => ({ ...prev, [field]: value }));
+        // accountId comes from a <select> as a string, but account.id (DataService._uniqueId())
+        // is always a number — normalize here so every downstream comparison against
+        // account.id can use === safely instead of needing its own String()/Number() cast.
+        const normalized = (field === 'accountId' && value !== '') ? Number(value) : value;
+        setFormData(prev => ({ ...prev, [field]: normalized }));
         if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
         if (field === 'categoryId') setFormData(prev => ({ ...prev, subcategory: '' }));
     };
@@ -2790,7 +2794,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         return palette[h % palette.length];
     };
     const selectedCategory = categories.find(cat => cat.id === parseInt(filterCategory));
-    const expensesByCurrency = filteredExpenses.reduce((acc, expense) => { const currency = expense.currency || 'USD'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += expense.amount; acc[currency].count += 1; return acc; }, {});
+    const expensesByCurrency = filteredExpenses.reduce((acc, expense) => { const currency = expense.currency || 'GBP'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += expense.amount; acc[currency].count += 1; return acc; }, {});
 
     if (editingExpense) {
         return (<ExpenseForm categories={categories} editExpense={editingExpense} onSave={() => { setEditingExpense(null); onUpdate(); }} onCancel={() => setEditingExpense(null)} activeView={activeView} />);
@@ -2898,7 +2902,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             </div>
                             {personLabel && <span className="person-badge" title={personLabel}>{personLabel}</span>}
                             <div className="expense-right">
-                                <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'USD')}</div>
+                                <div className="expense-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'GBP')}</div>
                                 <div className="expense-menu-wrap">
                                     <button className="expense-menu-btn" title="Actions"
                                         onClick={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === expense.id ? null : expense.id); }}>
@@ -3583,7 +3587,12 @@ function IncomeForm({ income, onUpdate, activeView }) {
         return () => document.removeEventListener('click', close);
     }, [openMenuId]);
 
-    const handleInputChange = (field, value) => { setFormData(prev => ({ ...prev, [field]: value })); if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' })); };
+    const handleInputChange = (field, value) => {
+        // See ExpenseForm's handleInputChange for why accountId is normalized to a number here.
+        const normalized = (field === 'accountId' && value !== '') ? Number(value) : value;
+        setFormData(prev => ({ ...prev, [field]: normalized }));
+        if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
+    };
     const handleSubmit = (e) => {
         e.preventDefault(); setIsSubmitting(true);
         const validation = ValidationUtils.validateIncome({ ...formData, amount: parseFloat(formData.amount) });
@@ -8819,6 +8828,14 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         ...DataService.getBankLiabilityItems(activeView)
     ];
 
+    // Whether any figure folded into the totals below actually went through a currency
+    // conversion — those conversions always use CurrencyService.fallbackRates (a fixed,
+    // hardcoded table), never a live rate, so this drives a visible disclaimer rather than
+    // letting cross-currency totals look like precise, current numbers.
+    const hasForeignCurrency = bankAccounts.some(a => a.currency !== defaultCurrency)
+        || visibleItems.some(i => i.currency !== defaultCurrency)
+        || debtLiabilities.some(d => d.currency !== defaultCurrency);
+
     const totalAssets = visibleItems.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalManualLiabilities = visibleItems.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
     const totalDebtLiabilities = debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
@@ -9007,9 +9024,9 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 )}
                 {item.currency !== defaultCurrency && (
                     item.isBankAccount && item.type === 'asset' && item.value < 0 ? (
-                        <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(0, defaultCurrency)} (Overdraft {fmt(Math.abs(convertToDefault(item.value, item.currency)), defaultCurrency)})</div>
+                        <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(0, defaultCurrency)} (Overdraft {fmt(Math.abs(convertToDefault(item.value, item.currency)), defaultCurrency)})</div>
                     ) : (
-                        <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
+                        <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
                     )
                 )}
                 {item.type === 'asset' && !item.isBankAccount && !item.isPrimaryWallet && item.originalAmount != null && (() => {
@@ -9071,6 +9088,13 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Wallet − Liabilities</div>
                     </div>
                 </div>
+                {hasForeignCurrency && (
+                    <div style={{display:'flex',justifyContent:'center',marginBottom:'8px'}}>
+                        <div style={{fontSize:'0.68rem',color:'#adb5bd',textAlign:'center'}} title="Cross-currency amounts (marked with ≈) are converted using a fixed offline exchange rate table, not live market rates, and may not reflect current rates">
+                            <i className="fas fa-info-circle" style={{marginRight:'3px'}}></i>Includes amounts converted at approximate offline exchange rates
+                        </div>
+                    </div>
+                )}
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
                     <div style={{background:wallet>=0?'#f0fff4':'#fff5f5',border:`1px solid ${wallet>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
                         <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>WALLET</div>
@@ -9277,7 +9301,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                             <div style={{flex:1,minWidth:0}}>
                                                 <div style={{fontWeight:600,fontSize:'0.88rem'}}>{debt.counterparty}</div>
                                                 <div style={{fontSize:'0.9rem',fontWeight:700,color:'#dc3545'}}>{fmt(debt.amount, debt.currency)}</div>
-                                                {debt.currency !== defaultCurrency && <div style={{fontSize:'0.72rem',color:'#6c757d'}}>≈ {fmt(convertToDefault(debt.amount, debt.currency), defaultCurrency)}</div>}
+                                                {debt.currency !== defaultCurrency && <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(convertToDefault(debt.amount, debt.currency), defaultCurrency)}</div>}
                                                 {debt.dueDate && <div style={{fontSize:'0.72rem',color:'#6c757d'}}>Due: {new Date(debt.dueDate+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
                                                 {debt.notes && <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>{debt.notes}</div>}
                                             </div>
@@ -10669,7 +10693,33 @@ function App() {
     );
 }
 
-ReactDOM.render(<App />, document.getElementById('root'));
+class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false };
+    }
+    static getDerivedStateFromError() {
+        return { hasError: true };
+    }
+    componentDidCatch(error, errorInfo) {
+        console.error('Unhandled error in app:', error, errorInfo);
+    }
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div style={{padding: '2rem', textAlign: 'center', maxWidth: '480px', margin: '4rem auto'}}>
+                    <i className="fas fa-exclamation-triangle" style={{fontSize: '2rem', color: '#dc3545', marginBottom: '1rem'}}></i>
+                    <h4>Something went wrong</h4>
+                    <p className="text-muted">The app hit an unexpected error and couldn't continue. Your data is saved locally and hasn't been lost.</p>
+                    <button className="btn btn-primary" onClick={() => window.location.reload()}>Reload App</button>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+ReactDOM.render(<ErrorBoundary><App /></ErrorBoundary>, document.getElementById('root'));
     </script>
 </body>
 </html>
