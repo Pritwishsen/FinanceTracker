@@ -2,3 +2,4 @@ node_modules/
 start-local.ps1
 start-local.sh
 .env
+coverage/
