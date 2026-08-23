@@ -2387,9 +2387,12 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         return p.name;
     };
 
-    // Each split participant gets their own primary account, not the payer's — mirrors
-    // resolveSplitParticipantPaidBy's own/'' normalization.
+    // The payer keeps whatever account they explicitly chose in the form's own Account
+    // field — recomputing it from their primary account here silently overrode a manual
+    // non-primary selection the moment Split was checked. Every other participant still
+    // gets their own primary account, since there's no per-participant Account field for them.
     const resolveSplitParticipantAccountId = (p) => {
+        if (p.id === 'me') return formData.accountId;
         const paidBy = resolveSplitParticipantPaidBy(p);
         return resolveDefaultAccountId(paidBy, formData.currency);
     };
