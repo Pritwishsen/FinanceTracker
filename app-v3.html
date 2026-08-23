@@ -1322,11 +1322,7 @@ class DataService {
     // Primary account balance (only when it's an asset-type account — a Primary Credit
     // Card/Loan stays purely a Liability, it's not "spending money").
     static computeWallet(activeView, defaultCurrency) {
-        const convert = (amount, currency) => {
-            const rates = CurrencyService.fallbackRates[currency];
-            const rate = rates ? (rates[defaultCurrency] || 1) : 1;
-            return amount * rate;
-        };
+        const convert = (amount, currency) => CurrencyService.convertToDefaultSync(amount, currency, defaultCurrency);
         const unlinkedIncome = this.data.income.filter(i => !i.accountId && (!activeView || matchesActiveView(i.paidBy, activeView))).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
         const unlinkedExpenses = this.data.expenses.filter(e => !e.accountId && (!activeView || matchesActiveView(e.paidBy, activeView))).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
         const primaryBalances = this.getBankAccounts()
@@ -1932,9 +1928,7 @@ class DataService {
         const visibleItems = activeView ? items.filter(item => matchesActiveView(item.person, activeView)) : items;
         let total = 0;
         visibleItems.forEach(item => {
-            const rates = CurrencyService.fallbackRates[item.currency];
-            const rate = rates ? (rates[defaultCurrency] || 1) : 1;
-            const converted = item.value * rate;
+            const converted = CurrencyService.convertToDefaultSync(item.value, item.currency, defaultCurrency);
             total += item.type === 'asset' ? converted : -converted;
         });
         return total;
@@ -3995,9 +3989,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
 
     const convertAmountSync = (amount, fromCurrency, toCurrency) => {
         if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
-        const rates = CurrencyService.fallbackRates[fromCurrency];
-        if (rates && rates[toCurrency]) return Math.round(amount * rates[toCurrency] * 100) / 100;
-        return amount;
+        return Math.round(CurrencyService.convertToDefaultSync(amount, fromCurrency, toCurrency) * 100) / 100;
     };
 
     useEffect(() => {
@@ -8498,9 +8490,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
 
     const convertSync = (amount, from, to) => {
         if (!from || !to || from === to) return amount;
-        const rates = CurrencyService.fallbackRates[from];
-        if (rates && rates[to]) return Math.round(amount * rates[to] * 100) / 100;
-        return amount;
+        return Math.round(CurrencyService.convertToDefaultSync(amount, from, to) * 100) / 100;
     };
     const fmt = (n) => ValidationUtils.formatCurrency(n, defaultCurrency);
 
