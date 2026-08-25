@@ -209,12 +209,21 @@ body {
 }
 
 .expense-date-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   padding: 0.4rem 0.75rem;
   font-size: 0.72rem;
   font-weight: 700;
   color: hsl(var(--text-secondary));
   background: hsl(var(--border-color) / 0.4);
   border-bottom: 1px solid hsl(var(--border-color));
+}
+
+.expense-date-total {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: hsl(var(--text-secondary));
 }
 
 .expense-item {

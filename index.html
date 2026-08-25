@@ -1108,6 +1108,32 @@ class DataService {
         let accountsChanged = false;
         accounts.forEach(a => { if (a.person === oldName) { a.person = newName; accountsChanged = true; } });
         if (accountsChanged) this.saveBankAccounts(accounts);
+        // Net Worth items, debts, bills and reconciliations are also person-scoped (matchesActiveView
+        // filters on .person) but were missing from this migration — a renamed person's existing
+        // items silently vanished from every screen since they stayed tagged with the old name.
+        const netWorthItems = this.getNetWorthItems();
+        let netWorthChanged = false;
+        netWorthItems.forEach(i => { if (i.person === oldName) { i.person = newName; netWorthChanged = true; } });
+        if (netWorthChanged) this.saveNetWorthItems(netWorthItems);
+        const renameCreatedInView = (arr) => (arr || []).map(v => v === oldName ? newName : v);
+        const debts = this.getDebts();
+        let debtsChanged = false;
+        debts.forEach(d => {
+            if (d.person === oldName) { d.person = newName; debtsChanged = true; }
+            if ((d.createdInView || []).includes(oldName)) { d.createdInView = renameCreatedInView(d.createdInView); debtsChanged = true; }
+        });
+        if (debtsChanged) this.saveDebts(debts);
+        const bills = this.getBills();
+        let billsChanged = false;
+        bills.forEach(b => {
+            if (b.person === oldName) { b.person = newName; billsChanged = true; }
+            if ((b.createdInView || []).includes(oldName)) { b.createdInView = renameCreatedInView(b.createdInView); billsChanged = true; }
+        });
+        if (billsChanged) this.saveBills(bills);
+        const reconciliations = this.getReconciliations();
+        let reconciliationsChanged = false;
+        reconciliations.forEach(r => { if (r.person === oldName) { r.person = newName; reconciliationsChanged = true; } });
+        if (reconciliationsChanged) this.saveReconciliations(reconciliations);
     }
     static setDefaultPerson(id) {
         if (!this.data.settings.people) return;
@@ -1277,6 +1303,48 @@ class DataService {
             ? opening + linkedExpenses - linkedIncome + transfersOut - transfersIn
             : opening + linkedIncome - linkedExpenses + transfersIn - transfersOut;
         return base + unloggedReconciliationDelta;
+    }
+    // Records a cash withdrawal: deducts `deductedAmount` (the account's own currency) from
+    // the bank account via the same "phantom transfer to an asset" trick Add Money/Fund Asset
+    // use (toAccountId: null, toAssetId set — computeBankAccountBalance's transfersOut already
+    // nets this), and accumulates `amount` (the withdrawal currency) into a single Cash asset
+    // per person+currency rather than creating a new asset on every withdrawal.
+    static withdrawCash({ accountId, currency, amount, fee, deductedAmount, date }, activeView) {
+        const account = this.getBankAccounts().find(a => a.id === accountId);
+        if (!account) return null;
+        // Named "Cash Withdraw" (not the more common "Cash") and left unlocked so it never
+        // collides with — or force-locks — a category a user may have already created
+        // themselves; see migrateStrayLockedCashCategory for the one-time cleanup of accounts
+        // that got bitten by an earlier version of this feature that used the generic name.
+        const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash Withdraw');
+        const personKey = account.person || 'own';
+        const items = this.getNetWorthItems();
+        const existing = items.find(i => i.type === 'asset' && i.categoryId === cashCat.id && i.currency === currency && (i.person || 'own') === personKey);
+        let cashItem;
+        if (existing) {
+            const currentOriginal = existing.originalAmount != null ? existing.originalAmount : existing.value;
+            this.updateNetWorthItem(existing.id, { originalAmount: currentOriginal + amount, value: existing.value + amount }, { activeView });
+            cashItem = existing;
+        } else {
+            cashItem = this.addNetWorthItem({ name: 'Cash', value: amount, currency, type: 'asset', categoryId: cashCat.id, subcategory: '', notes: '', person: account.person, country: account.country }, activeView);
+        }
+        // isOverseas stays false regardless of currency mismatch — same as Add Money/Fund
+        // Asset — so this only ever lists in Summary's "Asset Funding" table, not also
+        // "Overseas Transfers" (those two filters aren't mutually exclusive on toAssetId).
+        const conversionRate = deductedAmount > 0 ? Math.round((amount / deductedAmount) * 10000) / 10000 : 1;
+        this.addTransfer({
+            date, fromAccountId: account.id, toAccountId: null,
+            fromAmount: deductedAmount, toAmount: amount,
+            isOverseas: false, conversionRate, fee: fee || 0,
+            feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+            toAssetId: cashItem.id, toAssetName: cashItem.name, isCashWithdrawal: true,
+            // toAmount is denominated in the withdrawal currency, which can differ from the
+            // account's own currency (fromAmount's currency) — stored explicitly since the
+            // Summary audit table sums toAmount by currency and can't assume they match.
+            cashWithdrawCurrency: currency,
+            notes: 'Cash withdrawal — logged for audit'
+        });
+        return cashItem;
     }
     // Every non-primary asset-type bank account, shaped as a read-only Net Worth asset item
     // under the "Bank & Savings" category — the primary account is deliberately excluded
@@ -1958,6 +2026,7 @@ class DataService {
                 { name: 'Pension & Retirement', locked: true },
                 { name: 'Vehicles', locked: true },
                 { name: 'Bank & Savings', locked: true },
+                { name: 'Cash Withdraw', locked: false },
                 { name: 'Other Asset', locked: false }
             ]
             : [
@@ -2135,6 +2204,18 @@ class DataService {
             if (item.originalAmount == null) { item.originalAmount = item.value; changed = true; }
         });
         if (changed) this.saveNetWorthItems(items);
+    }
+    // An earlier version of Cash Withdraw used the generic name "Cash" for its category — if a
+    // user already had their own "Cash" asset category, getNetWorthCategories' self-heal (which
+    // force-locks any category matching a *locked* default's name) silently locked it out from
+    // under them, and new withdrawals merged into whatever was already in it. The feature has
+    // since moved to a distinct, unlocked "Cash Withdraw" category, but that doesn't undo the
+    // lock already applied to a pre-existing "Cash" category — this one-time pass does, handing
+    // the user back the ability to rename/delete/reorganize it as they see fit.
+    static migrateStrayLockedCashCategory() {
+        const cats = this.getNetWorthCategories('asset');
+        const stray = cats.find(c => c.name.trim().toLowerCase() === 'cash' && c.locked);
+        if (stray) { stray.locked = false; this.saveNetWorthCategories('asset', cats); }
     }
     static clearAllUserData() {
         // Wipe every financeApp_* key and cloud file-ID cache from localStorage
@@ -2719,7 +2800,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     );
 }
 
-function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '', activeView }) {
+function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '', activeView, defaultCurrency }) {
     const [filterCategory, setFilterCategory] = useState('');
     const [filterSubcategory, setFilterSubcategory] = useState('');
     const [filterPerson, setFilterPerson] = useState(initialPaidBy || '');
@@ -2774,11 +2855,12 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         let current = null;
         visibleExpenses.forEach(expense => {
             const dateKey = (expense.date || '').substring(0, 10);
-            if (!current || current.date !== dateKey) { current = { date: dateKey, items: [] }; groups.push(current); }
+            if (!current || current.date !== dateKey) { current = { date: dateKey, items: [], total: 0 }; groups.push(current); }
             current.items.push(expense);
+            current.total += CurrencyService.convertToDefaultSync(expense.amount, expense.currency || 'GBP', defaultCurrency);
         });
         return groups;
-    }, [visibleExpenses]);
+    }, [visibleExpenses, defaultCurrency]);
 
     const handleCategoryFilter = (categoryId) => { setFilterCategory(categoryId); setFilterSubcategory(''); };
     const handleDeleteExpense = (expenseId) => { DataService.deleteExpense(expenseId); setShowDeleteConfirm(null); onUpdate(); };
@@ -2871,8 +2953,14 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                     </div>
                 ) : null; })()}
                 <div className="filter-row">
-                    <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
-                    <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                    <div className="flex-fill">
+                        <label className="form-label small text-muted mb-1">From</label>
+                        <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
+                    </div>
+                    <div className="flex-fill">
+                        <label className="form-label small text-muted mb-1">To</label>
+                        <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                    </div>
                 </div>
                 {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterTags.length > 0) && (
                     <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterTags([]); }}>
@@ -2886,7 +2974,10 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 ) : (
                     groupedExpenses.map(group => (
                         <div key={group.date} className="expense-date-group">
-                            <div className="expense-date-header">{ValidationUtils.formatDate(group.date)}</div>
+                            <div className="expense-date-header">
+                                <span>{ValidationUtils.formatDate(group.date)}</span>
+                                <span className="expense-date-total">{ValidationUtils.formatCurrency(group.total, defaultCurrency)}</span>
+                            </div>
                             {group.items.map(expense => {
                                 const catName = getCategoryName(expense.categoryId);
                                 const metaParts = [catName, expense.subcategory].filter(Boolean);
@@ -3776,8 +3867,14 @@ function IncomeForm({ income, onUpdate, activeView }) {
                         )}
                     </div>
                     <div className="filter-row">
-                        <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
-                        <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                        <div className="flex-fill">
+                            <label className="form-label small text-muted mb-1">From</label>
+                            <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
+                        </div>
+                        <div className="flex-fill">
+                            <label className="form-label small text-muted mb-1">To</label>
+                            <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
+                        </div>
                     </div>
                     {(filterSource || filterPerson || filterDateFrom || filterDateTo || searchTerm) && (
                         <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterSource(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); }}>
@@ -4432,13 +4529,16 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
                 const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
                 const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas && !t.toAssetId);
-                const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId);
+                const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId && !t.isCashWithdrawal);
+                const cashWithdrawTransfers = sortedVisibleTransfers.filter(t => t.isCashWithdrawal);
                 const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
                 const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
                 const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
                 const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
                 const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
+                const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
                 const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
                 if (transfers.length === 0) return null;
@@ -4569,6 +4669,52 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                 <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No asset funding transfers in the selected period.</div>
                             )}
                         </div>
+                        <div style={{marginTop: '1.25rem'}}>
+                            <h5>Cash Withdrawals</h5>
+                            {cashWithdrawTransfers.length > 0 ? (
+                                <React.Fragment>
+                                <div style={{overflowX: 'auto'}}>
+                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                        <thead>
+                                            <tr><th>From Account</th>{activeView.length > 1 && <th>Person</th>}<th>Amount</th><th>Fee</th><th>Date</th><th></th></tr>
+                                        </thead>
+                                        <tbody>
+                                            {cashWithdrawTransfers.map(t => (
+                                                <tr key={t.id}>
+                                                    <td>{accountLabel(t.fromAccountId)}</td>
+                                                    {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
+                                                    <td>{ValidationUtils.formatCurrency(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
+                                                    <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
+                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                    {Object.keys(cashWithdrawAmountTotals).length === 1 ? (
+                                        <div><strong>Total Withdrawn:</strong> {ValidationUtils.formatCurrency(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total Withdrawn:</strong>
+                                            {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                    {Object.keys(cashWithdrawFeeTotals).length === 1 ? (
+                                        <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
+                                    ) : (
+                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                            <strong>Total Fees:</strong>
+                                            {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                        </div>
+                                    )}
+                                </div>
+                                </React.Fragment>
+                            ) : (
+                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No cash withdrawals in the selected period.</div>
+                            )}
+                        </div>
                     </React.Fragment>
                 );
             })()}
@@ -4679,6 +4825,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [reconcileForm, setReconcileForm] = useState(emptyReconcileForm);
     const [reconcileErrors, setReconcileErrors] = useState({});
     const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
+    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', deductedAmount: '', date: new Date().toISOString().split('T')[0] };
+    const [withdrawAccount, setWithdrawAccount] = useState(null);
+    const [withdrawForm, setWithdrawForm] = useState(emptyWithdrawForm);
+    const [withdrawErrors, setWithdrawErrors] = useState({});
+    const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
     const [liveConversionRate, setLiveConversionRate] = useState(null);
     const [displayName, setDisplayName] = useState('');
     const [nameError, setNameError] = useState('');
@@ -5078,6 +5229,58 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             if (onUpdate) onUpdate();
         } finally {
             setReconcileSubmitting(false);
+        }
+    };
+
+    const handleOpenWithdraw = (account) => {
+        setWithdrawAccount(account);
+        setWithdrawForm({ ...emptyWithdrawForm, currency: account.currency });
+        setWithdrawErrors({});
+    };
+
+    const handleCancelWithdraw = () => {
+        setWithdrawAccount(null);
+        setWithdrawForm(emptyWithdrawForm);
+        setWithdrawErrors({});
+    };
+
+    // Auto-fills "Deducted from Account" as convert(amount) + fee, in the account's own
+    // currency — deliberately excludes deductedAmount from its own deps (same trick as
+    // Transfer's toAmount effect above) so a manual edit isn't clobbered on the next render.
+    useEffect(() => {
+        if (!withdrawAccount) return;
+        const amount = parseFloat(withdrawForm.amount) || 0;
+        const fee = parseFloat(withdrawForm.fee) || 0;
+        if (!amount && !fee) return;
+        const converted = CurrencyService.convertToDefaultSync(amount, withdrawForm.currency, withdrawAccount.currency);
+        const computed = Math.round((converted + fee) * 100) / 100;
+        setWithdrawForm(prev => ({ ...prev, deductedAmount: String(computed) }));
+    }, [withdrawForm.amount, withdrawForm.fee, withdrawForm.currency, withdrawAccount]);
+
+    const handleSubmitWithdraw = async (e) => {
+        e.preventDefault();
+        const errors = {};
+        const amount = parseFloat(withdrawForm.amount);
+        const deductedAmount = parseFloat(withdrawForm.deductedAmount);
+        if (!withdrawForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
+        if (!withdrawForm.deductedAmount || deductedAmount <= 0) errors.deductedAmount = 'Deducted amount must be greater than 0';
+        if (!withdrawForm.date) errors.date = 'Date is required';
+        if (Object.keys(errors).length > 0) { setWithdrawErrors(errors); return; }
+
+        setWithdrawSubmitting(true);
+        try {
+            DataService.withdrawCash({
+                accountId: withdrawAccount.id,
+                currency: withdrawForm.currency,
+                amount, fee: parseFloat(withdrawForm.fee) || 0,
+                deductedAmount, date: withdrawForm.date
+            }, activeView);
+            setWithdrawAccount(null);
+            setWithdrawForm(emptyWithdrawForm);
+            setWithdrawErrors({});
+            if (onUpdate) await onUpdate();
+        } finally {
+            setWithdrawSubmitting(false);
         }
     };
 
@@ -5644,6 +5847,9 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                                 <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickTransfer(account)} title="Transfer money"><i className="fas fa-exchange-alt"></i></button>
                                             )}
                                             <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickReconcile(account)} title="Reconcile balance"><i className="fas fa-balance-scale"></i></button>
+                                            {!DataService.LIABILITY_ACCOUNT_TYPES.includes(account.accountType) && (
+                                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleOpenWithdraw(account)} title="Withdraw cash"><i className="fas fa-money-bill-wave"></i></button>
+                                            )}
                                             <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
                                             <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
                                         </div>
@@ -5666,6 +5872,50 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                 <button type="button" className="btn btn-danger" onClick={() => handleDeleteAccount(showDeleteAccountConfirm.id)}>Remove</button>
                             </div>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {withdrawAccount && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <form className="modal-content" onSubmit={handleSubmitWithdraw}>
+                            <div className="modal-header"><h5 className="modal-title">Withdraw Cash — {withdrawAccount.accountName}</h5></div>
+                            <div className="modal-body">
+                                <div className="mb-2">
+                                    <label className="form-label">Currency</label>
+                                    <select className="form-select" value={withdrawForm.currency} onChange={e => setWithdrawForm(f => ({ ...f, currency: e.target.value }))}>
+                                        {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.code})</option>))}
+                                    </select>
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Amount ({withdrawForm.currency})</label>
+                                    <input type="number" step="0.01" className={'form-control' + (withdrawErrors.amount ? ' is-invalid' : '')} value={withdrawForm.amount} onChange={e => setWithdrawForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
+                                    {withdrawErrors.amount && <div className="invalid-feedback">{withdrawErrors.amount}</div>}
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Fee ({withdrawAccount.currency}, optional)</label>
+                                    <input type="number" step="0.01" className="form-control" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Deducted from Account ({withdrawAccount.currency})</label>
+                                    <input type="number" step="0.01" className={'form-control' + (withdrawErrors.deductedAmount ? ' is-invalid' : '')} value={withdrawForm.deductedAmount} onChange={e => setWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} />
+                                    {withdrawErrors.deductedAmount && <div className="invalid-feedback">{withdrawErrors.deductedAmount}</div>}
+                                    <div className="form-text">Defaults to the converted amount + fee — edit if your statement shows a different figure.</div>
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Date</label>
+                                    <input type="date" className={'form-control' + (withdrawErrors.date ? ' is-invalid' : '')} max={new Date().toISOString().split('T')[0]} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} />
+                                    {withdrawErrors.date && <div className="invalid-feedback">{withdrawErrors.date}</div>}
+                                </div>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelWithdraw}>Cancel</button>
+                                <button type="submit" className="btn btn-success btn-sm" disabled={withdrawSubmitting}>
+                                    {withdrawSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Withdrawing…</> : <><i className="fas fa-money-bill-wave me-1"></i>Withdraw</>}
+                                </button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}
@@ -9014,10 +9264,14 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
+    // 'own' stores as the literal string 'own' on Net Worth items/bank accounts (unlike
+    // expenses/income, which use '' for own) — normalize both to a friendly "Me" label.
+    const personDisplayLabel = (p) => (!p || p === 'own') ? 'Me' : p;
+
     const renderItemCard = (item, colorClass) => (
         <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid ' + (item.isPrimaryWallet ? '#ffc107' : '#e9ecef'),background:item.isPrimaryWallet ? '#fff3cd' : '#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}</div>
+                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}</div>
                 {/* A linked account can compute negative (overdrawn) — the asset total still
                     correctly negates by the full amount (unchanged), but showing e.g. "-£50"
                     as the headline reads as if that's cash on hand. Show £0 with the shortfall
@@ -10146,6 +10400,7 @@ function App() {
         await DataService.initialize();
         DataService.migrateCategoryBudgetsToPersonScope();
         DataService.migrateNetWorthOriginalAmounts();
+        DataService.migrateStrayLockedCashCategory();
         DataService.refreshCustomCurrencySymbols();
         const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
@@ -10518,7 +10773,7 @@ function App() {
 
     const renderScreen = () => {
         switch (currentScreen) {
-            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} activeView={activeView} />;
+            case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} activeView={activeView} defaultCurrency={defaultCurrency} />;
             case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
@@ -10532,7 +10787,7 @@ function App() {
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
-            default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} />;
+            default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} />;
         }
     };
 
