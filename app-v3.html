@@ -1314,7 +1314,7 @@ class DataService {
     // use (toAccountId: null, toAssetId set — computeBankAccountBalance's transfersOut already
     // nets this), and accumulates `amount` (the withdrawal currency) into a single Cash asset
     // per person+currency rather than creating a new asset on every withdrawal.
-    static withdrawCash({ accountId, currency, amount, fee, deductedAmount, date }, activeView) {
+    static withdrawCash({ accountId, currency, amount, fee, feeCurrency, deductedAmount, date }, activeView) {
         const account = this.getBankAccounts().find(a => a.id === accountId);
         if (!account) return null;
         // Named "Cash Withdraw" (not the more common "Cash") and left unlocked so it never
@@ -1347,6 +1347,9 @@ class DataService {
             // account's own currency (fromAmount's currency) — stored explicitly since the
             // Summary audit table sums toAmount by currency and can't assume they match.
             cashWithdrawCurrency: currency,
+            // The fee's own currency, independent of the account's — user-editable, so it
+            // can't be assumed to match fromAccount's currency the way it used to.
+            feeCurrency: feeCurrency || account.currency,
             notes: 'Cash withdrawal — logged for audit'
         });
         return cashItem;
@@ -4601,7 +4604,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
-                const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
+                const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.feeCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
                 const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
                 if (transfers.length === 0) return null;
@@ -4747,7 +4750,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{accountLabel(t.fromAccountId)}</td>
                                                     {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
                                                     <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
-                                                    <td>{symbolAmount(t.fee || 0, currencyOf(t.fromAccountId))}</td>
+                                                    <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                                 </tr>
@@ -4888,7 +4891,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [reconcileForm, setReconcileForm] = useState(emptyReconcileForm);
     const [reconcileErrors, setReconcileErrors] = useState({});
     const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
-    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', deductedAmount: '', date: new Date().toISOString().split('T')[0] };
+    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', feeCurrency: 'GBP', deductedAmount: '', date: new Date().toISOString().split('T')[0] };
     const [withdrawAccount, setWithdrawAccount] = useState(null);
     const [withdrawForm, setWithdrawForm] = useState(emptyWithdrawForm);
     const [withdrawErrors, setWithdrawErrors] = useState({});
@@ -5297,7 +5300,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
 
     const handleOpenWithdraw = (account) => {
         setWithdrawAccount(account);
-        setWithdrawForm({ ...emptyWithdrawForm, currency: account.currency });
+        setWithdrawForm({ ...emptyWithdrawForm, currency: account.currency, feeCurrency: account.currency });
         setWithdrawErrors({});
     };
 
@@ -5307,18 +5310,20 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         setWithdrawErrors({});
     };
 
-    // Auto-fills "Deducted from Account" as convert(amount) + fee, in the account's own
-    // currency — deliberately excludes deductedAmount from its own deps (same trick as
-    // Transfer's toAmount effect above) so a manual edit isn't clobbered on the next render.
+    // Auto-fills "Deducted from Account" as convert(amount) + convert(fee), both converted
+    // independently into the account's own currency (the fee's currency no longer has to
+    // match the withdrawal currency) — deliberately excludes deductedAmount from its own deps
+    // (same trick as Transfer's toAmount effect above) so a manual edit isn't clobbered.
     useEffect(() => {
         if (!withdrawAccount) return;
         const amount = parseFloat(withdrawForm.amount) || 0;
         const fee = parseFloat(withdrawForm.fee) || 0;
         if (!amount && !fee) return;
         const converted = CurrencyService.convertToDefaultSync(amount, withdrawForm.currency, withdrawAccount.currency);
-        const computed = Math.round((converted + fee) * 100) / 100;
+        const convertedFee = CurrencyService.convertToDefaultSync(fee, withdrawForm.feeCurrency, withdrawAccount.currency);
+        const computed = Math.round((converted + convertedFee) * 100) / 100;
         setWithdrawForm(prev => ({ ...prev, deductedAmount: String(computed) }));
-    }, [withdrawForm.amount, withdrawForm.fee, withdrawForm.currency, withdrawAccount]);
+    }, [withdrawForm.amount, withdrawForm.fee, withdrawForm.currency, withdrawForm.feeCurrency, withdrawAccount]);
 
     const handleSubmitWithdraw = async (e) => {
         e.preventDefault();
@@ -5335,7 +5340,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             DataService.withdrawCash({
                 accountId: withdrawAccount.id,
                 currency: withdrawForm.currency,
-                amount, fee: parseFloat(withdrawForm.fee) || 0,
+                amount, fee: parseFloat(withdrawForm.fee) || 0, feeCurrency: withdrawForm.feeCurrency,
                 deductedAmount, date: withdrawForm.date
             }, activeView);
             setWithdrawAccount(null);
@@ -5957,8 +5962,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                     {withdrawErrors.amount && <div className="invalid-feedback">{withdrawErrors.amount}</div>}
                                 </div>
                                 <div className="mb-2">
-                                    <label className="form-label">Fee ({CurrencyService.getCurrencySymbol(withdrawAccount.currency)}, optional)</label>
-                                    <input type="number" step="0.01" className="form-control" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
+                                    <label className="form-label">Fee (optional)</label>
+                                    <div style={{display: 'flex', gap: '0.5rem'}}>
+                                        <input type="number" step="0.01" className="form-control" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
+                                        <select className="form-select" style={{maxWidth: '110px', flexShrink: 0}} value={withdrawForm.feeCurrency} onChange={e => setWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>
+                                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{CurrencyService.getCurrencySymbol(c.code)} {c.code}</option>))}
+                                        </select>
+                                    </div>
+                                    <div className="form-text">Charged in a different currency than the withdrawal? Change it here.</div>
                                 </div>
                                 <div className="mb-2">
                                     <label className="form-label">Deducted from Account ({CurrencyService.getCurrencySymbol(withdrawAccount.currency)})</label>
