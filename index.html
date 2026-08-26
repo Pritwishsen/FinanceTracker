@@ -186,7 +186,12 @@ class CurrencyService {
         const c = this.supportedCurrencies[currencyCode];
         if (c) return c.symbol;
         const custom = DataService.getCustomCurrencies().find(cc => cc.code === currencyCode);
-        return custom ? (custom.symbol || custom.code) : currencyCode;
+        if (custom && custom.symbol) return custom.symbol;
+        // Falls back to deriving a real symbol via Intl (e.g. HUF -> "Ft") instead of just
+        // printing the bare code — covers a custom currency saved without one, or a currency
+        // that was never added as custom at all but still shows up somewhere (e.g. Cash
+        // Withdraw items created for a currency picked before deriveSymbol existed).
+        return this.deriveSymbol(currencyCode);
     }
 
     static getCurrencyName(currencyCode) {
@@ -1346,6 +1351,25 @@ class DataService {
         });
         return cashItem;
     }
+    // Shared by "Paid by Cash" expenses and Cash Withdraw: draws down (delta<0) or credits back
+    // (delta>0) an EXISTING per-person-per-currency "Cash" asset. Deliberately does not create
+    // one when it's missing — an expense marked Paid by Cash in a currency the user has never
+    // actually withdrawn cash in stays a plain unlinked expense (no phantom negative cash
+    // asset conjured up just because the checkbox was ticked). skipHistory:true — unlike an
+    // explicit withdrawal/valuation edit, routine expense spending shouldn't flood the Net Worth
+    // history table (ordinary bank-linked expenses aren't snapshotted per-transaction either).
+    static _adjustCashOnHand(person, currency, delta) {
+        if (!delta) return false;
+        const cur = currency || 'GBP';
+        const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash Withdraw');
+        const personKey = person || 'own';
+        const items = this.getNetWorthItems();
+        const existing = items.find(i => i.type === 'asset' && i.categoryId === cashCat.id && i.currency === cur && (i.person || 'own') === personKey);
+        if (!existing) return false;
+        const currentOriginal = existing.originalAmount != null ? existing.originalAmount : existing.value;
+        this.updateNetWorthItem(existing.id, { originalAmount: currentOriginal + delta, value: existing.value + delta }, { skipHistory: true });
+        return true;
+    }
     // Every non-primary asset-type bank account, shaped as a read-only Net Worth asset item
     // under the "Bank & Savings" category — the primary account is deliberately excluded
     // here since its balance is instead folded into computeWallet(), to avoid counting it twice.
@@ -1410,27 +1434,42 @@ class DataService {
     static async addExpense(expense) {
         await this.initialize();
         const newExpense = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
+        // cashDeductionApplied records whether a real cash asset actually got debited (vs. no
+        // matching Cash Withdraw asset existing yet, in which case this stays a plain unlinked
+        // expense) — later edits/deletes only reverse the effect if this was true, so a cash
+        // asset created afterwards can't get wrongly credited for a deduction that never happened.
+        if (newExpense.isCashPayment) newExpense.cashDeductionApplied = this._adjustCashOnHand(newExpense.paidBy, newExpense.currency, -newExpense.amount);
         this.data.expenses.push(newExpense);
         this.saveExpenses();
         return newExpense;
     }
     static async addExpenseWithConversion(expense) {
-        await this.initialize();
-        const expenseData = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
-        this.data.expenses.push(expenseData);
-        this.saveExpenses();
-        return expenseData;
+        return this.addExpense(expense);
     }
     static async updateExpense(id, updates) {
         await this.initialize();
         const index = this.data.expenses.findIndex(expense => expense.id === id);
-        if (index !== -1) { this.data.expenses[index] = { ...this.data.expenses[index], ...updates }; this.saveExpenses(); return this.data.expenses[index]; }
-        return null;
+        if (index === -1) return null;
+        const oldExpense = this.data.expenses[index];
+        const updated = { ...oldExpense, ...updates };
+        // Reverse the old cash-on-hand effect (only if it was actually applied) then reapply the
+        // new one — correct even when person/currency/amount/isCashPayment changed between old and new.
+        if (oldExpense.isCashPayment && oldExpense.cashDeductionApplied) this._adjustCashOnHand(oldExpense.paidBy, oldExpense.currency, oldExpense.amount);
+        updated.cashDeductionApplied = updated.isCashPayment ? this._adjustCashOnHand(updated.paidBy, updated.currency, -updated.amount) : false;
+        this.data.expenses[index] = updated;
+        this.saveExpenses();
+        return updated;
     }
     static async deleteExpense(id) {
         await this.initialize();
         const index = this.data.expenses.findIndex(expense => expense.id === id);
-        if (index !== -1) { const deleted = this.data.expenses.splice(index, 1)[0]; this.saveExpenses(); this.recordDeletion('expenses', id); return deleted; }
+        if (index !== -1) {
+            const deleted = this.data.expenses.splice(index, 1)[0];
+            this.saveExpenses();
+            this.recordDeletion('expenses', id);
+            if (deleted.isCashPayment && deleted.cashDeductionApplied) this._adjustCashOnHand(deleted.paidBy, deleted.currency, deleted.amount);
+            return deleted;
+        }
         return null;
     }
     static async deleteExpensesBySplitGroup(splitGroupId) {
@@ -1438,7 +1477,10 @@ class DataService {
         const toDelete = this.data.expenses.filter(expense => expense.splitGroupId === splitGroupId);
         this.data.expenses = this.data.expenses.filter(expense => expense.splitGroupId !== splitGroupId);
         this.saveExpenses();
-        toDelete.forEach(expense => this.recordDeletion('expenses', expense.id));
+        toDelete.forEach(expense => {
+            this.recordDeletion('expenses', expense.id);
+            if (expense.isCashPayment && expense.cashDeductionApplied) this._adjustCashOnHand(expense.paidBy, expense.currency, expense.amount);
+        });
         return toDelete.length;
     }
     static clearAllExpenses() { this.data.expenses = []; this.saveExpenses(); }
@@ -2393,7 +2435,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             paidBy: initialPaidBy,
             currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP',
             tags: editExpense ? (editExpense.tags || []) : [],
-            accountId: editExpense ? (editExpense.accountId || '') : resolveDefaultAccountId(initialPaidBy, 'GBP')
+            accountId: editExpense ? (editExpense.accountId || '') : resolveDefaultAccountId(initialPaidBy, 'GBP'),
+            isCashPayment: editExpense ? !!editExpense.isCashPayment : false
         };
     });
     const [tagInputRaw, setTagInputRaw] = useState(() => {
@@ -2475,9 +2518,15 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     // field — recomputing it from their primary account here silently overrode a manual
     // non-primary selection the moment Split was checked. Every other participant's share
     // is a person-to-person IOU, not a real transaction against their account, so it's left
-    // unlinked rather than auto-attached to their own primary account.
+    // unlinked rather than auto-attached to their own primary account. Forced to '' when the
+    // payer is marked Paid by Cash — a cash expense has no bank account either.
     const resolveSplitParticipantAccountId = (p) =>
-        isPayerParticipant(p) ? formData.accountId : '';
+        isPayerParticipant(p) ? (formData.isCashPayment ? '' : formData.accountId) : '';
+
+    // Only the payer's share can be a cash payment — other participants' shares are unlinked
+    // IOUs, same reasoning as resolveSplitParticipantAccountId above.
+    const resolveSplitParticipantIsCash = (p) =>
+        isPayerParticipant(p) ? formData.isCashPayment : false;
 
     // Used after adding (not editing) an expense so the user can log another one without
     // leaving the Add Expense screen — full reset back to the same blank state the form
@@ -2490,7 +2539,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         setFormData(prev => ({
             amount: '', date: prev.date, description: '',
             categoryId: '', subcategory: '', paidBy: newPaidBy,
-            currency: prev.currency, tags: [], accountId: resolveDefaultAccountId(newPaidBy, prev.currency)
+            currency: prev.currency, tags: [], accountId: resolveDefaultAccountId(newPaidBy, prev.currency),
+            isCashPayment: false
         }));
         setTagInputRaw('');
         setErrors({});
@@ -2542,7 +2592,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 setIsSubmitting(false);
                 return;
             }
-            const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) };
+            const expenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId), accountId: formData.isCashPayment ? '' : formData.accountId };
             if (editExpense) {
                 if (isSplit && splitParticipants.length >= 2) {
                     // Converting a single expense into a new split — replace it with N split records
@@ -2555,7 +2605,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         const share = splitMethod === 'equal'
                             ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                             : parseFloat(customAmounts[p.id] || 0);
-                        DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), splitGroupId, isSplitRecord: true });
+                        DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), isCashPayment: resolveSplitParticipantIsCash(p), splitGroupId, isSplitRecord: true });
                     });
                 } else {
                     DataService.updateExpense(editExpense.id, expenseData);
@@ -2570,7 +2620,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     const share = splitMethod === 'equal'
                         ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                         : parseFloat(customAmounts[p.id] || 0);
-                    DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), splitGroupId, isSplitRecord: true });
+                    DataService.addExpenseWithConversion({ ...expenseData, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), isCashPayment: resolveSplitParticipantIsCash(p), splitGroupId, isSplitRecord: true });
                 });
                 if (isRecurring) { DataService.addRecurring({ templateExpense: expenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }); }
             } else {
@@ -2687,10 +2737,16 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         <div className="form-text">Select who paid for this expense</div>
                     </div>
                 )}
+                {!editSplitGroup && (
+                    <div className="form-check mb-2">
+                        <input className="form-check-input" type="checkbox" id="isCashPayment" checked={formData.isCashPayment} onChange={(e) => handleInputChange('isCashPayment', e.target.checked)} />
+                        <label className="form-check-label" htmlFor="isCashPayment"><i className="fas fa-money-bill-wave me-1"></i>Paid by Cash</label>
+                    </div>
+                )}
                 {!editSplitGroup && DataService.getAccountsForPerson(formData.paidBy || 'own').length > 0 && (
                     <div className="form-group">
                         <label htmlFor="accountId">Account</label>
-                        <select id="accountId" className="form-select" value={formData.accountId} onChange={(e) => handleInputChange('accountId', e.target.value)}>
+                        <select id="accountId" className="form-select" value={formData.isCashPayment ? '' : formData.accountId} disabled={formData.isCashPayment} onChange={(e) => handleInputChange('accountId', e.target.value)}>
                             <option value="">— None —</option>
                             {DataService.getAccountsForPerson(formData.paidBy || 'own').map(a => (<option key={a.id} value={a.id}>{a.accountName}{a.isPrimary ? ' ★' : ''}</option>))}
                         </select>
@@ -2986,8 +3042,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                 <div key={expense.id} className="expense-item">
                                     <div className="expense-info">
                                         <div className="expense-description">
-                                            {expense.isSplitRecord && <i className="fas fa-users expense-split-icon" title="Split expense"></i>}
                                             {expense.description}
+                                            {expense.isSplitRecord && <i className="fas fa-users expense-split-icon" title="Split expense"></i>}
+                                            {expense.isCashPayment
+                                                ? <i className="fas fa-money-bill-wave expense-cash-icon" title="Paid by cash"></i>
+                                                : <i className="fas fa-credit-card expense-bank-icon" title="Paid by bank/card"></i>}
                                         </div>
                                         <div className="expense-meta">
                                             {metaParts.join(' · ')}
@@ -4535,6 +4594,10 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
                 const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
                 const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
+                // Cash Withdrawals shows amounts as symbol+figure only (no ISO code) — bypasses
+                // ValidationUtils.formatCurrency's Intl-driven style:'currency', which falls back
+                // to printing the raw code for currencies Intl has no dedicated symbol glyph for.
+                const symbolAmount = (amount, currency) => `${CurrencyService.getCurrencySymbol(currency)}${Number(amount).toFixed(2)}`;
                 const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
                 const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
@@ -4683,8 +4746,8 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                 <tr key={t.id}>
                                                     <td>{accountLabel(t.fromAccountId)}</td>
                                                     {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
-                                                    <td>{ValidationUtils.formatCurrency(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
+                                                    <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
+                                                    <td>{symbolAmount(t.fee || 0, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                                 </tr>
@@ -4694,19 +4757,19 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                 </div>
                                 <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
                                     {Object.keys(cashWithdrawAmountTotals).length === 1 ? (
-                                        <div><strong>Total Withdrawn:</strong> {ValidationUtils.formatCurrency(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
+                                        <div><strong>Total Withdrawn:</strong> {symbolAmount(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
                                     ) : (
                                         <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
                                             <strong>Total Withdrawn:</strong>
-                                            {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                            {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
                                         </div>
                                     )}
                                     {Object.keys(cashWithdrawFeeTotals).length === 1 ? (
-                                        <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
+                                        <div><strong>Total Fees:</strong> {symbolAmount(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
                                     ) : (
                                         <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
                                             <strong>Total Fees:</strong>
-                                            {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                            {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
                                         </div>
                                     )}
                                 </div>
@@ -5889,16 +5952,16 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                     </select>
                                 </div>
                                 <div className="mb-2">
-                                    <label className="form-label">Amount ({withdrawForm.currency})</label>
+                                    <label className="form-label">Amount ({CurrencyService.getCurrencySymbol(withdrawForm.currency)})</label>
                                     <input type="number" step="0.01" className={'form-control' + (withdrawErrors.amount ? ' is-invalid' : '')} value={withdrawForm.amount} onChange={e => setWithdrawForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
                                     {withdrawErrors.amount && <div className="invalid-feedback">{withdrawErrors.amount}</div>}
                                 </div>
                                 <div className="mb-2">
-                                    <label className="form-label">Fee ({withdrawAccount.currency}, optional)</label>
+                                    <label className="form-label">Fee ({CurrencyService.getCurrencySymbol(withdrawAccount.currency)}, optional)</label>
                                     <input type="number" step="0.01" className="form-control" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
                                 </div>
                                 <div className="mb-2">
-                                    <label className="form-label">Deducted from Account ({withdrawAccount.currency})</label>
+                                    <label className="form-label">Deducted from Account ({CurrencyService.getCurrencySymbol(withdrawAccount.currency)})</label>
                                     <input type="number" step="0.01" className={'form-control' + (withdrawErrors.deductedAmount ? ' is-invalid' : '')} value={withdrawForm.deductedAmount} onChange={e => setWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} />
                                     {withdrawErrors.deductedAmount && <div className="invalid-feedback">{withdrawErrors.deductedAmount}</div>}
                                     <div className="form-text">Defaults to the converted amount + fee — edit if your statement shows a different figure.</div>
@@ -9059,9 +9122,17 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 
     const convertToDefault = (value, currency) => CurrencyService.convertToDefaultSync(value, currency, defaultCurrency);
 
+    // Symbol-only, never the ISO code — Intl.NumberFormat's style:'currency' falls back to
+    // printing the raw code (e.g. "HUF 40.00") for currencies it has no dedicated symbol
+    // glyph for in this locale. CurrencyService.getCurrencySymbol always resolves to a
+    // symbol (worst case, a narrow/best-effort one), so the amount reads as £/€/Ft/etc.
+    // everywhere on this screen, not just for majors. Grouping/decimals done manually since
+    // we're no longer going through Intl's currency formatter.
     const fmt = (amount, currency) => {
-        try { return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(amount); }
-        catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
+        const symbol = CurrencyService.getCurrencySymbol(currency);
+        const num = Number(amount) || 0;
+        const sign = num < 0 ? '-' : '';
+        return `${sign}${symbol}${Math.abs(num).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     };
 
     // Wallet: unlinked income/expenses + each active person's Primary account balance —

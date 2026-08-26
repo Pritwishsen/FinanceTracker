@@ -236,10 +236,26 @@ body {
   position: relative;
 }
 
+/* Placed right after the description text (not before it, and not in a separate
+   column) — the name always starts at the same x position regardless of whether a
+   row has one icon (cash/bank, always present) or two (split expenses add a second),
+   and the amount/menu section on the right is completely unaffected either way. */
 .expense-split-icon {
   color: hsl(200, 80%, 50%);
   font-size: 0.8em;
-  margin-right: 0.35rem;
+  margin-left: 0.35rem;
+}
+
+.expense-cash-icon {
+  color: hsl(140, 65%, 40%);
+  font-size: 0.8em;
+  margin-left: 0.35rem;
+}
+
+.expense-bank-icon {
+  color: hsl(var(--text-secondary));
+  font-size: 0.8em;
+  margin-left: 0.35rem;
 }
 
 .expense-info {
