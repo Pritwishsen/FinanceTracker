@@ -310,6 +310,28 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Country label on Net Worth Asset/Liability item cards — outlined rather than filled
+   like .person-badge, so the two read as distinct kinds of tag when both show together. */
+.country-badge {
+  flex-shrink: 0;
+  max-width: 110px;
+  padding: 0.13rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border-color));
+  background: transparent;
+  color: hsl(var(--text-secondary));
+  font-size: 0.66rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.country-badge i {
+  font-size: 0.85em;
+  margin-right: 0.25rem;
+}
+
 .expense-right {
   display: flex;
   flex-direction: column;

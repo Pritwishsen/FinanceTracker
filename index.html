@@ -4384,9 +4384,30 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
             let cursor = new Date(sY, sM, 1);
             const end = new Date(eY, eM, 1);
             let guard = 0;
-            while (cursor <= end && guard < 60) { monthStarts.push(new Date(cursor)); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
+            // Safety cap only — not meant to be reachable via the UI. The From/To year
+            // selects offer up to 8 years back (96 months apart at most), so this used to
+            // silently truncate at 60 months well before that's possible (see MonthlyTrends'
+            // identical custom-range loop, which had the same bug).
+            while (cursor <= end && guard < 240) { monthStarts.push(new Date(cursor)); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
         } else { // 'sixMonths' and fallback
             for (let i = 5; i >= 0; i--) monthStarts.push(new Date(now.getFullYear(), now.getMonth() - i, 1));
+        }
+        // A custom range over 2 years (>24 monthly bars) is too dense to read as individual
+        // months — fold it down to one bar per year instead, bounded to whichever months of
+        // that year actually fall inside the selected range (not the full calendar year for
+        // a partial first/last year).
+        if (timeRange === 'custom' && monthStarts.length > 24) {
+            const yearGroups = {};
+            monthStarts.forEach(d => { const y = d.getFullYear(); (yearGroups[y] = yearGroups[y] || []).push(d); });
+            return Object.keys(yearGroups).sort((a, b) => a - b).map(yStr => {
+                const y = parseInt(yStr);
+                const datesInYear = yearGroups[y];
+                const minMonth = Math.min(...datesInYear.map(d => d.getMonth()));
+                const maxMonth = Math.max(...datesInYear.map(d => d.getMonth()));
+                const start = new Date(y, minMonth, 1);
+                const end = new Date(y, maxMonth + 1, 0, 23, 59, 59, 999);
+                return trendBucket(start, end, String(y));
+            });
         }
         return monthStarts.map(monthDate => {
             const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
@@ -8844,7 +8865,11 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
             let cursor = new Date(sY, sM, 1);
             const end = new Date(eY, eM, 1);
             let guard = 0;
-            while (cursor <= end && guard < 60) { months.push({ year: cursor.getFullYear(), month: cursor.getMonth() }); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
+            // Safety cap only — not meant to be reachable via the UI. The From/To year
+            // selects offer up to 8 years back (96 months apart at most), so this used to
+            // silently truncate at 60 months (a 6+ year range would cut off mid-range,
+            // e.g. Aug 2020–Aug 2026 stopping at Jul 2025) well before that's possible.
+            while (cursor <= end && guard < 240) { months.push({ year: cursor.getFullYear(), month: cursor.getMonth() }); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
         } else {
             const count = timeWindow === '3m' ? 3 : timeWindow === '12m' ? 12 : 6;
             for (let i = count - 1; i >= 0; i--) {
@@ -8863,21 +8888,37 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     const filteredExpenses = selectedCategory ? expenses.filter(e => e.categoryId === parseInt(selectedCategory)) : expenses;
     const filteredIncome = income;
 
-    const monthData = months.map(({ year, month }) => {
-        const mm = String(month + 1).padStart(2, '0');
-        const prefix = `${year}-${mm}`;
-        const me = filteredExpenses.filter(e => (e.date || '').startsWith(prefix));
-        const mi = filteredIncome.filter(i => (i.date || '').startsWith(prefix));
+    // A custom range over 2 years (>24 monthly rows) is too dense to browse as individual
+    // months — fold it down to one row per year instead (same threshold as Summary's own
+    // custom-range chart). Each "period" below is either a single month (the normal case,
+    // monthsIncluded.length === 1) or every month of that year that falls inside the
+    // selected range (yearly grouping) — the aggregation code beneath is identical either
+    // way, just summed over more months' worth of prefixes.
+    const useYearlyGrouping = timeWindow === 'custom' && months.length > 24;
+    const periods = useYearlyGrouping
+        ? (() => {
+            const yearGroups = {};
+            months.forEach(({ year, month }) => { (yearGroups[year] = yearGroups[year] || []).push(month); });
+            return Object.keys(yearGroups).sort((a, b) => a - b).map(y => ({ year: parseInt(y), monthsIncluded: yearGroups[y] }));
+        })()
+        : months.map(({ year, month }) => ({ year, monthsIncluded: [month] }));
+
+    const monthData = periods.map(({ year, monthsIncluded }) => {
+        const prefixes = monthsIncluded.map(m => `${year}-${String(m + 1).padStart(2, '0')}`);
+        const me = filteredExpenses.filter(e => prefixes.some(p => (e.date || '').startsWith(p)));
+        const mi = filteredIncome.filter(i => prefixes.some(p => (i.date || '').startsWith(p)));
         const totalExp = me.reduce((s, e) => s + convertSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
         const totalInc = mi.reduce((s, i) => s + convertSync(i.amount, i.currency || 'GBP', defaultCurrency), 0);
         const net = totalInc - totalExp;
         const savingsRate = totalInc > 0 ? ((totalInc - totalExp) / totalInc) * 100 : null;
-        const isCurrent = year === curYear && month === curMonth;
-        const lastDay = new Date(year, month + 1, 0).getDate();
-        const from = `${year}-${mm}-01`;
-        const to = `${year}-${mm}-${String(lastDay).padStart(2, '0')}`;
-        const label = new Date(year, month, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
-        const shortLabel = new Date(year, month, 1).toLocaleDateString('en-GB', { month: 'short' });
+        const minMonth = Math.min(...monthsIncluded), maxMonth = Math.max(...monthsIncluded);
+        const isCurrent = useYearlyGrouping ? year === curYear : (year === curYear && minMonth === curMonth);
+        const lastDay = new Date(year, maxMonth + 1, 0).getDate();
+        const from = `${year}-${String(minMonth + 1).padStart(2, '0')}-01`;
+        const to = `${year}-${String(maxMonth + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        const prefix = useYearlyGrouping ? String(year) : prefixes[0];
+        const label = useYearlyGrouping ? String(year) : new Date(year, minMonth, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+        const shortLabel = useYearlyGrouping ? String(year) : new Date(year, minMonth, 1).toLocaleDateString('en-GB', { month: 'short' });
 
         const catBreakdown = {};
         categories.forEach(cat => {
@@ -8892,7 +8933,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
         const incomeBreakdown = {};
         mi.forEach(i => { const src = i.source || 'Other'; incomeBreakdown[src] = (incomeBreakdown[src] || 0) + convertSync(i.amount, i.currency || 'GBP', defaultCurrency); });
 
-        return { year, month, prefix, label, shortLabel, totalExp, totalInc, net, savingsRate, isCurrent, from, to, catBreakdown, incomeBreakdown };
+        return { year, month: monthsIncluded.length === 1 ? monthsIncluded[0] : null, prefix, label, shortLabel, totalExp, totalInc, net, savingsRate, isCurrent, from, to, catBreakdown, incomeBreakdown };
     });
 
     // A category filter turns this into "how much did I spend on X, month by month"
@@ -8971,7 +9012,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
                 <div style={{textAlign:'center',padding:'3rem 1rem'}}>
                     <i className="fas fa-chart-line fa-3x text-muted" style={{display:'block',marginBottom:'1rem'}}></i>
                     <h5 className="text-muted">Not enough data yet</h5>
-                    <p className="text-muted small">{selectedCategory ? 'Add an expense in this category to see trends.' : 'Add expenses over at least 2 months to see trends.'}</p>
+                    <p className="text-muted small">{selectedCategory ? 'Add an expense in this category to see trends.' : `Add expenses over at least 2 ${useYearlyGrouping ? 'years' : 'months'} to see trends.`}</p>
                 </div>
             ) : (
                 <React.Fragment>
@@ -8991,7 +9032,7 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
 
                     <div style={{padding:'0 1rem 1rem'}}>
                         <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',padding:'0 10px 0.3rem',alignItems:'center',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
-                            <span>Month</span>
+                            <span>{useYearlyGrouping ? 'Year' : 'Month'}</span>
                             {!selectedCategory && <span style={{textAlign:'right',color:'#198754'}}>Income</span>}
                             <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
                             {!selectedCategory && <span style={{textAlign:'right'}}>Net</span>}
@@ -9353,7 +9394,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const renderItemCard = (item, colorClass) => (
         <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid ' + (item.isPrimaryWallet ? '#ffc107' : '#e9ecef'),background:item.isPrimaryWallet ? '#fff3cd' : '#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}</div>
+                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}{item.country && <span className="country-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={item.country}><i className="fas fa-map-marker-alt"></i>{item.country}</span>}</div>
                 {/* A linked account can compute negative (overdrawn) — the asset total still
                     correctly negates by the full amount (unchanged), but showing e.g. "-£50"
                     as the headline reads as if that's cash on hand. Show £0 with the shortfall
