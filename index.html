@@ -87,7 +87,23 @@
 const { useState, useEffect, useMemo } = React;
 
 const BANK_ACCOUNT_TYPES = ['Checking', 'Savings', 'Credit Card', 'Investment', 'Cash', 'Loan', 'Other'];
-const COUNTRIES = ['United Kingdom', 'United States', 'India', 'Ireland', 'Germany', 'France', 'Spain', 'Italy', 'Netherlands', 'Belgium', 'Portugal', 'Switzerland', 'Austria', 'Sweden', 'Norway', 'Denmark', 'Finland', 'Poland', 'Greece', 'Luxembourg', 'Canada', 'Mexico', 'Brazil', 'Argentina', 'Australia', 'New Zealand', 'Japan', 'China', 'South Korea', 'Singapore', 'Hong Kong', 'United Arab Emirates', 'Saudi Arabia', 'Qatar', 'South Africa', 'Nigeria', 'Kenya', 'Egypt', 'Turkey', 'Russia', 'Pakistan', 'Bangladesh', 'Sri Lanka', 'Philippines', 'Indonesia', 'Malaysia', 'Thailand', 'Vietnam', 'Israel', 'Poland', 'Czech Republic', 'Romania', 'Hungary', 'Other'].filter((v, i, arr) => arr.indexOf(v) === i);
+const COUNTRY_CURRENCY_MAP = {
+    'United Kingdom': 'GBP', 'United States': 'USD', 'India': 'INR', 'Ireland': 'EUR', 'Germany': 'EUR',
+    'France': 'EUR', 'Spain': 'EUR', 'Italy': 'EUR', 'Netherlands': 'EUR', 'Belgium': 'EUR', 'Portugal': 'EUR',
+    'Switzerland': 'CHF', 'Austria': 'EUR', 'Sweden': 'SEK', 'Norway': 'NOK', 'Denmark': 'DKK', 'Finland': 'EUR',
+    'Poland': 'PLN', 'Greece': 'EUR', 'Luxembourg': 'EUR', 'Canada': 'CAD', 'Mexico': 'MXN', 'Brazil': 'BRL',
+    'Argentina': 'ARS', 'Australia': 'AUD', 'New Zealand': 'NZD', 'Japan': 'JPY', 'China': 'CNY',
+    'South Korea': 'KRW', 'Singapore': 'SGD', 'Hong Kong': 'HKD', 'United Arab Emirates': 'AED',
+    'Saudi Arabia': 'SAR', 'Qatar': 'QAR', 'South Africa': 'ZAR', 'Nigeria': 'NGN', 'Kenya': 'KES',
+    'Egypt': 'EGP', 'Turkey': 'TRY', 'Russia': 'RUB', 'Pakistan': 'PKR', 'Bangladesh': 'BDT', 'Sri Lanka': 'LKR',
+    'Philippines': 'PHP', 'Indonesia': 'IDR', 'Malaysia': 'MYR', 'Thailand': 'THB', 'Vietnam': 'VND',
+    'Israel': 'ILS', 'Czech Republic': 'CZK', 'Romania': 'RON', 'Hungary': 'HUF'
+};
+const defaultCountryForCurrency = (currency) => {
+    const matches = Object.keys(COUNTRY_CURRENCY_MAP).filter(c => COUNTRY_CURRENCY_MAP[c] === currency);
+    return matches.length === 1 ? matches[0] : '';
+};
+const COUNTRIES = Object.keys(COUNTRY_CURRENCY_MAP).sort((a, b) => a.localeCompare(b)).concat('Other');
 
 class CurrencyService {
     static ratesCache = {};
@@ -3049,7 +3065,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                             {expense.isSplitRecord && <i className="fas fa-users expense-split-icon" title="Split expense"></i>}
                                             {expense.isCashPayment
                                                 ? <i className="fas fa-money-bill-wave expense-cash-icon" title="Paid by cash"></i>
-                                                : <i className="fas fa-credit-card expense-bank-icon" title="Paid by bank/card"></i>}
+                                                : expense.accountId && <i className="fas fa-credit-card expense-bank-icon" title="Paid by bank/card"></i>}
                                         </div>
                                         <div className="expense-meta">
                                             {metaParts.join(' · ')}
@@ -9147,7 +9163,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: '', fundAccountId: '' });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '' });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -9246,7 +9262,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const openAddForm = () => {
         setEditingItem(null);
         const firstAssetCat = assetCategories && assetCategories[0];
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: '', fundAccountId: '' });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '' });
         setFormErrors({});
         setShowForm(true);
     };
@@ -9576,7 +9592,16 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                     onChange={e => setForm(f => ({...f, value: e.target.value}))} />
                                 {formErrors.value && <div className="invalid-feedback">{formErrors.value}</div>}
                             </div>
-                            <select className="form-select form-select-sm" value={form.currency} onChange={e => setForm(f => ({...f, currency: e.target.value}))}>
+                            <select className="form-select form-select-sm" value={form.currency} onChange={e => {
+                                const newCurrency = e.target.value;
+                                const matches = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === newCurrency);
+                                setForm(f => {
+                                    let country = f.country;
+                                    if (matches.length === 1) country = matches[0];
+                                    else if (COUNTRY_CURRENCY_MAP[f.country] !== newCurrency) country = '';
+                                    return {...f, currency: newCurrency, country};
+                                });
+                            }}>
                                 {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
                             </select>
                         </div>
@@ -9599,7 +9624,20 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <div className="mb-2">
                             <select className="form-select form-select-sm" value={form.country} onChange={e => setForm(f => ({...f, country: e.target.value}))}>
                                 <option value="">Country: Not specified</option>
-                                {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+                                {(() => {
+                                    const matching = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === form.currency);
+                                    const rest = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] !== form.currency);
+                                    return matching.length > 0 ? (
+                                        <React.Fragment>
+                                            <optgroup label={`Countries using ${form.currency}`}>
+                                                {matching.map(c => <option key={c} value={c}>{c}</option>)}
+                                            </optgroup>
+                                            <optgroup label="Other Countries">
+                                                {rest.map(c => <option key={c} value={c}>{c}</option>)}
+                                            </optgroup>
+                                        </React.Fragment>
+                                    ) : COUNTRIES.map(c => <option key={c} value={c}>{c}</option>);
+                                })()}
                             </select>
                         </div>
                         {activeView.length > 1 && (
