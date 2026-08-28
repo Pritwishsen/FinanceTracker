@@ -416,18 +416,23 @@ body {
 
 .expense-total-multi {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.25rem;
+  margin-top: -1rem;
+  margin-bottom: 1.5rem;
 }
 
 .expense-total-item {
   background-color: hsl(var(--primary-color));
   color: white;
-  padding: 0.25rem 0.75rem;
+  padding: 0.15rem 0.4rem;
   border-radius: calc(var(--radius) / 2);
   font-weight: 600;
-  font-size: 0.75rem;
+  font-size: 0.65rem;
   text-align: center;
+  white-space: nowrap;
 }
 
 /* Filters */

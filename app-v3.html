@@ -431,7 +431,7 @@ function computeLinkCandidates(bankAccounts, expenses, income) {
         if (seen.has(primary.person)) return;
         seen.add(primary.person);
         const target = normalize(primary.person);
-        const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId && (e.currency || 'GBP') === primary.currency).length;
+        const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId && !e.isCashPayment && (e.currency || 'GBP') === primary.currency).length;
         const incomeCount = income.filter(i => normalize(i.paidBy) === target && !i.accountId && (i.currency || 'GBP') === primary.currency).length;
         candidates.push({ person: primary.person, expenseCount, incomeCount });
     });
@@ -1265,7 +1265,7 @@ class DataService {
             if (!primary) return;
             const target = normalize(person);
             [...expenses, ...income].forEach(record => {
-                if (normalize(record.paidBy) === target && !record.accountId && (record.currency || 'GBP') === primary.currency) {
+                if (normalize(record.paidBy) === target && !record.accountId && !record.isCashPayment && (record.currency || 'GBP') === primary.currency) {
                     record.accountId = primary.id;
                     record.updatedAt = now;
                     linkedCount++;
@@ -1827,13 +1827,44 @@ class DataService {
     }
     static getRecurring() { return JSON.parse(localStorage.getItem('financeApp_recurring') || '[]'); }
     static saveRecurring(r) { localStorage.setItem('financeApp_recurring', JSON.stringify(r)); }
-    static addRecurring({ templateExpense, frequency, endDate, type }) {
-        const schedule = { id: DataService._uniqueId(), templateExpense, frequency, endDate: endDate || '', type, nextDue: computeNextDue(new Date(), frequency), lastGenerated: null, isActive: true };
+    // startDate: optional — lets a caller anchor the first auto-generated cycle to a
+    // user-chosen date (Net Worth recurring) instead of always starting from "now" (the
+    // original expense/income behavior, unchanged when startDate is omitted).
+    static addRecurring({ templateExpense, frequency, endDate, type, startDate }) {
+        const schedule = { id: DataService._uniqueId(), templateExpense, frequency, endDate: endDate || '', type, nextDue: computeNextDue(startDate || new Date(), frequency), lastGenerated: null, isActive: true };
         const r = this.getRecurring(); r.push(schedule); this.saveRecurring(r); return schedule;
+    }
+    static updateRecurring(id, updates) {
+        const r = this.getRecurring(); const s = r.find(x => x.id === id);
+        if (s) { Object.assign(s, updates); this.saveRecurring(r); }
     }
     static pauseRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = false; this.saveRecurring(r); } }
     static resumeRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = true; this.saveRecurring(r); } }
     static deleteRecurring(id) { const r = this.getRecurring(); const i = r.findIndex(x => x.id === id); if (i !== -1) { r.splice(i, 1); this.saveRecurring(r); this.recordDeletion('recurring', id); } }
+    // Shared by the interactive "Add Money" modal and the recurring processor below, so a
+    // recurring asset/liability contribution behaves identically to a manual one — same
+    // originalAmount/value increment, same optional bank-account deduction logged as a
+    // transfer. Silently no-ops if the target item was deleted since the schedule was made.
+    static _applyNetWorthIncrement({ netWorthItemId, amount, accountId }, date) {
+        const items = this.getNetWorthItems();
+        const item = items.find(i => i.id === netWorthItemId);
+        if (!item) return;
+        const currentOriginal = item.originalAmount != null ? item.originalAmount : item.value;
+        this.updateNetWorthItem(item.id, { originalAmount: currentOriginal + amount, value: item.value + amount });
+        if (accountId) {
+            const account = this.getBankAccounts().find(a => a.id === accountId);
+            if (account) {
+                this.addTransfer({
+                    date, fromAccountId: account.id, toAccountId: null,
+                    fromAmount: amount, toAmount: amount,
+                    isOverseas: false, conversionRate: 1, fee: 0,
+                    feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+                    toAssetId: item.id, toAssetName: item.name,
+                    notes: 'Recurring investment funding — logged for audit'
+                });
+            }
+        }
+    }
     static async processRecurringSchedules() {
         const schedules = this.getRecurring();
         const today = new Date().toISOString().split('T')[0];
@@ -1842,9 +1873,13 @@ class DataService {
             if (!schedule.isActive) continue;
             if (schedule.endDate && today > schedule.endDate) continue;
             while (schedule.nextDue <= today) {
-                const instance = { ...schedule.templateExpense, id: DataService._uniqueId(), date: schedule.nextDue, createdAt: new Date().toISOString() };
-                if (schedule.type === 'expense') await this.addExpense(instance);
-                else await this.addIncome(instance);
+                if (schedule.type === 'asset' || schedule.type === 'liability') {
+                    this._applyNetWorthIncrement(schedule.templateExpense, schedule.nextDue);
+                } else {
+                    const instance = { ...schedule.templateExpense, id: DataService._uniqueId(), date: schedule.nextDue, createdAt: new Date().toISOString() };
+                    if (schedule.type === 'expense') await this.addExpense(instance);
+                    else await this.addIncome(instance);
+                }
                 schedule.lastGenerated = schedule.nextDue;
                 schedule.nextDue = computeNextDue(schedule.nextDue, schedule.frequency);
                 changed = true;
@@ -2892,7 +2927,6 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [duplicateDateError, setDuplicateDateError] = useState('');
     const [filterTags, setFilterTags] = useState([]);
     const [visibleCount, setVisibleCount] = useState(50);
-    const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
     const [openMenuId, setOpenMenuId] = useState(null);
 
     // The person sub-filter only makes sense (and is only shown) when multiple
@@ -2970,21 +3004,17 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         <div className="screen">
             <div className="screen-header">
                 <h2>Expense History</h2>
-                {expenses.length > 0 && (
-                    <button className="btn btn-sm btn-outline-danger" onClick={() => setShowClearAllConfirm(true)} title="Delete all expenses">
-                        <i className="fas fa-trash-alt me-1"></i>Clear All
-                    </button>
-                )}
-                <div className="expense-totals">
-                    {Object.keys(expensesByCurrency).length === 1 ? (
+                {Object.keys(expensesByCurrency).length === 1 && (
+                    <div className="expense-totals">
                         <div className="expense-total">Total: {ValidationUtils.formatCurrency(Object.values(expensesByCurrency)[0].total, Object.keys(expensesByCurrency)[0])}</div>
-                    ) : (
-                        <div className="expense-total-multi">
-                            {Object.entries(expensesByCurrency).map(([currency, data]) => (<div key={currency} className="expense-total-item">{ValidationUtils.formatCurrency(data.total, currency)}</div>))}
-                        </div>
-                    )}
-                </div>
+                    </div>
+                )}
             </div>
+            {Object.keys(expensesByCurrency).length > 1 && (
+                <div className="expense-total-multi">
+                    {Object.entries(expensesByCurrency).map(([currency, data]) => (<div key={currency} className="expense-total-item">{ValidationUtils.formatCurrency(data.total, currency)}</div>))}
+                </div>
+            )}
             <div className="filters-section">
                 <div className="search-box">
                     <div className="input-group">
@@ -3177,27 +3207,6 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowEditConfirm(null)}>Cancel</button>
                                 <button type="button" className="btn btn-outline-primary" onClick={() => { setEditingExpense(editConfirmExpense); setShowEditConfirm(null); }}>Edit just this record</button>
                                 <button type="button" className="btn btn-primary" onClick={() => { setEditingSplitGroupId(editConfirmExpense.splitGroupId); setShowEditConfirm(null); }}>Edit all records in this split</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showClearAllConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header border-danger">
-                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Expenses?</h5>
-                            </div>
-                            <div className="modal-body">
-                                <p>You are about to permanently delete <strong>all {expenses.length} expense{expenses.length !== 1 ? 's' : ''}</strong>.</p>
-                                <p className="text-danger mb-0"><strong>This cannot be undone.</strong></p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearAllConfirm(false)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearAllExpenses(); setShowClearAllConfirm(false); onUpdate(); }}>
-                                    <i className="fas fa-trash-alt me-1"></i>Delete All
-                                </button>
                             </div>
                         </div>
                     </div>
@@ -3730,7 +3739,6 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const [showSuccess, setShowSuccess] = useState(false);
     const [editingIncome, setEditingIncome] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
-    const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
@@ -3915,11 +3923,6 @@ function IncomeForm({ income, onUpdate, activeView }) {
                             {Object.entries(incomeByCurrency).map(([currency, data]) => (<div key={currency} className="income-total-item">{ValidationUtils.formatCurrency(data.total, currency)}</div>))}
                         </div>
                     ) : null}
-                    {income.length > 0 && (
-                        <button className="btn btn-sm btn-outline-danger" onClick={() => setShowClearAllConfirm(true)} title="Delete all income">
-                            <i className="fas fa-trash-alt me-1"></i>Clear All
-                        </button>
-                    )}
                 </div>
                 <div className="filters-section">
                     <div className="search-box">
@@ -4015,27 +4018,6 @@ function IncomeForm({ income, onUpdate, activeView }) {
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
                                 <button type="button" className="btn btn-danger" onClick={() => handleDelete(showDeleteConfirm)}>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showClearAllConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header border-danger">
-                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Income?</h5>
-                            </div>
-                            <div className="modal-body">
-                                <p>You are about to permanently delete <strong>all {income.length} income record{income.length !== 1 ? 's' : ''}</strong>.</p>
-                                <p className="text-danger mb-0"><strong>This cannot be undone.</strong></p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearAllConfirm(false)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearAllIncome(); setShowClearAllConfirm(false); onUpdate(); }}>
-                                    <i className="fas fa-trash-alt me-1"></i>Delete All
-                                </button>
                             </div>
                         </div>
                     </div>
@@ -4873,11 +4855,25 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
 
 function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled, onDisplayNameChange, categories, onUpdate }) {
     const activeViewSectionRef = React.useRef(null);
+    // Each section is collapsed by default; opening one closes any other (accordion,
+    // not independent toggles) so the screen doesn't grow unbounded again as sections
+    // are added — the whole point of this collapsing in the first place.
+    const [expandedSection, setExpandedSection] = useState(null);
+    const toggleSection = (id) => setExpandedSection(prev => prev === id ? null : id);
+    const renderSectionHeader = (id, iconClass, title, color) => (
+        <div onClick={() => toggleSection(id)} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer'}}>
+            <h5 style={{marginBottom: 0, color: color || '#4a6cf7'}}>
+                <i className={iconClass + ' me-2'}></i>{title}
+            </h5>
+            <i className={'fas fa-chevron-' + (expandedSection === id ? 'up' : 'down')} style={{color: '#adb5bd', fontSize: '0.85rem'}}></i>
+        </div>
+    );
     // Delayed slightly so this fires after this screen's own async effects (people,
     // backup history, settings) have settled, since scrolling before they load targets
     // a position that content loading afterward could shift.
     useEffect(() => {
         if (scrollTarget !== 'activeView') return;
+        setExpandedSection('activeView');
         const timer = setTimeout(() => {
             if (activeViewSectionRef.current) activeViewSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
             if (onScrollTargetHandled) onScrollTargetHandled();
@@ -4948,6 +4944,10 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
     const [restoreConfirmText, setRestoreConfirmText] = useState('');
     const [backupDownloaded, setBackupDownloaded] = useState(false);
+    const [showClearExpensesConfirm, setShowClearExpensesConfirm] = useState(false);
+    const [clearExpensesConfirmText, setClearExpensesConfirmText] = useState('');
+    const [showClearIncomeConfirm, setShowClearIncomeConfirm] = useState(false);
+    const [clearIncomeConfirmText, setClearIncomeConfirmText] = useState('');
     const [showContactModal, setShowContactModal] = useState(false);
     const [cloudBackupRetention, setCloudBackupRetention] = useState('count5');
     const [desktopNotifEnabled, setDesktopNotifEnabled] = useState(false);
@@ -5037,6 +5037,20 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             window.location.reload();
         }
         catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); setRestoreConfirmText(''); }
+    };
+
+    const handleConfirmClearExpenses = () => {
+        DataService.clearAllExpenses();
+        setShowClearExpensesConfirm(false);
+        setClearExpensesConfirmText('');
+        onUpdate();
+    };
+
+    const handleConfirmClearIncome = () => {
+        DataService.clearAllIncome();
+        setShowClearIncomeConfirm(false);
+        setClearIncomeConfirmText('');
+        onUpdate();
     };
 
     useEffect(() => {
@@ -5572,10 +5586,9 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             </div>
 
             <div className="settings-section" style={{marginBottom: '1.5rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-user me-2"></i>Your Name
-                </h5>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '0.75rem'}}>
+                {renderSectionHeader('yourName', 'fas fa-user', 'Your Name')}
+                {expandedSection === 'yourName' && (<React.Fragment>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '0.75rem', marginTop: '0.75rem'}}>
                     Used as your identity when tracking "paid by"
                 </p>
                 <input type="text" className="form-control" placeholder="Enter your display name (2–50 characters)" value={displayName} onChange={e => { setDisplayName(e.target.value); setNameError(''); }} />
@@ -5585,14 +5598,16 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 </div>
                 {nameError && <div className="text-danger mt-1" style={{fontSize: '0.875rem'}}>{nameError}</div>}
                 {nameSaved && <div className="text-success mt-1" style={{fontSize: '0.875rem'}}><i className="fas fa-check me-1"></i>Name saved!</div>}
+                </React.Fragment>)}
             </div>
 
             <hr style={{margin: '1rem 0 1.5rem'}} />
 
             <div style={{marginBottom: '1.5rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-coins"></i> Default Currency
-                </h5>
+                {renderSectionHeader('currency', 'fas fa-coins', 'Currency')}
+            </div>
+            {expandedSection === 'currency' && (<React.Fragment>
+            <div style={{marginBottom: '1.5rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Choose your default currency for budgets and summaries
                 </p>
@@ -5750,13 +5765,15 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 ))}
             </div>
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
 
             <div style={{marginBottom: '1.5rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-users"></i> People
-                </h5>
+                {renderSectionHeader('people', 'fas fa-users', 'People')}
+            </div>
+            {expandedSection === 'people' && (<React.Fragment>
+            <div style={{marginBottom: '1.5rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Manage people for expense and income tracking
                 </p>
@@ -5827,13 +5844,15 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 </div>
             )}
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
 
             <div style={{marginBottom: '1.5rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-university"></i> Bank Accounts
-                </h5>
+                {renderSectionHeader('bankAccounts', 'fas fa-university', 'Bank Accounts')}
+            </div>
+            {expandedSection === 'bankAccounts' && (<React.Fragment>
+            <div style={{marginBottom: '1.5rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Manage bank accounts and link them to expenses and income
                 </p>
@@ -6257,12 +6276,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </form>
                 </div>
             )}
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
             <div ref={activeViewSectionRef} style={{marginBottom: '1.5rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-user"></i> Active View
-                </h5>
+                {renderSectionHeader('activeView', 'fas fa-user', 'Active View')}
+            </div>
+            {expandedSection === 'activeView' && (<React.Fragment>
+            <div style={{marginBottom: '1.5rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Choose whose data you want to see across the app. Select more than one to compare.
                 </p>
@@ -6285,12 +6306,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 ))}
             </div>
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
             <div style={{marginBottom: '1rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-bell"></i> Notifications
-                </h5>
+                {renderSectionHeader('notifications', 'fas fa-bell', 'Notifications')}
+            </div>
+            {expandedSection === 'notifications' && (<React.Fragment>
+            <div style={{marginBottom: '1rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Control spending alerts and notifications
                 </p>
@@ -6319,10 +6342,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 </div>
             </div>
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
             <div style={{marginBottom: '1rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}><i className="fas fa-database me-2"></i>Backup & Restore</h5>
+                {renderSectionHeader('backup', 'fas fa-database', 'Backup & Restore')}
+            </div>
+            {expandedSection === 'backup' && (<React.Fragment>
+            <div style={{marginBottom: '1rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>Download your data or restore from a previous backup.</p>
                 <div className="d-flex justify-content-between align-items-center mb-3" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
                     <div>
@@ -6391,12 +6418,77 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 </div>
             )}
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
             <div style={{marginBottom: '1rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-cloud me-2"></i>Storage
-                </h5>
+                {renderSectionHeader('dangerZone', 'fas fa-exclamation-triangle', 'Danger Zone', '#dc3545')}
+            </div>
+            {expandedSection === 'dangerZone' && (<React.Fragment>
+            <div style={{marginBottom: '1rem'}}>
+                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>Permanently delete all records of a given type. This cannot be undone — consider downloading a backup first.</p>
+                <button className="btn btn-outline-danger w-100 mb-2" onClick={() => { setClearExpensesConfirmText(''); setShowClearExpensesConfirm(true); }}>
+                    <i className="fas fa-trash-alt me-2"></i>Clear All Expenses
+                </button>
+                <button className="btn btn-outline-danger w-100" onClick={() => { setClearIncomeConfirmText(''); setShowClearIncomeConfirm(true); }}>
+                    <i className="fas fa-trash-alt me-2"></i>Clear All Income
+                </button>
+            </div>
+
+            {showClearExpensesConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header border-danger">
+                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Expenses?</h5>
+                            </div>
+                            <div className="modal-body">
+                                <p>You are about to permanently delete <strong>all {DataService.data.expenses.length} expense{DataService.data.expenses.length !== 1 ? 's' : ''}</strong>.</p>
+                                <p className="text-danger mb-2"><strong>This cannot be undone.</strong></p>
+                                <label className="form-label small fw-semibold mb-1">Type <strong>DELETE</strong> to confirm</label>
+                                <input type="text" className="form-control" value={clearExpensesConfirmText} onChange={e => setClearExpensesConfirmText(e.target.value)} autoFocus />
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearExpensesConfirm(false)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={handleConfirmClearExpenses} disabled={clearExpensesConfirmText.trim().toUpperCase() !== 'DELETE'}>
+                                    <i className="fas fa-trash-alt me-1"></i>Delete All
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showClearIncomeConfirm && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                            <div className="modal-header border-danger">
+                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Income?</h5>
+                            </div>
+                            <div className="modal-body">
+                                <p>You are about to permanently delete <strong>all {DataService.data.income.length} income record{DataService.data.income.length !== 1 ? 's' : ''}</strong>.</p>
+                                <p className="text-danger mb-2"><strong>This cannot be undone.</strong></p>
+                                <label className="form-label small fw-semibold mb-1">Type <strong>DELETE</strong> to confirm</label>
+                                <input type="text" className="form-control" value={clearIncomeConfirmText} onChange={e => setClearIncomeConfirmText(e.target.value)} autoFocus />
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearIncomeConfirm(false)}>Cancel</button>
+                                <button type="button" className="btn btn-danger" onClick={handleConfirmClearIncome} disabled={clearIncomeConfirmText.trim().toUpperCase() !== 'DELETE'}>
+                                    <i className="fas fa-trash-alt me-1"></i>Delete All
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            </React.Fragment>)}
+
+            <hr style={{margin: '1.5rem 0'}} />
+            <div style={{marginBottom: '1rem'}}>
+                {renderSectionHeader('storage', 'fas fa-cloud', 'Storage')}
+            </div>
+            {expandedSection === 'storage' && (<React.Fragment>
+            <div style={{marginBottom: '1rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Where your financial data is backed up
                 </p>
@@ -6504,12 +6596,14 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                     </div>
                 )}
             </div>
+            </React.Fragment>)}
 
             <hr style={{margin: '1.5rem 0'}} />
             <div style={{marginBottom: '1rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-envelope me-2"></i>Contact Us
-                </h5>
+                {renderSectionHeader('contactUs', 'fas fa-envelope', 'Contact Us')}
+            </div>
+            {expandedSection === 'contactUs' && (<React.Fragment>
+            <div style={{marginBottom: '1rem'}}>
                 <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
                     Have a question or found a problem? Send us a message.
                 </p>
@@ -6520,6 +6614,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             {showContactModal && (
                 <ContactUsModal onClose={() => setShowContactModal(false)} defaultReplyTo={currentUser ? currentUser.email : ''} />
             )}
+            </React.Fragment>)}
         </div>
     );
 }
@@ -7608,14 +7703,22 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
 function RecurringList({ onUpdate, activeView, embedded }) {
     const [schedules, setSchedules] = useState([]);
     const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [editSchedule, setEditSchedule] = useState(null);
+    const [editForm, setEditForm] = useState({ amount: '', frequency: 'monthly', endDate: '', nextDue: '' });
+    const [editErrors, setEditErrors] = useState({});
 
     const load = () => setSchedules(DataService.getRecurring());
     useEffect(() => { load(); }, []);
 
     const today = new Date().toISOString().split('T')[0];
-    // Schedules have no field of their own — they inherit paidBy from the template
-    // expense/income record they were created from.
-    const visibleSchedules = schedules.filter(s => matchesActiveView(s.templateExpense && s.templateExpense.paidBy, activeView));
+    const isNetWorthType = (type) => type === 'asset' || type === 'liability';
+    // Schedules have no field of their own — expense/income schedules inherit paidBy from
+    // the template record they were created from; asset/liability ones carry person directly
+    // (Net Worth items use the 'own' convention, not '', but matchesActiveView normalizes both).
+    const visibleSchedules = schedules.filter(s => {
+        const t = s.templateExpense || {};
+        return matchesActiveView(isNetWorthType(s.type) ? t.person : t.paidBy, activeView);
+    });
 
     const getStatus = (s) => {
         if (s.endDate && today > s.endDate) return 'ended';
@@ -7634,7 +7737,38 @@ function RecurringList({ onUpdate, activeView, embedded }) {
         setDeleteConfirm(null); load(); onUpdate();
     };
 
+    const openEdit = (s) => {
+        setEditSchedule(s);
+        setEditForm({ amount: String((s.templateExpense || {}).amount || ''), frequency: s.frequency, endDate: s.endDate || '', nextDue: s.nextDue });
+        setEditErrors({});
+    };
+
+    const handleEditSubmit = (e) => {
+        e.preventDefault();
+        const amount = parseFloat(editForm.amount);
+        if (!editForm.amount || isNaN(amount) || amount <= 0) { setEditErrors({ amount: 'Amount must be greater than 0' }); return; }
+        if (!editForm.nextDue) { setEditErrors({ nextDue: 'Next payment date is required' }); return; }
+        DataService.updateRecurring(editSchedule.id, {
+            templateExpense: { ...editSchedule.templateExpense, amount },
+            frequency: editForm.frequency,
+            endDate: editForm.endDate || '',
+            nextDue: editForm.nextDue
+        });
+        setEditSchedule(null);
+        load(); onUpdate();
+    };
+
     const freqLabel = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
+    const typeBadge = (type) => {
+        const map = {
+            expense: { label: 'Expense', cls: 'bg-danger' },
+            income: { label: 'Income', cls: 'bg-success' },
+            asset: { label: 'Asset', cls: 'bg-primary' },
+            liability: { label: 'Liability', cls: 'bg-warning text-dark' }
+        };
+        const m = map[type] || { label: type, cls: 'bg-secondary' };
+        return <span className={`badge me-1 ${m.cls}`}>{m.label}</span>;
+    };
 
     return (
         <div className={embedded ? undefined : 'screen'}>
@@ -7643,7 +7777,7 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                 <div className="empty-state">
                     <i className="fas fa-redo fa-3x"></i>
                     <h4>No recurring transactions</h4>
-                    <p>When adding an expense or income, tick "Make this recurring" to set one up.</p>
+                    <p>When adding an expense, income, or asset/liability, tick "Make this recurring" to set one up.</p>
                 </div>
             ) : (
                 <div style={{padding: '0 1rem 1rem'}}>
@@ -7651,18 +7785,20 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                         const status = getStatus(s);
                         const t = s.templateExpense || {};
                         const isDueToday = s.nextDue === today;
+                        const netWorth = isNetWorthType(s.type);
                         return (
                             <div key={s.id} className="card mb-3 shadow-sm" style={{opacity: status === 'ended' ? 0.6 : 1}}>
                                 <div className="card-body p-3">
                                     <div className="d-flex justify-content-between align-items-start mb-2">
                                         <div>
-                                            <span className={`badge me-1 ${s.type === 'expense' ? 'bg-danger' : 'bg-success'}`}>{s.type === 'expense' ? 'Expense' : 'Income'}</span>
+                                            {typeBadge(s.type)}
                                             {status === 'active' && <span className="badge bg-success me-1">Active</span>}
                                             {status === 'paused' && <span className="badge bg-warning text-dark me-1">Paused</span>}
                                             {status === 'ended' && <span className="badge bg-secondary me-1">Ended</span>}
                                             {isDueToday && status === 'active' && <span className="badge bg-primary">Due Today</span>}
                                         </div>
                                         <div className="d-flex gap-1">
+                                            <button className="btn btn-sm btn-outline-primary" onClick={() => openEdit(s)} title="Edit"><i className="fas fa-edit"></i></button>
                                             {status !== 'ended' && (
                                                 <button className={`btn btn-sm ${s.isActive ? 'btn-outline-warning' : 'btn-outline-success'}`} onClick={() => handlePauseResume(s)} title={s.isActive ? 'Pause' : 'Resume'}>
                                                     <i className={`fas fa-${s.isActive ? 'pause' : 'play'}`}></i>
@@ -7671,10 +7807,10 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                                             <button className="btn btn-sm btn-outline-danger" onClick={() => setDeleteConfirm(s)} title="Delete"><i className="fas fa-trash"></i></button>
                                         </div>
                                     </div>
-                                    <div className="fw-semibold">{t.description || t.source || '—'}</div>
+                                    <div className="fw-semibold">{netWorth ? (t.netWorthItemName || '—') : (t.description || t.source || '—')}</div>
                                     <div className="text-muted small">
-                                        {ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')} &bull; {freqLabel(s.frequency)}
-                                        {t.paidBy && <> &bull; {t.paidBy}</>}
+                                        {netWorth ? '+' : ''}{ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')} &bull; {freqLabel(s.frequency)}
+                                        {netWorth ? (t.accountId && <> &bull; funded from linked bank account</>) : (t.paidBy && <> &bull; {t.paidBy}</>)}
                                     </div>
                                     <div className="small mt-1">
                                         <span className="text-muted">Next: </span><strong>{s.nextDue}</strong>
@@ -7687,12 +7823,57 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                     })}
                 </div>
             )}
+            {editSchedule && (
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <form className="modal-content" onSubmit={handleEditSubmit}>
+                            <div className="modal-header"><h5 className="modal-title">Edit Recurring</h5></div>
+                            <div className="modal-body">
+                                <div className="mb-2">
+                                    <label className="form-label">Amount ({(editSchedule.templateExpense || {}).currency || 'GBP'})</label>
+                                    <input type="number" step="0.01" className={'form-control' + (editErrors.amount ? ' is-invalid' : '')} value={editForm.amount} onChange={e => setEditForm(f => ({...f, amount: e.target.value}))} autoFocus />
+                                    {editErrors.amount && <div className="invalid-feedback">{editErrors.amount}</div>}
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Frequency</label>
+                                    <select className="form-select" value={editForm.frequency} onChange={e => setEditForm(f => ({...f, frequency: e.target.value}))}>
+                                        <option value="daily">Daily</option>
+                                        <option value="weekly">Weekly</option>
+                                        <option value="monthly">Monthly</option>
+                                        <option value="yearly">Yearly</option>
+                                    </select>
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Next Payment Date</label>
+                                    <input type="date" className={'form-control' + (editErrors.nextDue ? ' is-invalid' : '')} value={editForm.nextDue} onChange={e => setEditForm(f => ({...f, nextDue: e.target.value}))} />
+                                    {editErrors.nextDue && <div className="invalid-feedback">{editErrors.nextDue}</div>}
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">End Date (optional)</label>
+                                    <input type="date" className="form-control" value={editForm.endDate} onChange={e => setEditForm(f => ({...f, endDate: e.target.value}))} />
+                                </div>
+                                {editForm.nextDue !== editSchedule.nextDue ? (
+                                    <div className="alert alert-warning py-2" style={{fontSize:'0.8rem'}}>
+                                        <i className="fas fa-exclamation-triangle me-1"></i>The next payment date will be pushed to <strong>{editForm.nextDue || '—'}</strong> — no payment will be recorded until then.
+                                    </div>
+                                ) : (
+                                    <p className="text-muted" style={{fontSize:'0.78rem'}}>A frequency change takes effect from the following cycle, not this one.</p>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-secondary" onClick={() => setEditSchedule(null)}>Cancel</button>
+                                <button type="submit" className="btn btn-primary">Save Changes</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
             {deleteConfirm && (
                 <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
                     <div className="modal-dialog modal-dialog-centered">
                         <div className="modal-content">
                             <div className="modal-header"><h5 className="modal-title">Delete Recurring</h5></div>
-                            <div className="modal-body"><p>Delete the recurring <strong>{deleteConfirm.type}</strong> for <strong>{(deleteConfirm.templateExpense || {}).description || (deleteConfirm.templateExpense || {}).source || 'this item'}</strong>? Future transactions will no longer be generated.</p></div>
+                            <div className="modal-body"><p>Delete the recurring <strong>{deleteConfirm.type}</strong> for <strong>{(deleteConfirm.templateExpense || {}).netWorthItemName || (deleteConfirm.templateExpense || {}).description || (deleteConfirm.templateExpense || {}).source || 'this item'}</strong>? Future transactions will no longer be generated.</p></div>
                             <div className="modal-footer">
                                 <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
                                 <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
@@ -8965,13 +9146,43 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     // always forces expense-only and hides the Both/Income/Expense toggle.
     const effectiveSeriesFilter = selectedCategory ? 'expense' : chartSeriesFilter;
     const chartMonths = monthData.map(m => ({ label: m.shortLabel, income: m.totalInc, expense: m.totalExp }));
-    // Table columns collapse to Month/Expenses only under a category filter, since
-    // Income/Net/Savings% all depend on income data that isn't shown in that mode.
-    const gridCols = selectedCategory ? '1fr 100px' : '1fr 70px 70px 62px 52px';
     const totalIncomeAll = monthData.reduce((s, m) => s + m.totalInc, 0);
     const totalExpAll = monthData.reduce((s, m) => s + m.totalExp, 0);
     const totalNetAll = totalIncomeAll - totalExpAll;
     const totalSavingsPctAll = totalIncomeAll > 0 ? ((totalIncomeAll - totalExpAll) / totalIncomeAll) * 100 : null;
+    // Table columns collapse to Month/Expenses only under a category filter, since
+    // Income/Net/Savings% all depend on income data that isn't shown in that mode.
+    // Fixed px widths computed once from the actual data, shared verbatim by the header,
+    // every period row, and the Total row (all reference this same gridCols string) —
+    // CSS max-content sizes each row's own grid independently (rows with different-width
+    // numbers, e.g. a small month next to a large yearly total, drift out of alignment
+    // with each other), and 'ch' units resolve relative to each element's OWN font-size —
+    // the header row here is deliberately smaller (0.7rem) than the body rows (0.8rem), so
+    // the same "9.5ch" was actually a different pixel width in each, which is exactly what
+    // broke alignment between the header and the data rows even though ch kept data rows
+    // aligned with each other. Measuring with a canvas at the data rows' (larger, bold)
+    // font gives one true pixel width that's correct in every context, header included.
+    // The Year/Month label column stays a flexible minmax(40px,1fr) so it's the one that
+    // yields space first if the screen is narrow — it already truncates gracefully via its
+    // own ellipsis handling below.
+    const measureCtx = document.createElement('canvas').getContext('2d');
+    const bodyFontFamily = getComputedStyle(document.body).fontFamily;
+    const textWidthPx = (str, remSize, weight) => {
+        measureCtx.font = `${weight} ${remSize * 16}px ${bodyFontFamily}`;
+        return measureCtx.measureText(str).width;
+    };
+    const colWidthPx = (strings, remSize, weight, minPx) => Math.ceil(Math.max(minPx, ...strings.map(s => textWidthPx(s, remSize, weight))) + 14);
+    const expWidth = colWidthPx([...monthData.map(m => fmt(m.totalExp)), fmt(totalExpAll), 'Expenses'], 0.8, 700, 40);
+    let gridCols;
+    if (selectedCategory) {
+        gridCols = `minmax(40px, 1fr) ${expWidth}px`;
+    } else {
+        const incWidth = colWidthPx([...monthData.map(m => fmt(m.totalInc)), fmt(totalIncomeAll), 'Income'], 0.8, 700, 40);
+        const netWidth = colWidthPx([...monthData.map(m => fmt(m.net)), fmt(totalNetAll), 'Net'], 0.8, 700, 30);
+        const savStrings = [...monthData.map(m => m.savingsRate !== null ? m.savingsRate.toFixed(0) + '%' : 'N/A'), totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0) + '%' : 'N/A', 'Savings%'];
+        const savWidth = colWidthPx(savStrings, 0.78, 700, 40);
+        gridCols = `minmax(40px, 1fr) ${incWidth}px ${expWidth}px ${netWidth}px ${savWidth}px`;
+    }
 
     return (
         <div className="screen">
@@ -9067,19 +9278,19 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
                                             <div style={{fontWeight:600,fontSize:'0.75rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{m.label}</div>
                                             {m.isCurrent && <span className="badge bg-secondary" style={{fontSize:'0.55rem',marginTop:'2px',display:'inline-block'}}>current</span>}
                                         </div>
-                                        {!selectedCategory && <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>}
-                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
+                                        {!selectedCategory && <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right',whiteSpace:'nowrap'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>}
+                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',whiteSpace:'nowrap',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
                                             onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to)}
                                             title={m.totalExp > 0 ? `View ${m.label} expenses` : undefined}>
                                             {m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}
                                         </div>
                                         {!selectedCategory && (
-                                            <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
+                                            <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',whiteSpace:'nowrap',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
                                                 {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
                                             </div>
                                         )}
                                         {!selectedCategory && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right'}}>
+                                            <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right',whiteSpace:'nowrap'}}>
                                                 {m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : 'N/A'}
                                             </div>
                                         )}
@@ -9145,11 +9356,11 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
                         })}
 
                         <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',marginTop:'2px',borderTop:'2px solid #adb5bd'}}>
-                            <div style={{fontWeight:700,fontSize:'0.85rem'}}>Total</div>
-                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,color:'#198754',textAlign:'right'}}>{fmt(totalIncomeAll)}</div>}
-                            <div style={{fontSize:'0.8rem',fontWeight:700,color:'#fd7e14',textAlign:'right'}}>{fmt(totalExpAll)}</div>
-                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,textAlign:'right',color:totalNetAll>=0?'#198754':'#dc3545'}}>{fmt(totalNetAll)}</div>}
-                            {!selectedCategory && <div style={{fontSize:'0.78rem',fontWeight:700,color:'#6c757d',textAlign:'right'}}>{totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0)+'%' : 'N/A'}</div>}
+                            <div style={{fontWeight:700,fontSize:'0.85rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>Total</div>
+                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,color:'#198754',textAlign:'right',whiteSpace:'nowrap'}}>{fmt(totalIncomeAll)}</div>}
+                            <div style={{fontSize:'0.8rem',fontWeight:700,color:'#fd7e14',textAlign:'right',whiteSpace:'nowrap'}}>{fmt(totalExpAll)}</div>
+                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,textAlign:'right',whiteSpace:'nowrap',color:totalNetAll>=0?'#198754':'#dc3545'}}>{fmt(totalNetAll)}</div>}
+                            {!selectedCategory && <div style={{fontSize:'0.78rem',fontWeight:700,color:'#6c757d',textAlign:'right',whiteSpace:'nowrap'}}>{totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0)+'%' : 'N/A'}</div>}
                         </div>
                     </div>
                 </React.Fragment>
@@ -9163,7 +9374,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '' });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -9173,7 +9384,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [valuationError, setValuationError] = useState('');
     const [bankAccounts] = useState(() => DataService.getBankAccounts());
     const [addMoneyItem, setAddMoneyItem] = useState(null);
-    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '' });
+    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
     const [addMoneyErrors, setAddMoneyErrors] = useState({});
     const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
 
@@ -9262,14 +9473,14 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const openAddForm = () => {
         setEditingItem(null);
         const firstAssetCat = assetCategories && assetCategories[0];
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '' });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
         setFormErrors({});
         setShowForm(true);
     };
 
     const openEditForm = (item) => {
         setEditingItem(item);
-        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '' });
+        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
         setFormErrors({});
         setShowForm(true);
     };
@@ -9309,6 +9520,15 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     if (onUpdate) await onUpdate();
                 }
             }
+            if (form.isRecurring) {
+                DataService.addRecurring({
+                    templateExpense: { netWorthItemId: newItem.id, netWorthItemName: newItem.name, amount: parseFloat(form.value), currency: form.currency, accountId: form.type === 'asset' && form.fundAccountId ? parseInt(form.fundAccountId) : '', person: form.person || 'own' },
+                    frequency: form.recurringFreq,
+                    endDate: form.recurringEndDate,
+                    type: form.type,
+                    startDate: form.recurringStartDate
+                });
+            }
         }
         setShowForm(false);
         setEditingItem(null);
@@ -9329,7 +9549,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         reload();
     };
 
-    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '' }); setAddMoneyErrors({}); };
+    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' }); setAddMoneyErrors({}); };
 
     const handleAddMoneySubmit = async (e) => {
         e.preventDefault();
@@ -9356,8 +9576,17 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     if (onUpdate) await onUpdate();
                 }
             }
+            if (addMoneyForm.isRecurring) {
+                DataService.addRecurring({
+                    templateExpense: { netWorthItemId: addMoneyItem.id, netWorthItemName: addMoneyItem.name, amount, currency: addMoneyItem.currency, accountId: addMoneyForm.accountId ? parseInt(addMoneyForm.accountId) : '', person: addMoneyItem.person || 'own' },
+                    frequency: addMoneyForm.recurringFreq,
+                    endDate: addMoneyForm.recurringEndDate,
+                    type: addMoneyItem.type,
+                    startDate: addMoneyForm.recurringStartDate
+                });
+            }
             setAddMoneyItem(null);
-            setAddMoneyForm({ amount: '', accountId: '' });
+            setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
             setAddMoneyErrors({});
             reload();
         } finally {
@@ -9565,11 +9794,18 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 </button>
             </div>
 
-            {/* Form */}
+            {/* Form modal — a modal (not inline-at-top) so Edit is reachable without scrolling
+                up past a long asset/liability list; Add reuses the same modal for consistency. */}
             {showForm && (
-                <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
-                    <h6 style={{marginBottom:'0.6rem',fontSize:'0.85rem',fontWeight:600}}>{editingItem ? 'Edit Item' : 'Add New Item'}</h6>
-                    <form onSubmit={handleSubmit}>
+                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                <div className="modal-dialog modal-dialog-centered">
+                <div className="modal-content">
+                <div className="modal-header">
+                    <h5 className="modal-title" style={{fontSize:'1rem'}}>{editingItem ? 'Edit Item' : 'Add New Item'}</h5>
+                    <button type="button" className="btn-close" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}></button>
+                </div>
+                <div className="modal-body" style={{maxHeight:'70vh',overflowY:'auto'}}>
+                    <form id="networth-item-form" onSubmit={handleSubmit}>
                         <div className="mb-2" style={{display:'flex',gap:'8px'}}>
                             <button type="button" className={'btn btn-sm flex-fill ' + (form.type==='asset' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => handleTypeChange('asset')}>
                                 <i className="fas fa-plus-circle me-1"></i>Asset
@@ -9662,15 +9898,52 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                 )}
                             </React.Fragment>
                         )}
+                        {!editingItem && (
+                            <div className="mb-2">
+                                <div className="form-check">
+                                    <input className="form-check-input" type="checkbox" id="networth-item-recurring" checked={form.isRecurring} onChange={e => setForm(f => ({...f, isRecurring: e.target.checked}))} />
+                                    <label className="form-check-label" htmlFor="networth-item-recurring" style={{fontSize:'0.85rem'}}>Make this recurring</label>
+                                </div>
+                                {form.isRecurring && (
+                                    <div style={{marginTop:'0.4rem',padding:'0.5rem',background:'#fff',borderRadius:'6px',border:'1px solid #e9ecef'}}>
+                                        <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+                                            <div>
+                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Frequency</label>
+                                                <select className="form-select form-select-sm" value={form.recurringFreq} onChange={e => setForm(f => ({...f, recurringFreq: e.target.value}))}>
+                                                    <option value="daily">Daily</option>
+                                                    <option value="weekly">Weekly</option>
+                                                    <option value="monthly">Monthly</option>
+                                                    <option value="yearly">Yearly</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Start Date</label>
+                                                <input type="date" className="form-control form-control-sm" value={form.recurringStartDate} onChange={e => setForm(f => ({...f, recurringStartDate: e.target.value}))} />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>End Date (optional)</label>
+                                            <input type="date" className="form-control form-control-sm" value={form.recurringEndDate} onChange={e => setForm(f => ({...f, recurringEndDate: e.target.value}))} />
+                                        </div>
+                                        <div className="text-muted" style={{fontSize:'0.72rem',marginTop:'0.3rem'}}>
+                                            This same amount{form.fundAccountId ? ', funded from the same bank account,' : ''} will be added to this item automatically every {form.recurringFreq === 'daily' ? 'day' : form.recurringFreq === 'weekly' ? 'week' : form.recurringFreq === 'yearly' ? 'year' : 'month'} starting after {form.recurringStartDate || 'the start date'}.
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div className="mb-3">
                             <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
                                 onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
                         </div>
-                        <div style={{display:'flex',gap:'8px'}}>
-                            <button type="submit" className="btn btn-sm btn-primary">{editingItem ? 'Save Changes' : 'Add Item'}</button>
-                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}>Cancel</button>
-                        </div>
                     </form>
+                </div>
+                <div className="modal-footer">
+                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}>Cancel</button>
+                    <button type="submit" form="networth-item-form" className="btn btn-sm btn-primary">{editingItem ? 'Save Changes' : 'Add Item'}</button>
+                </div>
+                </div>
+                </div>
                 </div>
             )}
 
@@ -9870,6 +10143,38 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                         <i className="fas fa-exclamation-triangle me-1"></i>This will deduct {fmt(parseFloat(addMoneyForm.amount) || 0, addMoneyItem.currency)} from the selected account and log it in Summary as a transfer to "{addMoneyItem.name}" — kept for audit, not counted as an expense.
                                     </div>
                                 )}
+                                <div className="mb-2">
+                                    <div className="form-check">
+                                        <input className="form-check-input" type="checkbox" id="add-money-recurring" checked={addMoneyForm.isRecurring} onChange={e => setAddMoneyForm(f => ({...f, isRecurring: e.target.checked}))} />
+                                        <label className="form-check-label" htmlFor="add-money-recurring" style={{fontSize:'0.85rem'}}>Make this recurring</label>
+                                    </div>
+                                    {addMoneyForm.isRecurring && (
+                                        <div style={{marginTop:'0.4rem',padding:'0.5rem',background:'#f8f9fa',borderRadius:'6px',border:'1px solid #e9ecef'}}>
+                                            <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+                                                <div>
+                                                    <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Frequency</label>
+                                                    <select className="form-select form-select-sm" value={addMoneyForm.recurringFreq} onChange={e => setAddMoneyForm(f => ({...f, recurringFreq: e.target.value}))}>
+                                                        <option value="daily">Daily</option>
+                                                        <option value="weekly">Weekly</option>
+                                                        <option value="monthly">Monthly</option>
+                                                        <option value="yearly">Yearly</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Start Date</label>
+                                                    <input type="date" className="form-control form-control-sm" value={addMoneyForm.recurringStartDate} onChange={e => setAddMoneyForm(f => ({...f, recurringStartDate: e.target.value}))} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>End Date (optional)</label>
+                                                <input type="date" className="form-control form-control-sm" value={addMoneyForm.recurringEndDate} onChange={e => setAddMoneyForm(f => ({...f, recurringEndDate: e.target.value}))} />
+                                            </div>
+                                            <div className="text-muted" style={{fontSize:'0.72rem',marginTop:'0.3rem'}}>
+                                                This same amount{addMoneyForm.accountId ? ', funded from the same bank account,' : ''} will be added to "{addMoneyItem.name}" automatically every {addMoneyForm.recurringFreq === 'daily' ? 'day' : addMoneyForm.recurringFreq === 'weekly' ? 'week' : addMoneyForm.recurringFreq === 'yearly' ? 'year' : 'month'} starting after {addMoneyForm.recurringStartDate || 'the start date'}.
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
                             <div className="modal-footer">
                                 <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setAddMoneyItem(null)}>Cancel</button>
@@ -10468,7 +10773,7 @@ function App() {
                         // Fail-closed: reject backups that don't belong to the current user
                         if (!isBackupOwnedByCurrentUser(cloudBackup, currentUser)) { setCloudSyncGate('idle'); return; }
                         const cloudTime = getBackupTimestamp(cloudBackup);
-                        const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                        const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                         if (cloudTime > localTime) {
                             const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                             const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
@@ -10787,7 +11092,7 @@ function App() {
         let showingRestore = false;
         if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
             const cloudTime = getBackupTimestamp(cloudBackup);
-            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+            const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
             if (cloudTime > localTime) { setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt'); showingRestore = true; }
         }
         // Upload local data to cloud immediately after connecting (unless we're showing the restore prompt)
@@ -10809,7 +11114,7 @@ function App() {
                     const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
                     if (!isSignatureAcceptable(sigResult)) throw new Error('Cloud backup integrity check failed — restore blocked.');
                     const cloudTime = getBackupTimestamp(cloudBackup);
-                    const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                    const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                     if (cloudTime > localTime) {
                         const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                         const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
@@ -10849,7 +11154,7 @@ function App() {
                 const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
                 if (isSignatureAcceptable(sigResult)) {
                     const cloudTime = getBackupTimestamp(cloudBackup);
-                    const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+                    const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                     if (cloudTime > localTime) {
                         // Merge cloud + local instead of replacing either side
                         const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
@@ -10894,7 +11199,7 @@ function App() {
             const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
             if (!isSignatureAcceptable(sigResult)) { setCloudSyncGate('idle'); return; }
             const cloudTime = getBackupTimestamp(cloudBackup);
-            const localTime = new Date(localStorage.getItem('financeApp_lastSaveTime') || 0).getTime();
+            const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
             if (cloudTime > localTime) {
                 const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
                 const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
