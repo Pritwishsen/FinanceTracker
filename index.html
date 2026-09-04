@@ -1328,27 +1328,13 @@ class DataService {
     // Records a cash withdrawal: deducts `deductedAmount` (the account's own currency) from
     // the bank account via the same "phantom transfer to an asset" trick Add Money/Fund Asset
     // use (toAccountId: null, toAssetId set — computeBankAccountBalance's transfersOut already
-    // nets this), and accumulates `amount` (the withdrawal currency) into a single Cash asset
-    // per person+currency rather than creating a new asset on every withdrawal.
-    static withdrawCash({ accountId, currency, amount, fee, feeCurrency, deductedAmount, date }, activeView) {
+    // nets this). Unlike Add Money/Fund Asset, this does NOT touch a stored Net Worth item —
+    // see getCashWithdrawItems below for why the Cash balance is computed instead of stored.
+    // toAssetId/toAssetName here are purely for the Summary audit table's display text, not a
+    // real item reference (nothing looks them up), so a synthetic id is fine.
+    static withdrawCash({ accountId, currency, amount, fee, feeCurrency, deductedAmount, date }) {
         const account = this.getBankAccounts().find(a => a.id === accountId);
         if (!account) return null;
-        // Named "Cash Withdraw" (not the more common "Cash") and left unlocked so it never
-        // collides with — or force-locks — a category a user may have already created
-        // themselves; see migrateStrayLockedCashCategory for the one-time cleanup of accounts
-        // that got bitten by an earlier version of this feature that used the generic name.
-        const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash Withdraw');
-        const personKey = account.person || 'own';
-        const items = this.getNetWorthItems();
-        const existing = items.find(i => i.type === 'asset' && i.categoryId === cashCat.id && i.currency === currency && (i.person || 'own') === personKey);
-        let cashItem;
-        if (existing) {
-            const currentOriginal = existing.originalAmount != null ? existing.originalAmount : existing.value;
-            this.updateNetWorthItem(existing.id, { originalAmount: currentOriginal + amount, value: existing.value + amount }, { activeView });
-            cashItem = existing;
-        } else {
-            cashItem = this.addNetWorthItem({ name: 'Cash', value: amount, currency, type: 'asset', categoryId: cashCat.id, subcategory: '', notes: '', person: account.person, country: account.country }, activeView);
-        }
         // isOverseas stays false regardless of currency mismatch — same as Add Money/Fund
         // Asset — so this only ever lists in Summary's "Asset Funding" table, not also
         // "Overseas Transfers" (those two filters aren't mutually exclusive on toAssetId).
@@ -1358,7 +1344,7 @@ class DataService {
             fromAmount: deductedAmount, toAmount: amount,
             isOverseas: false, conversionRate, fee: fee || 0,
             feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
-            toAssetId: cashItem.id, toAssetName: cashItem.name, isCashWithdrawal: true,
+            toAssetId: 'cash-' + (account.person || 'own') + '-' + currency, toAssetName: 'Cash', isCashWithdrawal: true,
             // toAmount is denominated in the withdrawal currency, which can differ from the
             // account's own currency (fromAmount's currency) — stored explicitly since the
             // Summary audit table sums toAmount by currency and can't assume they match.
@@ -1368,26 +1354,53 @@ class DataService {
             feeCurrency: feeCurrency || account.currency,
             notes: 'Cash withdrawal — logged for audit'
         });
-        return cashItem;
+        return null;
     }
-    // Shared by "Paid by Cash" expenses and Cash Withdraw: draws down (delta<0) or credits back
-    // (delta>0) an EXISTING per-person-per-currency "Cash" asset. Deliberately does not create
-    // one when it's missing — an expense marked Paid by Cash in a currency the user has never
-    // actually withdrawn cash in stays a plain unlinked expense (no phantom negative cash
-    // asset conjured up just because the checkbox was ticked). skipHistory:true — unlike an
-    // explicit withdrawal/valuation edit, routine expense spending shouldn't flood the Net Worth
-    // history table (ordinary bank-linked expenses aren't snapshotted per-transaction either).
-    static _adjustCashOnHand(person, currency, delta) {
-        if (!delta) return false;
-        const cur = currency || 'GBP';
+    // Cash on hand, computed like a linked bank account (see getBankAssetItems) rather than a
+    // stored/mutated item. The old design stored a single running total that got incrementally
+    // adjusted (+amount on withdrawal, -amount on a "Paid by Cash" expense) directly on a
+    // persisted Net Worth item — that broke across devices, because the cross-device merge
+    // picks whichever device's whole copy of the item has the newer timestamp and discards the
+    // other entirely. Two devices each applying their own delta before syncing would silently
+    // lose one device's adjustment. Recomputing fresh each time from the underlying transfers/
+    // expenses (which already merge correctly record-by-record) avoids that class of bug and
+    // self-corrects any total the old bug already threw off — see migrateCashWithdrawItemsToComputed.
+    static getCashWithdrawItems(activeView) {
+        const accountsById = new Map(this.getBankAccounts().map(a => [String(a.id), a]));
+        const totals = {}; // key: "person|currency" -> { person, currency, value }
+        const bucket = (person, currency) => {
+            const key = (person || 'own') + '|' + (currency || 'GBP');
+            if (!totals[key]) totals[key] = { person: person || 'own', currency: currency || 'GBP', value: 0 };
+            return totals[key];
+        };
+        this.getTransfers().filter(t => t.isCashWithdrawal).forEach(t => {
+            const account = accountsById.get(String(t.fromAccountId));
+            bucket(account && account.person, t.cashWithdrawCurrency || (account && account.currency)).value += t.toAmount;
+        });
+        this.data.expenses.filter(e => e.isCashPayment).forEach(e => {
+            bucket(e.paidBy, e.currency).value -= e.amount;
+        });
+        const keys = Object.keys(totals);
+        if (keys.length === 0) return [];
         const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash Withdraw');
-        const personKey = person || 'own';
+        return keys
+            .map(key => ({ id: 'cash-' + key, name: 'Cash', value: totals[key].value, currency: totals[key].currency, categoryId: cashCat.id, subcategory: '', type: 'asset', person: totals[key].person, country: '', isBankAccount: true, isComputedCash: true }))
+            .filter(item => !activeView || matchesActiveView(item.person, activeView));
+    }
+    // One-time cleanup for accounts that already have a real, stored "Cash Withdraw" item from
+    // before getCashWithdrawItems existed — those are now stale (nothing writes to them anymore)
+    // and would show up as a duplicate alongside the computed figure. Idempotent: a no-op once
+    // the category has no real items left. recordDeletion (not deleteNetWorthItem, to avoid a
+    // history-snapshot entry per item) still logs each removal so it propagates on next sync.
+    static migrateCashWithdrawItemsToComputed() {
+        const cats = this.getNetWorthCategories('asset');
+        const cashCat = cats.find(c => c.name.trim().toLowerCase() === 'cash withdraw');
+        if (!cashCat) return;
         const items = this.getNetWorthItems();
-        const existing = items.find(i => i.type === 'asset' && i.categoryId === cashCat.id && i.currency === cur && (i.person || 'own') === personKey);
-        if (!existing) return false;
-        const currentOriginal = existing.originalAmount != null ? existing.originalAmount : existing.value;
-        this.updateNetWorthItem(existing.id, { originalAmount: currentOriginal + delta, value: existing.value + delta }, { skipHistory: true });
-        return true;
+        const stale = items.filter(i => i.categoryId === cashCat.id);
+        if (stale.length === 0) return;
+        stale.forEach(i => this.recordDeletion('networth', i.id));
+        this.saveNetWorthItems(items.filter(i => i.categoryId !== cashCat.id));
     }
     // Every non-primary asset-type bank account, shaped as a read-only Net Worth asset item
     // under the "Bank & Savings" category — the primary account is deliberately excluded
@@ -1453,11 +1466,6 @@ class DataService {
     static async addExpense(expense) {
         await this.initialize();
         const newExpense = { ...expense, id: DataService._uniqueId(), createdAt: new Date().toISOString() };
-        // cashDeductionApplied records whether a real cash asset actually got debited (vs. no
-        // matching Cash Withdraw asset existing yet, in which case this stays a plain unlinked
-        // expense) — later edits/deletes only reverse the effect if this was true, so a cash
-        // asset created afterwards can't get wrongly credited for a deduction that never happened.
-        if (newExpense.isCashPayment) newExpense.cashDeductionApplied = this._adjustCashOnHand(newExpense.paidBy, newExpense.currency, -newExpense.amount);
         this.data.expenses.push(newExpense);
         this.saveExpenses();
         return newExpense;
@@ -1469,12 +1477,7 @@ class DataService {
         await this.initialize();
         const index = this.data.expenses.findIndex(expense => expense.id === id);
         if (index === -1) return null;
-        const oldExpense = this.data.expenses[index];
-        const updated = { ...oldExpense, ...updates };
-        // Reverse the old cash-on-hand effect (only if it was actually applied) then reapply the
-        // new one — correct even when person/currency/amount/isCashPayment changed between old and new.
-        if (oldExpense.isCashPayment && oldExpense.cashDeductionApplied) this._adjustCashOnHand(oldExpense.paidBy, oldExpense.currency, oldExpense.amount);
-        updated.cashDeductionApplied = updated.isCashPayment ? this._adjustCashOnHand(updated.paidBy, updated.currency, -updated.amount) : false;
+        const updated = { ...this.data.expenses[index], ...updates };
         this.data.expenses[index] = updated;
         this.saveExpenses();
         return updated;
@@ -1486,7 +1489,6 @@ class DataService {
             const deleted = this.data.expenses.splice(index, 1)[0];
             this.saveExpenses();
             this.recordDeletion('expenses', id);
-            if (deleted.isCashPayment && deleted.cashDeductionApplied) this._adjustCashOnHand(deleted.paidBy, deleted.currency, deleted.amount);
             return deleted;
         }
         return null;
@@ -1496,10 +1498,7 @@ class DataService {
         const toDelete = this.data.expenses.filter(expense => expense.splitGroupId === splitGroupId);
         this.data.expenses = this.data.expenses.filter(expense => expense.splitGroupId !== splitGroupId);
         this.saveExpenses();
-        toDelete.forEach(expense => {
-            this.recordDeletion('expenses', expense.id);
-            if (expense.isCashPayment && expense.cashDeductionApplied) this._adjustCashOnHand(expense.paidBy, expense.currency, expense.amount);
-        });
+        toDelete.forEach(expense => this.recordDeletion('expenses', expense.id));
         return toDelete.length;
     }
     static clearAllExpenses() { this.data.expenses = []; this.saveExpenses(); }
@@ -2067,8 +2066,11 @@ class DataService {
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); this.recordDeletion('debts', id); } }
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
-    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person, country }, activeView) {
-        const item = { id: DataService._uniqueId(), name, value: parseFloat(value), originalAmount: parseFloat(value), currency, categoryId, subcategory: subcategory || '', type, notes: notes||'', person: person||'own', country: country || '', updatedAt: new Date().toISOString() };
+    // originalAmount: optional — defaults to value (a fresh item's gain/loss basis is itself),
+    // but the Bulk Upload re-import path needs to seed a different original amount when the
+    // exported row's Original Amount had already diverged from Value (a prior valuation update).
+    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person, country, originalAmount }, activeView) {
+        const item = { id: DataService._uniqueId(), name, value: parseFloat(value), originalAmount: originalAmount != null && originalAmount !== '' ? parseFloat(originalAmount) : parseFloat(value), currency, categoryId, subcategory: subcategory || '', type, notes: notes||'', person: person||'own', country: country || '', updatedAt: new Date().toISOString() };
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(activeView); return item;
     }
@@ -5393,7 +5395,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 currency: withdrawForm.currency,
                 amount, fee: parseFloat(withdrawForm.fee) || 0, feeCurrency: withdrawForm.feeCurrency,
                 deductedAmount, date: withdrawForm.date
-            }, activeView);
+            });
             setWithdrawAccount(null);
             setWithdrawForm(emptyWithdrawForm);
             setWithdrawErrors({});
@@ -6645,7 +6647,7 @@ function downloadCSV(filename, headers, rows) {
 const BULK_UPLOAD_MAX_ROWS = 1000;
 const BULK_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
 
-function BulkUpload({ categories, onUpdate }) {
+function BulkUpload({ categories, assetCategories = [], liabilityCategories = [], activeView, onUpdate }) {
     const [activeTab, setActiveTab] = useState('expenses');
     const [parsedRows, setParsedRows] = useState([]);
     const [originalHeaderCols, setOriginalHeaderCols] = useState([]);
@@ -6725,7 +6727,7 @@ function BulkUpload({ categories, onUpdate }) {
 
             if (activeTab === 'expenses') {
                 const colMap = {};
-                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'bank'];
+                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'payment method', 'bank'];
                 expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Category, Sub Category');
@@ -6764,9 +6766,17 @@ function BulkUpload({ categories, onUpdate }) {
 
                     const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '');
 
+                    // Payment Method disambiguates "Cash" from "no bank specified" — without it,
+                    // an imported expense could never be marked Paid by Cash at all (a blank
+                    // Bank column previously always meant "unlinked", never explicitly cash).
+                    const methodVal = colMap['payment method'] !== undefined ? (vals[colMap['payment method']] || '').trim().toLowerCase() : '';
+                    if (methodVal && methodVal !== 'cash' && methodVal !== 'bank') errors.push('Payment Method must be Cash or Bank');
+                    const isCashPayment = methodVal === 'cash';
+
                     const bankVal = colMap['bank'] !== undefined ? (vals[colMap['bank']] || '').trim() : '';
+                    if (methodVal === 'bank' && !bankVal) errors.push('Bank is required when Payment Method is Bank');
                     let accountId = '';
-                    if (bankVal) {
+                    if (!isCashPayment && bankVal) {
                         const matchedAccount = DataService.getAccountsForPerson(paidByVal || 'own').find(a => a.accountName.toLowerCase() === bankVal.toLowerCase());
                         if (!matchedAccount) errors.push('Bank account not found: ' + bankVal);
                         else if (matchedAccount.currency !== currency) errors.push(`Bank currency (${matchedAccount.currency}) does not match transaction currency (${currency})`);
@@ -6783,6 +6793,7 @@ function BulkUpload({ categories, onUpdate }) {
                         categoryName: matchedCat ? matchedCat.name : catVal,
                         subcategory: matchedSub || subVal,
                         paidBy: paidByVal,
+                        isCashPayment: isCashPayment,
                         bank: bankVal,
                         accountId: accountId,
                         error: errors.length > 0 ? errors.join('; ') : null,
@@ -6790,7 +6801,7 @@ function BulkUpload({ categories, onUpdate }) {
                     });
                 }
                 setParsedRows(rows);
-            } else {
+            } else if (activeTab === 'income') {
                 const colMap = {};
                 const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank'];
                 incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
@@ -6846,6 +6857,101 @@ function BulkUpload({ categories, onUpdate }) {
                     });
                 }
                 setParsedRows(rows);
+            } else {
+                // Assets ('assets' tab, type 'asset') and Liabilities ('liabilities' tab,
+                // type 'liability') share one column schema — the same one ExportData writes —
+                // so a file exported from this app reproduces exactly on re-import. Unlike
+                // Expense, Sub Category here is free text (not validated against a fixed list —
+                // see NetWorth's handleSubmit, which only requires Name and a positive Value).
+                const colMap = {};
+                // "Funded From Bank" is asset-only (it wires into the Add-Asset "fund from
+                // account" feature, which moves money out of a bank account) — Liabilities
+                // have no equivalent funding concept, so it's simply not read for that tab.
+                const nwHeaders = ['name', 'value', 'currency', 'category', 'sub category', 'original amount', 'person', 'country', 'bank', 'notes', 'funded from bank'];
+                nwHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
+                if (colMap['name'] === undefined || colMap['value'] === undefined || colMap['category'] === undefined) {
+                    setFileError('Missing required columns: Name, Value, Category');
+                    return;
+                }
+                const type = activeTab === 'assets' ? 'asset' : 'liability';
+                const categoryList = type === 'asset' ? assetCategories : liabilityCategories;
+                const rows = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const vals = parseCSVLine(lines[i]);
+                    const errors = [];
+                    const nameVal = (vals[colMap['name']] || '').trim();
+                    const valueVal = vals[colMap['value']] || '';
+                    const currencyVal = colMap['currency'] !== undefined ? (vals[colMap['currency']] || '').toUpperCase() : '';
+                    const catVal = vals[colMap['category']] || '';
+                    const subVal = colMap['sub category'] !== undefined ? (vals[colMap['sub category']] || '') : '';
+                    const origVal = colMap['original amount'] !== undefined ? (vals[colMap['original amount']] || '') : '';
+                    const personVal = colMap['person'] !== undefined ? (vals[colMap['person']] || '').trim() : '';
+                    const countryVal = colMap['country'] !== undefined ? (vals[colMap['country']] || '') : '';
+                    const bankVal = colMap['bank'] !== undefined ? (vals[colMap['bank']] || '').trim() : '';
+                    const notesVal = colMap['notes'] !== undefined ? (vals[colMap['notes']] || '') : '';
+
+                    // A Bank value that matches a real account means this row IS that linked
+                    // account (a "Bank & Savings"/Credit Card/Loan row from export) — it's
+                    // already tracked automatically from the account itself, so re-creating it
+                    // as a manual item would double-count. Checked by account name rather than
+                    // category name, since a user could file a genuinely manual item under
+                    // "Bank & Savings" too. The computed Cash Withdraw figure has no single
+                    // account to match against, so it's recognized by its fixed name+category
+                    // instead — a low-risk heuristic given how specific that combination is.
+                    const isLinkedBankRow = !!bankVal && DataService.getBankAccounts().some(a => a.accountName.toLowerCase() === bankVal.toLowerCase());
+                    const isComputedCashRow = type === 'asset' && nameVal.toLowerCase() === 'cash' && catVal.trim().toLowerCase() === 'cash withdraw';
+                    const skip = isLinkedBankRow || isComputedCashRow;
+
+                    if (!nameVal) errors.push('Name is required');
+
+                    const value = parseFloat(valueVal.replace(/[£$€₹,]/g, ''));
+                    if (isNaN(value) || value <= 0) errors.push('Invalid value');
+
+                    const currency = currencyVal || 'GBP';
+                    if (currencyVal && !validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
+
+                    const matchedCat = categoryList.find(c => c.name.toLowerCase() === catVal.toLowerCase());
+                    if (!matchedCat) errors.push('Category not found: ' + catVal);
+
+                    let originalAmount = null;
+                    if (origVal.trim()) {
+                        originalAmount = parseFloat(origVal.replace(/[£$€₹,]/g, ''));
+                        if (isNaN(originalAmount) || originalAmount <= 0) errors.push('Invalid original amount');
+                    }
+
+                    const fundBankVal = (type === 'asset' && colMap['funded from bank'] !== undefined) ? (vals[colMap['funded from bank']] || '').trim() : '';
+                    let fundAccountId = '';
+                    if (!skip && fundBankVal) {
+                        const matchedAccount = DataService.getAccountsForPerson(personVal || 'own').find(a => a.accountName.toLowerCase() === fundBankVal.toLowerCase());
+                        if (!matchedAccount) errors.push('Bank account not found: ' + fundBankVal);
+                        else if (matchedAccount.currency !== currency) errors.push(`Bank currency (${matchedAccount.currency}) does not match value currency (${currency})`);
+                        else fundAccountId = matchedAccount.id;
+                    }
+
+                    rows.push({
+                        rowNum: i,
+                        name: nameVal,
+                        value: value,
+                        currency: currency,
+                        categoryId: matchedCat ? matchedCat.id : null,
+                        categoryName: matchedCat ? matchedCat.name : catVal,
+                        subcategory: subVal,
+                        originalAmount: originalAmount,
+                        person: personVal,
+                        country: countryVal,
+                        bank: bankVal,
+                        notes: notesVal,
+                        fundBank: fundBankVal,
+                        fundAccountId: fundAccountId,
+                        skip: skip,
+                        // A skipped row isn't going to be imported either way, so it doesn't
+                        // need to also be flagged as an error even if something else about it
+                        // looks off (e.g. a stale category name from before a rename).
+                        error: skip ? null : (errors.length > 0 ? errors.join('; ') : null),
+                        raw: lines[i]
+                    });
+                }
+                setParsedRows(rows);
             }
         };
         reader.readAsText(file);
@@ -6869,12 +6975,22 @@ function BulkUpload({ categories, onUpdate }) {
             const exampleCat = categories[0];
             const exampleSub = exampleCat && exampleCat.subcategories && exampleCat.subcategories[0];
             downloadCSV('financetracker-expenses-template.csv',
-                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Bank'],
-                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '']]);
-        } else {
+                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Payment Method', 'Bank'],
+                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '', '']]);
+        } else if (activeTab === 'income') {
             downloadCSV('financetracker-income-template.csv',
                 ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank'],
                 [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '']]);
+        } else if (activeTab === 'assets') {
+            const exampleCat = assetCategories[0];
+            downloadCSV('financetracker-assets-template.csv',
+                ['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Notes', 'Funded From Bank'],
+                [['Example asset', '1000.00', 'GBP', exampleCat ? exampleCat.name : 'Investment', '', '', '', '', '', '', '']]);
+        } else {
+            const exampleCat = liabilityCategories[0];
+            downloadCSV('financetracker-liabilities-template.csv',
+                ['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Notes'],
+                [['Example liability', '1000.00', 'GBP', exampleCat ? exampleCat.name : 'Loans', '', '', '', '', '', '']]);
         }
     };
 
@@ -6889,7 +7005,7 @@ function BulkUpload({ categories, onUpdate }) {
     const handleImport = async () => {
         setIsImporting(true);
         try {
-            const validRows = parsedRows.filter(r => !r.error);
+            const validRows = parsedRows.filter(r => !r.error && !r.skip);
             let imported = 0;
             for (const row of validRows) {
                 if (activeTab === 'expenses') {
@@ -6901,9 +7017,10 @@ function BulkUpload({ categories, onUpdate }) {
                         categoryId: row.categoryId,
                         subcategory: row.subcategory,
                         paidBy: row.paidBy,
+                        isCashPayment: row.isCashPayment,
                         accountId: row.accountId
                     });
-                } else {
+                } else if (activeTab === 'income') {
                     await DataService.addIncome({
                         amount: row.amount,
                         currency: row.currency,
@@ -6913,11 +7030,42 @@ function BulkUpload({ categories, onUpdate }) {
                         paidBy: row.paidBy,
                         accountId: row.accountId
                     });
+                } else {
+                    const newItem = DataService.addNetWorthItem({
+                        name: row.name,
+                        value: row.value,
+                        currency: row.currency,
+                        type: activeTab === 'assets' ? 'asset' : 'liability',
+                        categoryId: row.categoryId,
+                        subcategory: row.subcategory,
+                        notes: row.notes,
+                        person: row.person,
+                        country: row.country,
+                        originalAmount: row.originalAmount
+                    }, activeView);
+                    // Mirrors the Add-Asset form's own "fund from account" behavior: draws the
+                    // value out of the chosen bank account via the Transfer ledger (an
+                    // investment move, not spending — logged in Summary's Asset Funding table).
+                    if (row.fundAccountId) {
+                        const account = DataService.getBankAccounts().find(a => a.id === row.fundAccountId);
+                        if (account) {
+                            DataService.addTransfer({
+                                date: new Date().toISOString().split('T')[0],
+                                fromAccountId: account.id, toAccountId: null,
+                                fromAmount: row.value, toAmount: row.value,
+                                isOverseas: false, conversionRate: 1, fee: 0,
+                                feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+                                toAssetId: newItem.id, toAssetName: newItem.name,
+                                notes: 'Investment funding — logged for audit'
+                            });
+                        }
+                    }
                 }
                 imported++;
             }
             const errorCount = parsedRows.filter(r => r.error).length;
-            setImportResult({ imported, errors: errorCount, fileName: selectedFileName });
+            const skippedCount = parsedRows.filter(r => r.skip).length;
+            setImportResult({ imported, errors: errorCount, skipped: skippedCount, fileName: selectedFileName });
             setParsedRows([]);
             setSelectedFileName('');
             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -6927,8 +7075,9 @@ function BulkUpload({ categories, onUpdate }) {
         }
     };
 
-    const validCount = parsedRows.filter(r => !r.error).length;
+    const validCount = parsedRows.filter(r => !r.error && !r.skip).length;
     const errorCount = parsedRows.filter(r => r.error).length;
+    const skippedCount = parsedRows.filter(r => r.skip).length;
     const displayRows = showOnlyErrors ? parsedRows.filter(r => r.error) : parsedRows;
     const totalPages = Math.max(1, Math.ceil(displayRows.length / ROWS_PER_PAGE));
     const pageRows = displayRows.slice((currentPage - 1) * ROWS_PER_PAGE, currentPage * ROWS_PER_PAGE);
@@ -6961,13 +7110,20 @@ function BulkUpload({ categories, onUpdate }) {
                 <li>
                     <button className={'nav-link ' + (activeTab === 'income' ? 'active' : '')} onClick={() => resetOnTabChange('income')} disabled={isImporting}>Income</button>
                 </li>
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'assets' ? 'active' : '')} onClick={() => resetOnTabChange('assets')} disabled={isImporting}>Assets</button>
+                </li>
+                <li>
+                    <button className={'nav-link ' + (activeTab === 'liabilities' ? 'active' : '')} onClick={() => resetOnTabChange('liabilities')} disabled={isImporting}>Liabilities</button>
+                </li>
             </ul>
 
             {importResult && (
                 <div className="alert alert-info">
                     <i className="fas fa-check-circle me-2"></i>
                     Imported {importResult.imported} row{importResult.imported !== 1 ? 's' : ''}{importResult.fileName ? <> from <strong>{importResult.fileName}</strong></> : ''}.
-                    {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were skipped.`}
+                    {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were not imported.`}
+                    {importResult.skipped > 0 && ` ${importResult.skipped} rows are already tracked automatically and were not imported.`}
                 </div>
             )}
 
@@ -6996,8 +7152,12 @@ function BulkUpload({ categories, onUpdate }) {
                 </div>
                 <div className="form-text">
                     {activeTab === 'expenses'
-                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Bank'
-                        : "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank"}
+                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Payment Method, Bank'
+                        : activeTab === 'income'
+                        ? "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank"
+                        : activeTab === 'assets'
+                        ? 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes, Funded From Bank'
+                        : 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes'}
                     {' '}· Max {BULK_UPLOAD_MAX_ROWS} rows, 5MB.
                 </div>
             </div>
@@ -7009,6 +7169,7 @@ function BulkUpload({ categories, onUpdate }) {
                     <div style={{marginBottom: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center', justifyContent: 'space-between'}}>
                         <div style={{display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap'}}>
                             <span className="badge bg-success">{validCount} valid</span>
+                            {skippedCount > 0 && <span className="badge bg-secondary">{skippedCount} tracked automatically</span>}
                             {errorCount > 0 && <span className="badge bg-danger">{errorCount} errors</span>}
                             <div className="btn-group btn-group-sm" role="group">
                                 <button type="button" className={'btn ' + (!showOnlyErrors ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setShowOnlyErrors(false)}>All</button>
@@ -7035,15 +7196,19 @@ function BulkUpload({ categories, onUpdate }) {
                                 <tr>
                                     <th>#</th>
                                     {activeTab === 'expenses' ? (
-                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
-                                    ) : (
+                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Payment Method', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                    ) : activeTab === 'income' ? (
                                         <>{['Date', 'Source', 'Amount', 'Currency', 'Description', "Who's Income", 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                    ) : activeTab === 'assets' ? (
+                                        <>{['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Funded From Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
+                                    ) : (
+                                        <>{['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
                                     )}
                                 </tr>
                             </thead>
                             <tbody>
                                 {pageRows.map((row, idx) => (
-                                    <tr key={row.rowNum ?? idx} className={row.error ? 'table-danger' : 'table-success'}>
+                                    <tr key={row.rowNum ?? idx} className={row.skip ? 'table-secondary' : row.error ? 'table-danger' : 'table-success'}>
                                         <td>{row.rowNum}</td>
                                         {activeTab === 'expenses' ? (
                                             <>
@@ -7054,9 +7219,10 @@ function BulkUpload({ categories, onUpdate }) {
                                                 <td>{row.categoryName || '-'}</td>
                                                 <td>{row.subcategory || '-'}</td>
                                                 <td>{row.paidBy || '-'}</td>
+                                                <td>{row.isCashPayment ? 'Cash' : row.accountId ? 'Bank' : '-'}</td>
                                                 <td>{row.bank || '-'}</td>
                                             </>
-                                        ) : (
+                                        ) : activeTab === 'income' ? (
                                             <>
                                                 <td>{row.date || '-'}</td>
                                                 <td>{row.source || '-'}</td>
@@ -7066,8 +7232,33 @@ function BulkUpload({ categories, onUpdate }) {
                                                 <td>{row.paidBy || '-'}</td>
                                                 <td>{row.bank || '-'}</td>
                                             </>
+                                        ) : activeTab === 'assets' ? (
+                                            <>
+                                                <td>{row.name || '-'}</td>
+                                                <td>{isNaN(row.value) ? '-' : row.value}</td>
+                                                <td>{row.currency}</td>
+                                                <td>{row.categoryName || '-'}</td>
+                                                <td>{row.subcategory || '-'}</td>
+                                                <td>{row.originalAmount != null ? row.originalAmount : '-'}</td>
+                                                <td>{row.person || '-'}</td>
+                                                <td>{row.country || '-'}</td>
+                                                <td>{row.bank || '-'}</td>
+                                                <td>{row.fundBank || '-'}</td>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <td>{row.name || '-'}</td>
+                                                <td>{isNaN(row.value) ? '-' : row.value}</td>
+                                                <td>{row.currency}</td>
+                                                <td>{row.categoryName || '-'}</td>
+                                                <td>{row.subcategory || '-'}</td>
+                                                <td>{row.originalAmount != null ? row.originalAmount : '-'}</td>
+                                                <td>{row.person || '-'}</td>
+                                                <td>{row.country || '-'}</td>
+                                                <td>{row.bank || '-'}</td>
+                                            </>
                                         )}
-                                        <td>{row.error ? <span className="text-danger" style={{fontSize: '0.8rem'}}>{row.error}</span> : <i className="fas fa-check text-success"></i>}</td>
+                                        <td>{row.skip ? <span className="text-muted" style={{fontSize: '0.8rem'}}><i className="fas fa-info-circle me-1"></i>Tracked automatically</span> : row.error ? <span className="text-danger" style={{fontSize: '0.8rem'}}>{row.error}</span> : <i className="fas fa-check text-success"></i>}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -7090,7 +7281,7 @@ function BulkUpload({ categories, onUpdate }) {
             {parsedRows.length === 0 && !importResult && !fileError && (
                 <div className="text-muted text-center" style={{padding: '2rem', background: '#f8f9fa', borderRadius: '8px'}}>
                     <i className="fas fa-file-csv fa-3x" style={{marginBottom: '0.75rem', display: 'block', opacity: 0.4}}></i>
-                    <p>Select a CSV file to preview and import {activeTab === 'expenses' ? 'expenses' : 'income'}</p>
+                    <p>Select a CSV file to preview and import {activeTab === 'expenses' ? 'expenses' : activeTab === 'income' ? 'income' : activeTab === 'assets' ? 'assets' : 'liabilities'}</p>
                 </div>
             )}
         </div>
@@ -8693,7 +8884,7 @@ function DisplayNamePrompt({ onRegister }) {
     );
 }
 
-function ExportData({ expenses, income, categories, defaultCurrency, onNavigate }) {
+function ExportData({ expenses, income, categories, netWorthItems = [], assetCategories = [], liabilityCategories = [], defaultCurrency, activeView, onNavigate }) {
     const [format, setFormat] = useState('csv');
     const [scope, setScope] = useState('all');
     const [fromDate, setFromDate] = useState('');
@@ -8725,6 +8916,28 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
 
     const getCatName = (id) => { const c = categories.find(c => c.id === id); return c ? c.name : id || ''; };
     const getSubName = (cid, sid) => { const c = categories.find(c => c.id === cid); if (!c || !c.subcategories) return sid || ''; const s = c.subcategories.find(s => s.id === sid); return s ? s.name : sid || ''; };
+    // Bank accounts aren't pre-filtered/passed down like categories are — read directly,
+    // matching how BulkUpload already reads DataService.getBankAccounts() itself.
+    const bankAccounts = DataService.getBankAccounts();
+    const getBankName = (accountId) => { const a = bankAccounts.find(a => a.id === accountId); return a ? a.accountName : ''; };
+    // Net Worth/Liability items keep separate category lists per type, unlike Expense's
+    // single shared list — look up against whichever list matches the item's own type.
+    const getNWCatName = (item) => {
+        const list = item.type === 'asset' ? assetCategories : liabilityCategories;
+        const c = list.find(c => c.id === item.categoryId);
+        return c ? c.name : '';
+    };
+
+    // Net Worth/Liabilities columns are deliberately identical between export and import
+    // (see BulkUpload) so a file exported here reproduces exactly on re-import — unlike the
+    // Expense/Income columns above, which include Tags/Notes that import doesn't read.
+    // Bank: only set for a row that IS a linked bank/credit-card/loan account (isBankAccount,
+    // but not the computed Cash figure, which isn't tied to one single account) — this is what
+    // lets Bulk Upload reliably recognize "this row is already tracked automatically, don't
+    // recreate it as a manual duplicate" on re-import, without guessing from the category name
+    // alone (a user could have a manual item filed under "Bank & Savings" too).
+    const nwHeaders = ['Name','Value','Currency','Category','Sub Category','Original Amount','Person','Country','Bank','Notes'];
+    const nwRow = (item) => [item.name, item.value, item.currency || defaultCurrency, getNWCatName(item), item.subcategory || '', item.originalAmount != null ? item.originalAmount : item.value, item.person || 'own', item.country || '', (item.isBankAccount && !item.isComputedCash) ? item.name : '', item.notes || ''];
 
     const handleExport = () => {
         if (format === 'pdf') {
@@ -8734,23 +8947,48 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
             return;
         }
         const { from, to } = getDateRange();
-        const doExp = scope !== 'income-only';
-        const doInc = scope !== 'expenses-only';
+        const doExp = scope === 'all' || scope === 'expenses-only' || scope === 'current-month';
+        const doInc = scope === 'all' || scope === 'income-only' || scope === 'current-month';
+        // Assets/Liabilities are current balances, not dated transactions — the date range
+        // (including the "Current Month" scope) never applies to them, only these two scopes do.
+        const doAssets = scope === 'all' || scope === 'assets-only';
+        const doLiab = scope === 'all' || scope === 'liabilities-only';
         const filteredExp = doExp ? expenses.filter(e => inRange(e.date, from, to)) : [];
         const filteredInc = doInc ? income.filter(i => inRange(i.date, from, to)) : [];
-        if (filteredExp.length === 0 && filteredInc.length === 0) { showToast('No records match. Export will be empty.'); return; }
-        const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Tags','Notes'];
-        const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income"];
-        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', (e.tags || []).join(';'), e.notes || '']);
-        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.paidBy || '']);
-        if (filteredExp.length > 0) exportToCSV(`financetracker-expenses-${todayStr()}.csv`, expHeaders, expRows);
-        if (filteredInc.length > 0) setTimeout(() => exportToCSV(`financetracker-income-${todayStr()}.csv`, incHeaders, incRows), filteredExp.length > 0 ? 200 : 0);
+        // "Assets" is every asset-type row the Net Worth screen shows, not just manually-added
+        // ones — linked Bank & Savings accounts and the computed Cash Withdraw figure are just
+        // as much a part of your net worth, so a snapshot that omits them isn't a full one.
+        const filteredAssets = doAssets ? [
+            ...netWorthItems.filter(i => i.type === 'asset'),
+            ...DataService.getBankAssetItems(activeView),
+            ...DataService.getCashWithdrawItems(activeView),
+        ] : [];
+        const filteredLiab = doLiab ? [
+            ...netWorthItems.filter(i => i.type === 'liability'),
+            ...DataService.getBankLiabilityItems(activeView),
+        ] : [];
+        const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Payment Method','Bank','Tags','Notes'];
+        const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income",'Bank'];
+        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', e.isCashPayment ? 'Cash' : e.accountId ? 'Bank' : '', getBankName(e.accountId), (e.tags || []).join(';'), e.notes || '']);
+        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.paidBy || '', getBankName(i.accountId)]);
+        const assetRows = filteredAssets.map(nwRow);
+        const liabRows = filteredLiab.map(nwRow);
+        const exportJobs = [
+            filteredExp.length > 0 && { filename: `financetracker-expenses-${todayStr()}.csv`, headers: expHeaders, rows: expRows },
+            filteredInc.length > 0 && { filename: `financetracker-income-${todayStr()}.csv`, headers: incHeaders, rows: incRows },
+            filteredAssets.length > 0 && { filename: `financetracker-assets-${todayStr()}.csv`, headers: nwHeaders, rows: assetRows },
+            filteredLiab.length > 0 && { filename: `financetracker-liabilities-${todayStr()}.csv`, headers: nwHeaders, rows: liabRows },
+        ].filter(Boolean);
+        if (exportJobs.length === 0) { showToast('No records match. Export will be empty.'); return; }
+        exportJobs.forEach((job, idx) => setTimeout(() => exportToCSV(job.filename, job.headers, job.rows), idx * 200));
     };
 
     const scopeOptions = [
         { value: 'all', label: 'All Data' },
         { value: 'expenses-only', label: 'Expenses Only' },
         { value: 'income-only', label: 'Income Only' },
+        { value: 'assets-only', label: 'Assets Only' },
+        { value: 'liabilities-only', label: 'Liabilities Only' },
         { value: 'current-month', label: 'Current Month' }
     ];
     const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
@@ -8809,7 +9047,8 @@ function ExportData({ expenses, income, categories, defaultCurrency, onNavigate 
             {format === 'csv' && (
                 <div className="alert alert-light small mb-3 text-muted border">
                     <i className="fas fa-info-circle me-2"></i>Amounts are exported in their original stored currency. A Currency column is included in each file.
-                    {scope === 'all' && ' All Data exports two files: one for expenses and one for income.'}
+                    {scope === 'all' && ' All Data exports up to four files: expenses, income, assets, and liabilities.'}
+                    {' '}Assets and Liabilities aren&rsquo;t affected by the date range — they&rsquo;re current balances, not dated transactions.
                 </div>
             )}
 
@@ -9430,7 +9669,8 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const visibleItems = [
         ...items.filter(i => matchesActiveView(i.person, activeView)),
         ...DataService.getBankAssetItems(activeView),
-        ...DataService.getBankLiabilityItems(activeView)
+        ...DataService.getBankLiabilityItems(activeView),
+        ...DataService.getCashWithdrawItems(activeView)
     ];
 
     // Whether any figure folded into the totals below actually went through a currency
@@ -9517,7 +9757,6 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         toAssetId: newItem.id, toAssetName: newItem.name,
                         notes: 'Investment funding — logged for audit'
                     });
-                    if (onUpdate) await onUpdate();
                 }
             }
             if (form.isRecurring) {
@@ -9532,10 +9771,16 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         }
         setShowForm(false);
         setEditingItem(null);
+        // reload() refreshes this screen's own items/history state; onUpdate() refreshes
+        // the top-level netWorthItems state Export/Bulk Upload read from — both are needed,
+        // since neither one covers what the other does (a real gap: before Export/Import
+        // existed, only this screen ever read Net Worth data, so onUpdate() being skipped
+        // here was invisible).
         reload();
+        if (onUpdate) onUpdate();
     };
 
-    const handleDelete = (id) => { DataService.deleteNetWorthItem(id, activeView); setShowDeleteModal(null); reload(); };
+    const handleDelete = (id) => { DataService.deleteNetWorthItem(id, activeView); setShowDeleteModal(null); reload(); if (onUpdate) onUpdate(); };
 
     const openValuationForm = (item) => { setValuationItem(item); setValuationValue(String(item.value)); setValuationError(''); };
 
@@ -9547,6 +9792,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         setValuationItem(null);
         setValuationValue('');
         reload();
+        if (onUpdate) onUpdate();
     };
 
     const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' }); setAddMoneyErrors({}); };
@@ -9573,7 +9819,6 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         toAssetId: addMoneyItem.id, toAssetName: addMoneyItem.name,
                         notes: 'Investment funding — logged for audit'
                     });
-                    if (onUpdate) await onUpdate();
                 }
             }
             if (addMoneyForm.isRecurring) {
@@ -9589,6 +9834,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
             setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
             setAddMoneyErrors({});
             reload();
+            if (onUpdate) onUpdate();
         } finally {
             setAddMoneySubmitting(false);
         }
@@ -9675,6 +9921,10 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
             {item.isPrimaryWallet ? (
                 <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="This account's balance is already included in the Wallet total above — not added again to Total Assets">
                     <i className="fas fa-wallet me-1"></i>In Wallet
+                </div>
+            ) : item.isComputedCash ? (
+                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from your cash withdrawals minus expenses marked Paid by Cash">
+                    <i className="fas fa-link me-1"></i>Computed
                 </div>
             ) : item.isBankAccount ? (
                 <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from this account's linked transactions — edit its Opening Amount in Settings → Bank Accounts to adjust">
@@ -10564,6 +10814,7 @@ function App() {
     const [expenses, setExpenses] = useState([]);
     const [income, setIncome] = useState([]);
     const [categories, setCategories] = useState([]);
+    const [netWorthItems, setNetWorthItems] = useState([]);
     const [assetCategories, setAssetCategories] = useState([]);
     const [liabilityCategories, setLiabilityCategories] = useState([]);
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
@@ -10867,6 +11118,7 @@ function App() {
         DataService.migrateCategoryBudgetsToPersonScope();
         DataService.migrateNetWorthOriginalAmounts();
         DataService.migrateStrayLockedCashCategory();
+        DataService.migrateCashWithdrawItemsToComputed();
         DataService.refreshCustomCurrencySymbols();
         const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
@@ -10874,6 +11126,7 @@ function App() {
         setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
         setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
         setCategories(categoriesData);
+        setNetWorthItems(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, view)));
         // getNetWorthCategories('asset') guarantees "Bank & Savings" (a locked default)
         // exists before this state is read by the Net Worth screen's category grouping.
         setAssetCategories(DataService.getNetWorthCategories('asset'));
@@ -11248,10 +11501,10 @@ function App() {
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
                 return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
-            case 'bulk-upload': return <BulkUpload categories={categories} onUpdate={handleDataUpdate} />;
+            case 'bulk-upload': return <BulkUpload categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
-            case 'export': return <ExportData expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onNavigate={setCurrentScreen} />;
+            case 'export': return <ExportData expenses={expenses} income={income} categories={categories} netWorthItems={netWorthItems} assetCategories={assetCategories} liabilityCategories={liabilityCategories} defaultCurrency={defaultCurrency} activeView={activeView} onNavigate={setCurrentScreen} />;
             case 'profile': return <ProfileScreen currentUser={currentUser} onLogout={handleLogout} onUpdate={handleDataUpdate} onDisplayNameChange={handleCurrentUserDisplayNameChange} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} />;
         }
