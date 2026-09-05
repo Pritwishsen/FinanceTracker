@@ -1477,7 +1477,7 @@ class DataService {
         await this.initialize();
         const index = this.data.expenses.findIndex(expense => expense.id === id);
         if (index === -1) return null;
-        const updated = { ...this.data.expenses[index], ...updates };
+        const updated = { ...this.data.expenses[index], ...updates, updatedAt: new Date().toISOString() };
         this.data.expenses[index] = updated;
         this.saveExpenses();
         return updated;
@@ -1529,7 +1529,7 @@ class DataService {
     static async updateIncome(id, updates) {
         await this.initialize();
         const index = this.data.income.findIndex(income => income.id === id);
-        if (index !== -1) { this.data.income[index] = { ...this.data.income[index], ...updates }; this.saveIncome(); return this.data.income[index]; }
+        if (index !== -1) { this.data.income[index] = { ...this.data.income[index], ...updates, updatedAt: new Date().toISOString() }; this.saveIncome(); return this.data.income[index]; }
         return null;
     }
     static async deleteIncome(id) {
@@ -1549,7 +1549,7 @@ class DataService {
     static async updateCategory(id, updates) {
         await this.initialize();
         const index = this.data.categories.findIndex(category => category.id === id);
-        if (index !== -1) { this.data.categories[index] = { ...this.data.categories[index], ...updates }; this.saveCategories(); return this.data.categories[index]; }
+        if (index !== -1) { this.data.categories[index] = { ...this.data.categories[index], ...updates, updatedAt: new Date().toISOString() }; this.saveCategories(); return this.data.categories[index]; }
         return null;
     }
     static async deleteCategory(id) {
@@ -1799,7 +1799,7 @@ class DataService {
         this.saveGoals(goals);
         return goal;
     }
-    static updateGoal(id, updates) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals[i] = { ...goals[i], ...updates }; this.saveGoals(goals); } }
+    static updateGoal(id, updates) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals[i] = { ...goals[i], ...updates, updatedAt: new Date().toISOString() }; this.saveGoals(goals); } }
     static deleteGoal(id) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals.splice(i, 1); this.saveGoals(goals); this.recordDeletion('goals', id); } }
     static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
     static getBills() { return JSON.parse(localStorage.getItem('financeApp_bills') || '[]'); }
@@ -1812,7 +1812,7 @@ class DataService {
         const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
-    static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates }; this.saveBills(bills); } }
+    static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates, updatedAt: new Date().toISOString() }; this.saveBills(bills); } }
     static deleteBill(id) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills.splice(i, 1); this.saveBills(bills); this.recordDeletion('bills', id); } }
     static markBillPaid(id) {
         const bills = this.getBills(); const bill = bills.find(b => b.id === id); if (!bill) return;
@@ -1835,10 +1835,10 @@ class DataService {
     }
     static updateRecurring(id, updates) {
         const r = this.getRecurring(); const s = r.find(x => x.id === id);
-        if (s) { Object.assign(s, updates); this.saveRecurring(r); }
+        if (s) { Object.assign(s, updates, { updatedAt: new Date().toISOString() }); this.saveRecurring(r); }
     }
-    static pauseRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = false; this.saveRecurring(r); } }
-    static resumeRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = true; this.saveRecurring(r); } }
+    static pauseRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = false; s.updatedAt = new Date().toISOString(); this.saveRecurring(r); } }
+    static resumeRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = true; s.updatedAt = new Date().toISOString(); this.saveRecurring(r); } }
     static deleteRecurring(id) { const r = this.getRecurring(); const i = r.findIndex(x => x.id === id); if (i !== -1) { r.splice(i, 1); this.saveRecurring(r); this.recordDeletion('recurring', id); } }
     // Shared by the interactive "Add Money" modal and the recurring processor below, so a
     // recurring asset/liability contribution behaves identically to a manual one — same
@@ -1881,6 +1881,7 @@ class DataService {
                 }
                 schedule.lastGenerated = schedule.nextDue;
                 schedule.nextDue = computeNextDue(schedule.nextDue, schedule.frequency);
+                schedule.updatedAt = new Date().toISOString();
                 changed = true;
             }
         }
@@ -2060,9 +2061,9 @@ class DataService {
     }
     static updateDebt(id, updates) {
         const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id);
-        if (i !== -1) { debts[i] = { ...debts[i], ...updates }; this.saveDebts(debts); }
+        if (i !== -1) { debts[i] = { ...debts[i], ...updates, updatedAt: new Date().toISOString() }; this.saveDebts(debts); }
     }
-    static settleDebt(id) { const debts = this.getDebts(); const d = debts.find(x => x.id === id); if (d) { d.isSettled = true; d.settledAt = new Date().toISOString(); this.saveDebts(debts); } }
+    static settleDebt(id) { const debts = this.getDebts(); const d = debts.find(x => x.id === id); if (d) { d.isSettled = true; d.settledAt = new Date().toISOString(); d.updatedAt = new Date().toISOString(); this.saveDebts(debts); } }
     static deleteDebt(id) { const debts = this.getDebts(); const i = debts.findIndex(x => x.id === id); if (i !== -1) { debts.splice(i, 1); this.saveDebts(debts); this.recordDeletion('debts', id); } }
     static getNetWorthItems() { return JSON.parse(localStorage.getItem('financeApp_networth') || '[]'); }
     static saveNetWorthItems(items) { localStorage.setItem('financeApp_networth', JSON.stringify(items)); }
