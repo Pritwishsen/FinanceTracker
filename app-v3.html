@@ -1121,39 +1121,44 @@ class DataService {
         if (changed) this.saveSettings();
     }
     static migratePersonName(oldName, newName) {
-        this.data.expenses.forEach(exp => { if (exp.paidBy === oldName) exp.paidBy = newName; });
-        this.data.income.forEach(inc => { if (inc.paidBy === oldName) inc.paidBy = newName; });
+        const now = new Date().toISOString();
+        this.data.expenses.forEach(exp => { if (exp.paidBy === oldName) { exp.paidBy = newName; exp.updatedAt = now; } });
+        this.data.income.forEach(inc => { if (inc.paidBy === oldName) { inc.paidBy = newName; inc.updatedAt = now; } });
         this.saveExpenses();
         this.saveIncome();
         const accounts = this.getBankAccounts();
         let accountsChanged = false;
-        accounts.forEach(a => { if (a.person === oldName) { a.person = newName; accountsChanged = true; } });
+        accounts.forEach(a => { if (a.person === oldName) { a.person = newName; a.updatedAt = now; accountsChanged = true; } });
         if (accountsChanged) this.saveBankAccounts(accounts);
         // Net Worth items, debts, bills and reconciliations are also person-scoped (matchesActiveView
         // filters on .person) but were missing from this migration — a renamed person's existing
         // items silently vanished from every screen since they stayed tagged with the old name.
         const netWorthItems = this.getNetWorthItems();
         let netWorthChanged = false;
-        netWorthItems.forEach(i => { if (i.person === oldName) { i.person = newName; netWorthChanged = true; } });
+        netWorthItems.forEach(i => { if (i.person === oldName) { i.person = newName; i.updatedAt = now; netWorthChanged = true; } });
         if (netWorthChanged) this.saveNetWorthItems(netWorthItems);
         const renameCreatedInView = (arr) => (arr || []).map(v => v === oldName ? newName : v);
         const debts = this.getDebts();
         let debtsChanged = false;
         debts.forEach(d => {
-            if (d.person === oldName) { d.person = newName; debtsChanged = true; }
-            if ((d.createdInView || []).includes(oldName)) { d.createdInView = renameCreatedInView(d.createdInView); debtsChanged = true; }
+            let touched = false;
+            if (d.person === oldName) { d.person = newName; debtsChanged = true; touched = true; }
+            if ((d.createdInView || []).includes(oldName)) { d.createdInView = renameCreatedInView(d.createdInView); debtsChanged = true; touched = true; }
+            if (touched) d.updatedAt = now;
         });
         if (debtsChanged) this.saveDebts(debts);
         const bills = this.getBills();
         let billsChanged = false;
         bills.forEach(b => {
-            if (b.person === oldName) { b.person = newName; billsChanged = true; }
-            if ((b.createdInView || []).includes(oldName)) { b.createdInView = renameCreatedInView(b.createdInView); billsChanged = true; }
+            let touched = false;
+            if (b.person === oldName) { b.person = newName; billsChanged = true; touched = true; }
+            if ((b.createdInView || []).includes(oldName)) { b.createdInView = renameCreatedInView(b.createdInView); billsChanged = true; touched = true; }
+            if (touched) b.updatedAt = now;
         });
         if (billsChanged) this.saveBills(bills);
         const reconciliations = this.getReconciliations();
         let reconciliationsChanged = false;
-        reconciliations.forEach(r => { if (r.person === oldName) { r.person = newName; reconciliationsChanged = true; } });
+        reconciliations.forEach(r => { if (r.person === oldName) { r.person = newName; r.updatedAt = now; reconciliationsChanged = true; } });
         if (reconciliationsChanged) this.saveReconciliations(reconciliations);
     }
     static setDefaultPerson(id) {
@@ -1227,10 +1232,16 @@ class DataService {
         const transfer = transfers.find(t => t.id === id);
         if (!transfer) return false;
         this.saveTransfers(transfers.filter(t => t.id !== id));
+        this.recordDeletion('transfers', id);
         if (transfer.feeExpenseId) this.deleteExpense(transfer.feeExpenseId);
         if (transfer.principalExpenseId) this.deleteExpense(transfer.principalExpenseId);
         if (transfer.recipientIncomeId) this.deleteIncome(transfer.recipientIncomeId);
         return true;
+    }
+    static updateTransfer(id, updates) {
+        const transfers = this.getTransfers();
+        const i = transfers.findIndex(t => t.id === id);
+        if (i !== -1) { transfers[i] = { ...transfers[i], ...updates, updatedAt: new Date().toISOString() }; this.saveTransfers(transfers); }
     }
     static getReconciliations() { return JSON.parse(localStorage.getItem('financeApp_reconciliations') || '[]'); }
     static saveReconciliations(reconciliations) { localStorage.setItem('financeApp_reconciliations', JSON.stringify(reconciliations)); }
@@ -1246,6 +1257,7 @@ class DataService {
         const reconciliation = reconciliations.find(r => r.id === id);
         if (!reconciliation) return false;
         this.saveReconciliations(reconciliations.filter(r => r.id !== id));
+        this.recordDeletion('reconciliations', id);
         if (reconciliation.transactionId) {
             if (reconciliation.transactionType === 'expense') this.deleteExpense(reconciliation.transactionId);
             else if (reconciliation.transactionType === 'income') this.deleteIncome(reconciliation.transactionId);
@@ -1541,7 +1553,7 @@ class DataService {
     static async getCategories() { await this.initialize(); return [...this.data.categories]; }
     static async addCategory(category) {
         await this.initialize();
-        const newCategory = { id: DataService._uniqueId(), ...category, subcategories: category.subcategories || [], personBudgets: category.personBudgets || {} };
+        const newCategory = { id: DataService._uniqueId(), ...category, subcategories: category.subcategories || [], personBudgets: category.personBudgets || {}, createdAt: new Date().toISOString() };
         this.data.categories.push(newCategory);
         this.saveCategories();
         return newCategory;
@@ -1561,13 +1573,13 @@ class DataService {
     static async addSubcategory(categoryId, subcategoryName) {
         await this.initialize();
         const category = this.data.categories.find(cat => cat.id === categoryId);
-        if (category && !category.subcategories.includes(subcategoryName)) { category.subcategories.push(subcategoryName); this.saveCategories(); return true; }
+        if (category && !category.subcategories.includes(subcategoryName)) { category.subcategories.push(subcategoryName); category.updatedAt = new Date().toISOString(); this.saveCategories(); return true; }
         return false;
     }
     static async removeSubcategory(categoryId, subcategoryName) {
         await this.initialize();
         const category = this.data.categories.find(cat => cat.id === categoryId);
-        if (category) { const index = category.subcategories.indexOf(subcategoryName); if (index !== -1) { category.subcategories.splice(index, 1); this.saveCategories(); return true; } }
+        if (category) { const index = category.subcategories.indexOf(subcategoryName); if (index !== -1) { category.subcategories.splice(index, 1); category.updatedAt = new Date().toISOString(); this.saveCategories(); return true; } }
         return false;
     }
     static async renameSubcategory(categoryId, oldName, newName) {
@@ -1585,13 +1597,14 @@ class DataService {
                 }
             });
         });
+        category.updatedAt = new Date().toISOString();
         this.saveCategories();
         let expenseCount = 0;
-        this.data.expenses.forEach(expense => { if (expense.categoryId === categoryId && expense.subcategory === oldName) { expense.subcategory = newName; expenseCount++; } });
+        this.data.expenses.forEach(expense => { if (expense.categoryId === categoryId && expense.subcategory === oldName) { expense.subcategory = newName; expense.updatedAt = new Date().toISOString(); expenseCount++; } });
         if (expenseCount > 0) this.saveExpenses();
         const bills = this.getBills();
         let billCount = 0;
-        bills.forEach(bill => { if (bill.categoryId === categoryId && bill.subcategory === oldName) { bill.subcategory = newName; billCount++; } });
+        bills.forEach(bill => { if (bill.categoryId === categoryId && bill.subcategory === oldName) { bill.subcategory = newName; bill.updatedAt = new Date().toISOString(); billCount++; } });
         if (billCount > 0) this.saveBills(bills);
         return { expenseCount, billCount };
     }
@@ -1628,6 +1641,7 @@ class DataService {
             if (currency) { pb.budgetCurrency = currency; }
             if (!pb.budgetStartDate) { pb.budgetStartDate = new Date().toISOString().split('T')[0]; }
             if (!pb.budgetHistory) { pb.budgetHistory = []; }
+            category.updatedAt = new Date().toISOString();
             this.saveCategories();
             return true;
         }
@@ -1642,6 +1656,7 @@ class DataService {
             if (!pb.subcategoryBudgetCurrencies) pb.subcategoryBudgetCurrencies = {};
             pb.subcategoryBudgets[subcategoryName] = parseFloat(budget) || 0;
             if (currency) { pb.subcategoryBudgetCurrencies[subcategoryName] = currency; }
+            category.updatedAt = new Date().toISOString();
             this.saveCategories();
             return true;
         }
@@ -1664,6 +1679,7 @@ class DataService {
             pb.monthlyBudget = 0;
             pb.budgetCurrency = newCurrency;
             pb.budgetStartDate = new Date().toISOString().split('T')[0];
+            category.updatedAt = new Date().toISOString();
             this.saveCategories();
             return true;
         }
@@ -1687,6 +1703,7 @@ class DataService {
             if (!pb.subcategoryBudgetCurrencies) pb.subcategoryBudgetCurrencies = {};
             pb.subcategoryBudgets[subcategoryName] = 0;
             pb.subcategoryBudgetCurrencies[subcategoryName] = newCurrency;
+            category.updatedAt = new Date().toISOString();
             this.saveCategories();
             return true;
         }
@@ -1718,6 +1735,7 @@ class DataService {
                 if (!pb.subcategoryBudgetCurrencies) pb.subcategoryBudgetCurrencies = {};
                 Object.keys(pb.subcategoryBudgetCurrencies).forEach(subName => { pb.subcategoryBudgetCurrencies[subName] = newCurrency; });
             }
+            category.updatedAt = new Date().toISOString();
         });
         this.saveCategories();
         return true;
@@ -1727,6 +1745,7 @@ class DataService {
         const category = this.data.categories.find(c => c.id === categoryId);
         if (!category) return false;
         this.ensurePersonBudget(category, person).useSubcategoryBudgets = !!useSubcategoryBudgets;
+        category.updatedAt = new Date().toISOString();
         this.saveCategories();
         return true;
     }
@@ -1735,6 +1754,7 @@ class DataService {
         const category = this.data.categories.find(c => c.id === categoryId);
         if (!category) return false;
         this.ensurePersonBudget(category, person).notificationThreshold = threshold;
+        category.updatedAt = new Date().toISOString();
         this.saveCategories();
         return true;
     }
@@ -1801,7 +1821,7 @@ class DataService {
     }
     static updateGoal(id, updates) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals[i] = { ...goals[i], ...updates, updatedAt: new Date().toISOString() }; this.saveGoals(goals); } }
     static deleteGoal(id) { const goals = this.getGoals(); const i = goals.findIndex(g => g.id === id); if (i !== -1) { goals.splice(i, 1); this.saveGoals(goals); this.recordDeletion('goals', id); } }
-    static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); this.saveGoals(goals); } }
+    static addToGoal(id, amount) { const goals = this.getGoals(); const goal = goals.find(g => g.id === id); if (goal) { goal.currentSaved += parseFloat(amount); goal.updatedAt = new Date().toISOString(); this.saveGoals(goals); } }
     static getBills() { return JSON.parse(localStorage.getItem('financeApp_bills') || '[]'); }
     static saveBills(b) { localStorage.setItem('financeApp_bills', JSON.stringify(b)); }
     static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, subcategory, reminderDaysBefore, notes, person, createdInView }) {
@@ -1809,7 +1829,7 @@ class DataService {
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
         const today = new Date().toISOString().split('T')[0];
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
-        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false };
+        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false, createdAt: new Date().toISOString() };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
     static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates, updatedAt: new Date().toISOString() }; this.saveBills(bills); } }
@@ -1821,7 +1841,7 @@ class DataService {
         else if (bill.frequency === 'Monthly') d.setMonth(d.getMonth() + 1);
         else if (bill.frequency === 'Quarterly') d.setMonth(d.getMonth() + 3);
         else if (bill.frequency === 'Yearly') d.setFullYear(d.getFullYear() + 1);
-        bill.nextDueDate = d.toISOString().split('T')[0]; bill.isPaid = false;
+        bill.nextDueDate = d.toISOString().split('T')[0]; bill.isPaid = false; bill.updatedAt = new Date().toISOString();
         this.saveBills(bills);
     }
     static getRecurring() { return JSON.parse(localStorage.getItem('financeApp_recurring') || '[]'); }
@@ -1830,7 +1850,7 @@ class DataService {
     // user-chosen date (Net Worth recurring) instead of always starting from "now" (the
     // original expense/income behavior, unchanged when startDate is omitted).
     static addRecurring({ templateExpense, frequency, endDate, type, startDate }) {
-        const schedule = { id: DataService._uniqueId(), templateExpense, frequency, endDate: endDate || '', type, nextDue: computeNextDue(startDate || new Date(), frequency), lastGenerated: null, isActive: true };
+        const schedule = { id: DataService._uniqueId(), templateExpense, frequency, endDate: endDate || '', type, nextDue: computeNextDue(startDate || new Date(), frequency), lastGenerated: null, isActive: true, createdAt: new Date().toISOString() };
         const r = this.getRecurring(); r.push(schedule); this.saveRecurring(r); return schedule;
     }
     static updateRecurring(id, updates) {
@@ -2161,6 +2181,7 @@ class DataService {
                 changed = true;
             } else if (match.locked !== true) {
                 match.locked = true;
+                match.updatedAt = now;
                 changed = true;
             }
         });
@@ -2228,7 +2249,7 @@ class DataService {
         this.saveNetWorthCategories(type, cats);
         const items = this.getNetWorthItems();
         let itemCount = 0;
-        items.forEach(item => { if (item.type === type && item.categoryId === categoryId && item.subcategory === oldName) { item.subcategory = newName; itemCount++; } });
+        items.forEach(item => { if (item.type === type && item.categoryId === categoryId && item.subcategory === oldName) { item.subcategory = newName; item.updatedAt = new Date().toISOString(); itemCount++; } });
         if (itemCount > 0) this.saveNetWorthItems(items);
         return { itemCount };
     }
@@ -4144,6 +4165,59 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         setTransfers(DataService.getTransfers());
         if (onUpdate) onUpdate();
     };
+    const [editingWithdraw, setEditingWithdraw] = useState(null);
+    const [editWithdrawForm, setEditWithdrawForm] = useState(null);
+    const [editWithdrawErrors, setEditWithdrawErrors] = useState({});
+    const [editWithdrawSubmitting, setEditWithdrawSubmitting] = useState(false);
+    const openEditWithdraw = (t) => {
+        setEditingWithdraw(t);
+        setEditWithdrawForm({
+            amount: String(t.toAmount),
+            currency: t.cashWithdrawCurrency || '',
+            fee: String(t.fee || 0),
+            feeCurrency: t.feeCurrency || '',
+            deductedAmount: String(t.fromAmount),
+            date: t.date
+        });
+        setEditWithdrawErrors({});
+    };
+    const handleCancelEditWithdraw = () => {
+        setEditingWithdraw(null);
+        setEditWithdrawForm(null);
+        setEditWithdrawErrors({});
+    };
+    // Deliberately does NOT recompute "Deducted from Account" from amount/fee like the Add
+    // form does — that would silently overwrite the historically-correct deducted amount
+    // using today's exchange rate the moment the modal opens. It's a plain editable field here.
+    const handleSubmitEditWithdraw = async (e) => {
+        e.preventDefault();
+        const errors = {};
+        const amount = parseFloat(editWithdrawForm.amount);
+        const deductedAmount = parseFloat(editWithdrawForm.deductedAmount);
+        if (!editWithdrawForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
+        if (!editWithdrawForm.deductedAmount || deductedAmount <= 0) errors.deductedAmount = 'Deducted amount must be greater than 0';
+        if (!editWithdrawForm.date) errors.date = 'Date is required';
+        if (Object.keys(errors).length > 0) { setEditWithdrawErrors(errors); return; }
+
+        setEditWithdrawSubmitting(true);
+        try {
+            DataService.updateTransfer(editingWithdraw.id, {
+                toAmount: amount,
+                cashWithdrawCurrency: editWithdrawForm.currency,
+                fee: parseFloat(editWithdrawForm.fee) || 0,
+                feeCurrency: editWithdrawForm.feeCurrency,
+                fromAmount: deductedAmount,
+                date: editWithdrawForm.date
+            });
+            setTransfers(DataService.getTransfers());
+            setEditingWithdraw(null);
+            setEditWithdrawForm(null);
+            setEditWithdrawErrors({});
+            if (onUpdate) await onUpdate();
+        } finally {
+            setEditWithdrawSubmitting(false);
+        }
+    };
     const [reconciliations, setReconciliations] = useState(() => DataService.getReconciliations());
     const handleDeleteReconciliation = (id) => {
         DataService.deleteReconciliation(id);
@@ -4774,7 +4848,10 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
                                                     <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                    <td>
+                                                        <button type="button" className="btn btn-sm btn-outline-primary" style={{marginRight: '0.25rem'}} onClick={() => openEditWithdraw(t)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
+                                                        <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                                                    </td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -4846,6 +4923,56 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                         ) : (
                             <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No balance reconciliations in the selected period.</div>
                         )}
+                    </div>
+                );
+            })()}
+            {editingWithdraw && editWithdrawForm && (() => {
+                const account = bankAccountsForTransfers.find(a => a.id === editingWithdraw.fromAccountId);
+                return (
+                    <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+                        <div className="modal-dialog modal-dialog-centered">
+                            <form className="modal-content" onSubmit={handleSubmitEditWithdraw}>
+                                <div className="modal-header"><h5 className="modal-title">Edit Cash Withdrawal — {account ? `${account.accountName} (${account.currency})` : 'Unknown account'}</h5></div>
+                                <div className="modal-body">
+                                    <div className="mb-2">
+                                        <label className="form-label">Currency</label>
+                                        <select className="form-select" value={editWithdrawForm.currency} onChange={e => setEditWithdrawForm(f => ({ ...f, currency: e.target.value }))}>
+                                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.code})</option>))}
+                                        </select>
+                                    </div>
+                                    <div className="mb-2">
+                                        <label className="form-label">Amount ({CurrencyService.getCurrencySymbol(editWithdrawForm.currency)})</label>
+                                        <input type="number" step="0.01" className={'form-control' + (editWithdrawErrors.amount ? ' is-invalid' : '')} value={editWithdrawForm.amount} onChange={e => setEditWithdrawForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
+                                        {editWithdrawErrors.amount && <div className="invalid-feedback">{editWithdrawErrors.amount}</div>}
+                                    </div>
+                                    <div className="mb-2">
+                                        <label className="form-label">Fee (optional)</label>
+                                        <div style={{display: 'flex', gap: '0.5rem'}}>
+                                            <input type="number" step="0.01" className="form-control" value={editWithdrawForm.fee} onChange={e => setEditWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
+                                            <select className="form-select" style={{maxWidth: '110px', flexShrink: 0}} value={editWithdrawForm.feeCurrency} onChange={e => setEditWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>
+                                                {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{CurrencyService.getCurrencySymbol(c.code)} {c.code}</option>))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="mb-2">
+                                        <label className="form-label">Deducted from Account {account && `(${CurrencyService.getCurrencySymbol(account.currency)})`}</label>
+                                        <input type="number" step="0.01" className={'form-control' + (editWithdrawErrors.deductedAmount ? ' is-invalid' : '')} value={editWithdrawForm.deductedAmount} onChange={e => setEditWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} />
+                                        {editWithdrawErrors.deductedAmount && <div className="invalid-feedback">{editWithdrawErrors.deductedAmount}</div>}
+                                    </div>
+                                    <div className="mb-2">
+                                        <label className="form-label">Date</label>
+                                        <input type="date" className={'form-control' + (editWithdrawErrors.date ? ' is-invalid' : '')} max={new Date().toISOString().split('T')[0]} value={editWithdrawForm.date} onChange={e => setEditWithdrawForm(f => ({ ...f, date: e.target.value }))} />
+                                        {editWithdrawErrors.date && <div className="invalid-feedback">{editWithdrawErrors.date}</div>}
+                                    </div>
+                                </div>
+                                <div className="modal-footer">
+                                    <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelEditWithdraw}>Cancel</button>
+                                    <button type="submit" className="btn btn-success btn-sm" disabled={editWithdrawSubmitting}>
+                                        {editWithdrawSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Saving…</> : <><i className="fas fa-check me-1"></i>Save Changes</>}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
                     </div>
                 );
             })()}
@@ -7289,7 +7416,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
     );
 }
 
-function SavingsGoals({ defaultCurrency, activeView }) {
+function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
     const [goals, setGoals] = useState([]);
     const [monthlyNet, setMonthlyNet] = useState(0);
     const [showForm, setShowForm] = useState(false);
@@ -7336,6 +7463,7 @@ function SavingsGoals({ defaultCurrency, activeView }) {
                 DataService.addGoal({ name: formData.name.trim(), targetAmount: formData.targetAmount, currency: formData.currency, deadline: formData.deadline, notes: formData.notes, emoji: formData.emoji, currentSaved: formData.currentSaved, owner: formData.owner || 'own' });
             }
             resetForm(); setShowForm(false); loadGoals();
+            if (onUpdate) onUpdate();
         } catch (err) { setFormErrors({ name: err.message }); }
     };
 
@@ -7344,13 +7472,14 @@ function SavingsGoals({ defaultCurrency, activeView }) {
         setEditingGoal(goal); setShowForm(true);
     };
 
-    const handleDelete = (id) => { DataService.deleteGoal(id); setDeleteConfirm(null); loadGoals(); };
+    const handleDelete = (id) => { DataService.deleteGoal(id); setDeleteConfirm(null); loadGoals(); if (onUpdate) onUpdate(); };
 
     const handleAddFunds = (goalId) => {
         const amount = parseFloat(addFundsAmount);
         if (!addFundsAmount || isNaN(amount) || amount <= 0) { setAddFundsError('Enter a valid amount > 0'); return; }
         DataService.addToGoal(goalId, amount);
         setAddFundsGoalId(null); setAddFundsAmount(''); setAddFundsError(''); loadGoals();
+        if (onUpdate) onUpdate();
     };
 
     const getProjectedCompletion = (goal) => {
@@ -7698,10 +7827,10 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
                         <div className="d-flex gap-2 mt-2 flex-wrap">
                             <button className="btn btn-success btn-sm" onClick={() => handleMarkPaid(bill.id)}><i className="fas fa-check me-1"></i>Mark Paid</button>
                             <button className="btn btn-outline-secondary btn-sm" onClick={() => handleLogExpense(bill)}><i className="fas fa-receipt me-1"></i>Log as Expense</button>
-                            <button className="btn btn-outline-secondary btn-sm" onClick={() => { DataService.updateBill(bill.id, { isActive: false }); loadBills(); }}><i className="fas fa-pause me-1"></i>Deactivate</button>
+                            <button className="btn btn-outline-secondary btn-sm" onClick={() => { DataService.updateBill(bill.id, { isActive: false }); loadBills(); if (onUpdate) onUpdate(); }}><i className="fas fa-pause me-1"></i>Deactivate</button>
                         </div>
                     ) : (
-                        <button className="btn btn-outline-primary btn-sm mt-2" onClick={() => { DataService.updateBill(bill.id, { isActive: true }); loadBills(); }}><i className="fas fa-play me-1"></i>Reactivate</button>
+                        <button className="btn btn-outline-primary btn-sm mt-2" onClick={() => { DataService.updateBill(bill.id, { isActive: true }); loadBills(); if (onUpdate) onUpdate(); }}><i className="fas fa-play me-1"></i>Reactivate</button>
                     )}
                 </div>
             </div>
@@ -9164,7 +9293,7 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange })
 
     const handleLogoutConfirm = async () => {
         await AuthUtils.signOut();
-        onLogout();
+        await onLogout();
     };
 
     const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
@@ -10528,7 +10657,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
         if (onUpdate) onUpdate();
     };
 
-    const handleDelete = (id) => { DataService.deleteDebt(id); setShowDeleteModal(null); reload(); };
+    const handleDelete = (id) => { DataService.deleteDebt(id); setShowDeleteModal(null); reload(); if (onUpdate) onUpdate(); };
 
     return (
         <div className={embedded ? undefined : 'screen'}>
@@ -11027,9 +11156,7 @@ function App() {
                         const cloudTime = getBackupTimestamp(cloudBackup);
                         const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                         if (cloudTime > localTime) {
-                            const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
-                            const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
-                            if (localExp.length > 0 || localInc.length > 0) {
+                            if (!isLocalDataEmpty()) {
                                 // This is a headless path with no confirmation UI, so an unsigned
                                 // legacy backup (requiresConfirmation) must not merge silently —
                                 // decline and leave both local and cloud data untouched instead.
@@ -11042,7 +11169,6 @@ function App() {
                                 const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                                 DataService.restoreBackup(merged);
                                 DataService.isInitialized = false;
-                                setCloudSyncGate('idle');
                                 // Re-apply the active-view filter (not a raw fetch+set) — otherwise a
                                 // silent login-time merge repopulates expenses/income with everyone's
                                 // data while the Active View selector still shows "own".
@@ -11052,7 +11178,7 @@ function App() {
                                 try {
                                     const signed = await signBackupForUpload(merged, currentUser);
                                     const result = await SyncService.upload(signed);
-                                    if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); }
+                                    if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt); }
                                     else {
                                         setSyncStatus('error');
                                         showSyncMergeToast('Merged locally, but the upload to the cloud failed — will retry on your next change.');
@@ -11061,6 +11187,11 @@ function App() {
                                     setSyncStatus('error');
                                     showSyncMergeToast('Merged locally, but the upload to the cloud failed — will retry on your next change.');
                                 }
+                                // Gate release deliberately waits until the reupload above has settled
+                                // (success or failure) — releasing it earlier would let the user start
+                                // editing (and kick off their own debounced sync) while this reupload of
+                                // the merged snapshot is still in flight, racing on upload order.
+                                setCloudSyncGate('idle');
                             } else {
                                 // Local is empty (routine after every logout, which wipes it) and the
                                 // user already has this provider chosen as their backup — there's no
@@ -11180,6 +11311,12 @@ function App() {
         maybeAutoBackup();
     }, [authLoading]);
 
+    // Used by every "is this device fresh enough to silently overwrite from cloud, or does
+    // it have real local data that must be merged instead?" check. Deliberately excludes
+    // categories/assetCategories/liabilityCategories, which always have non-empty default-
+    // seeded data even on a brand-new device — including them would make this never return true.
+    const isLocalDataEmpty = () => ['expenses', 'income', 'goals', 'bills', 'recurring', 'debts', 'bankAccounts', 'networth', 'transfers', 'reconciliations']
+        .every(k => { try { return JSON.parse(localStorage.getItem('financeApp_' + k) || '[]').length === 0; } catch (_) { return true; } });
     // The actual download+merge+upload cloud round-trip — runs once per debounce window,
     // no matter how many handleDataUpdate() calls fed into it (see cloudSyncDebounceRef above).
     const performCloudSync = async () => {
@@ -11195,7 +11332,7 @@ function App() {
                 const cloudBackup = await SyncService.download();
                 if (cloudBackup && isBackupOwnedByCurrentUser(cloudBackup, currentUser)) {
                     const sigResult = await verifyBackupSignature(cloudBackup, currentUser);
-                    if (isSignatureAcceptable(sigResult)) {
+                    if (isSignatureAcceptable(sigResult) && !sigResult.requiresConfirmation) {
                         const cloudTime = getBackupTimestamp(cloudBackup);
                         const lastSync = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                         if (cloudTime > lastSync) {
@@ -11288,8 +11425,15 @@ function App() {
     const handleCurrentUserDisplayNameChange = (newName) => {
         setCurrentUser(prev => prev ? { ...prev, displayName: newName } : prev);
     };
-    const handleLogout = () => {
+    const handleLogout = async () => {
         console.log('[BackupPref] handleLogout called', { uid: currentUser && currentUser.uid, prefBeforeWipe: localStorage.getItem('financeApp_storagePreference') });
+        // Flush any unsynced edit BEFORE cancelling/wiping — cancelling first (the old
+        // behavior) could permanently lose an edit made within the debounce window or while
+        // offline, since clearAllUserData() below wipes the only local copy right after.
+        // A failed flush is a lesser evil than blocking logout entirely, so proceed either way.
+        if (localStorage.getItem('financeApp_pendingCloudSync') && SyncService.isCloudEnabled()) {
+            try { await performCloudSync(); } catch (_) {}
+        }
         // A pending debounced sync must not fire after logout — it would read the
         // about-to-be-wiped local data and could overwrite the cloud backup with it.
         cancelScheduledCloudSync();
@@ -11328,7 +11472,12 @@ function App() {
                     if (oldBackup && isBackupOwnedByCurrentUser(oldBackup, currentUser)) {
                         const sigResult = await verifyBackupSignature(oldBackup, currentUser);
                         // Skip auto-migration restore for unsigned backups — no modal here for TOFU
-                        if (isSignatureAcceptable(sigResult) && !sigResult.requiresConfirmation) { DataService.restoreBackup(oldBackup); }
+                        if (isSignatureAcceptable(sigResult) && !sigResult.requiresConfirmation) {
+                            // Merge, don't overwrite — a raw restore would silently discard any local
+                            // edit made since the old provider's last synced snapshot.
+                            const merged = DataService.mergeBackups(DataService.createBackup(currentUser), oldBackup);
+                            DataService.restoreBackup(merged);
+                        }
                     }
                 }
             } catch (_) {}
@@ -11370,14 +11519,14 @@ function App() {
                     const cloudTime = getBackupTimestamp(cloudBackup);
                     const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                     if (cloudTime > localTime) {
-                        const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
-                        const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
-                        if (localExp.length > 0 || localInc.length > 0) {
+                        if (!isLocalDataEmpty() && !sigResult.requiresConfirmation) {
                             const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                             DataService.restoreBackup(merged);
                             DataService.isInitialized = false;
                             const signedM = await signBackupForUpload(merged, currentUser);
-                            await SyncService.upload(signedM);
+                            const mergeResult = await SyncService.upload(signedM);
+                            if (mergeResult.status === 'success') { localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); }
+                            else { markCloudSyncPending(); }
                             await reloadCoreData(activeView);
                         } else {
                             setCloudRestoreData(cloudBackup);
@@ -11387,7 +11536,10 @@ function App() {
                         }
                     }
                 }
-            } catch (_) {}
+            } catch (_) {
+                setSyncStatus('error');
+                return;
+            }
             setReconnectBannerDismissed(true);
             setSyncStatus('idle');
             handleDataUpdate();
@@ -11410,6 +11562,12 @@ function App() {
                     const cloudTime = getBackupTimestamp(cloudBackup);
                     const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
                     if (cloudTime > localTime) {
+                        if (sigResult.requiresConfirmation) {
+                            setCloudRestoreData(cloudBackup);
+                            setCloudSyncGate('restore-prompt');
+                            setSyncStatus('idle');
+                            return;
+                        }
                         // Merge cloud + local instead of replacing either side
                         const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                         DataService.restoreBackup(merged);
@@ -11417,7 +11575,8 @@ function App() {
                         const signedMerged = await signBackupForUpload(merged, currentUser);
                         const mergeResult = await SyncService.upload(signedMerged);
                         if (mergeResult.status === 'success') { setSyncStatus('synced'); setLastSyncTime(mergeResult.syncedAt); localStorage.setItem('financeApp_lastCloudSync', mergeResult.syncedAt); clearCloudSyncPending(); }
-                        else { setSyncStatus('idle'); }
+                        else if (mergeResult.status === 'reconnect-needed') { setSyncStatus('reconnect-needed'); setReconnectBannerDismissed(false); }
+                        else { setSyncStatus(mergeResult.status === 'not_configured' ? 'not_configured' : 'error'); }
                         await reloadCoreData(activeView);
                         return;
                     }
@@ -11455,15 +11614,18 @@ function App() {
             const cloudTime = getBackupTimestamp(cloudBackup);
             const localTime = new Date(localStorage.getItem('financeApp_lastCloudSync') || 0).getTime();
             if (cloudTime > localTime) {
-                const localExp = JSON.parse(localStorage.getItem('financeApp_expenses') || '[]');
-                const localInc = JSON.parse(localStorage.getItem('financeApp_income') || '[]');
-                if (localExp.length > 0 || localInc.length > 0) {
+                if (!isLocalDataEmpty() && !sigResult.requiresConfirmation) {
                     const merged = DataService.mergeBackups(DataService.createBackup(currentUser), cloudBackup);
                     DataService.restoreBackup(merged);
                     DataService.isInitialized = false;
                     setCloudSyncGate('idle');
-                    signBackupForUpload(merged, currentUser).then(signed => SyncService.upload(signed)).catch(() => {});
                     await reloadCoreData(activeView);
+                    try {
+                        const signed = await signBackupForUpload(merged, currentUser);
+                        const result = await SyncService.upload(signed);
+                        if (result.status === 'success') { setSyncStatus('synced'); setLastSyncTime(result.syncedAt); localStorage.setItem('financeApp_lastCloudSync', result.syncedAt); }
+                        else { setSyncStatus('error'); markCloudSyncPending(); }
+                    } catch (_) { setSyncStatus('error'); markCloudSyncPending(); }
                 } else {
                     setCloudRestoreData(cloudBackup); setCloudSyncGate('restore-prompt');
                 }
@@ -11499,7 +11661,7 @@ function App() {
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
-            case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} />;
+            case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
                 return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
             case 'bulk-upload': return <BulkUpload categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} activeView={activeView} onUpdate={handleDataUpdate} />;
