@@ -375,6 +375,24 @@ function formatActiveViewLabel(activeView, displayName) {
     if (joined.length <= 20 || names.length === 1) return joined;
     return names[0] + ' +' + (names.length - 1);
 }
+// Per-screen list filters (Expense/Income History, Summary, Debts) live in each
+// screen component's local state, and renderScreen() unmounts that component on
+// every navigation — so without this the user's filters silently reset the moment
+// they leave the screen. Persist them for the session (sessionStorage, so they
+// survive navigation but not a browser close) and wipe them on logout so the next
+// user on a shared device starts clean. Keys are namespaced 'ftFilter_<screen>'.
+const FilterMemory = {
+    load(screen) { try { return JSON.parse(sessionStorage.getItem('ftFilter_' + screen)) || {}; } catch { return {}; } },
+    save(screen, obj) { try { sessionStorage.setItem('ftFilter_' + screen, JSON.stringify(obj)); } catch (_) {} },
+    clearAll() {
+        try {
+            Object.keys(sessionStorage)
+                .filter(k => k.startsWith('ftFilter_') || k.startsWith('trends_'))
+                .forEach(k => sessionStorage.removeItem(k));
+        } catch (_) {}
+    }
+};
+
 // App brand mark (inlined so it renders with zero extra network requests, same as
 // every other icon in this app) — used on the login screen and the main app header.
 function Logo({ size = 40, style, className }) {
@@ -2935,21 +2953,24 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
 }
 
 function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '', activeView, defaultCurrency }) {
-    const [filterCategory, setFilterCategory] = useState('');
-    const [filterSubcategory, setFilterSubcategory] = useState('');
-    const [filterPerson, setFilterPerson] = useState(initialPaidBy || '');
-    const [filterDateFrom, setFilterDateFrom] = useState(initialDateFrom || '');
-    const [filterDateTo, setFilterDateTo] = useState(initialDateTo || '');
+    // Restore last session's filters (see FilterMemory). A date range or person
+    // passed in from a Trends/Summary drill-down still wins over the saved value.
+    const _f0 = FilterMemory.load('expenses');
+    const [filterCategory, setFilterCategory] = useState(_f0.category || '');
+    const [filterSubcategory, setFilterSubcategory] = useState(_f0.subcategory || '');
+    const [filterPerson, setFilterPerson] = useState(initialPaidBy || _f0.person || '');
+    const [filterDateFrom, setFilterDateFrom] = useState(initialDateFrom || _f0.dateFrom || '');
+    const [filterDateTo, setFilterDateTo] = useState(initialDateTo || _f0.dateTo || '');
     const [editingExpense, setEditingExpense] = useState(null);
     const [editingSplitGroupId, setEditingSplitGroupId] = useState(null);
     const [showEditConfirm, setShowEditConfirm] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
-    const [searchTerm, setSearchTerm] = useState('');
+    const [searchTerm, setSearchTerm] = useState(_f0.search || '');
     const [duplicatingExpense, setDuplicatingExpense] = useState(null);
     const [duplicateDate, setDuplicateDate] = useState('today');
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
     const [duplicateDateError, setDuplicateDateError] = useState('');
-    const [filterTags, setFilterTags] = useState([]);
+    const [filterTags, setFilterTags] = useState(Array.isArray(_f0.tags) ? _f0.tags : []);
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
 
@@ -2957,12 +2978,24 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     // participants are active — drop any stale selection once it drops back to one.
     useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
 
+    // Persist filters for the session so leaving and returning to this screen keeps them.
+    useEffect(() => {
+        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo, search: searchTerm, tags: filterTags });
+    }, [filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags]);
+
     useEffect(() => {
         if (!openMenuId) return;
         const close = () => setOpenMenuId(null);
         document.addEventListener('click', close);
         return () => document.removeEventListener('click', close);
     }, [openMenuId]);
+
+    // accountId -> account name, for showing which bank/card a card-paid expense used.
+    const accountNameById = useMemo(() => {
+        const m = new Map();
+        DataService.getBankAccounts().forEach(a => m.set(String(a.id), a.accountName));
+        return m;
+    }, [expenses]);
 
     const filteredExpenses = useMemo(() => {
         let filtered = expenses;
@@ -3110,6 +3143,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             {group.items.map(expense => {
                                 const catName = getCategoryName(expense.categoryId);
                                 const metaParts = [catName, expense.subcategory].filter(Boolean);
+                                const bankName = (!expense.isCashPayment && expense.accountId) ? (accountNameById.get(String(expense.accountId)) || '') : '';
                                 const personLabel = activeView.length > 1 ? expense.paidBy : '';
                                 return (
                                 <div key={expense.id} className="expense-item">
@@ -3119,7 +3153,10 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                             {expense.isSplitRecord && <i className="fas fa-users expense-split-icon" title="Split expense"></i>}
                                             {expense.isCashPayment
                                                 ? <i className="fas fa-money-bill-wave expense-cash-icon" title="Paid by cash"></i>
-                                                : expense.accountId && <i className="fas fa-credit-card expense-bank-icon" title="Paid by bank/card"></i>}
+                                                : expense.accountId && <React.Fragment>
+                                                    <i className="fas fa-credit-card expense-bank-icon" title="Paid by bank/card"></i>
+                                                    {bankName && <span className="expense-bank-name">{bankName}</span>}
+                                                </React.Fragment>}
                                         </div>
                                         <div className="expense-meta">
                                             {metaParts.join(' · ')}
@@ -3766,11 +3803,12 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
-    const [searchTerm, setSearchTerm] = useState('');
-    const [filterSource, setFilterSource] = useState('');
-    const [filterPerson, setFilterPerson] = useState('');
-    const [filterDateFrom, setFilterDateFrom] = useState('');
-    const [filterDateTo, setFilterDateTo] = useState('');
+    const _f0 = FilterMemory.load('income');
+    const [searchTerm, setSearchTerm] = useState(_f0.search || '');
+    const [filterSource, setFilterSource] = useState(_f0.source || '');
+    const [filterPerson, setFilterPerson] = useState(_f0.person || '');
+    const [filterDateFrom, setFilterDateFrom] = useState(_f0.dateFrom || '');
+    const [filterDateTo, setFilterDateTo] = useState(_f0.dateTo || '');
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
 
@@ -3779,6 +3817,11 @@ function IncomeForm({ income, onUpdate, activeView }) {
     // Mirrors ExpenseList: the person sub-filter only makes sense when multiple
     // participants are active — drop any stale selection once it drops back to one.
     useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
+
+    // Persist filters for the session (see FilterMemory) so navigating away keeps them.
+    useEffect(() => {
+        FilterMemory.save('income', { search: searchTerm, source: filterSource, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo });
+    }, [searchTerm, filterSource, filterPerson, filterDateFrom, filterDateTo]);
 
     // Re-defaults the Account field to the newly-selected person's primary account (only when
     // its currency matches formData.currency) whenever "Who's Income" or the currency changes —
@@ -4148,12 +4191,13 @@ function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 function Summary({ expenses, income, categories, defaultCurrency, activeView, onUpdate }) {
-    const [timeRange, setTimeRange] = useState('month');
-    const [selectedCategory, setSelectedCategory] = useState('');
-    const [selectedPaidBy, setSelectedPaidBy] = useState('');
+    const _f0 = FilterMemory.load('summary'); // restore last session's filters (see FilterMemory)
+    const [timeRange, setTimeRange] = useState(_f0.timeRange || 'month');
+    const [selectedCategory, setSelectedCategory] = useState(_f0.category || '');
+    const [selectedPaidBy, setSelectedPaidBy] = useState(_f0.paidBy || '');
     const [budgetData, setBudgetData] = useState([]);
     const [convertedExpenses, setConvertedExpenses] = useState([]);
-    const [chartSeriesFilter, setChartSeriesFilter] = useState('both'); // 'both' | 'income' | 'expense'
+    const [chartSeriesFilter, setChartSeriesFilter] = useState(_f0.chartSeries || 'both'); // 'both' | 'income' | 'expense'
     const [expandedBudgetItems, setExpandedBudgetItems] = useState({});
     const [transfers, setTransfers] = useState(() => DataService.getTransfers());
     const bankAccountsForTransfers = React.useMemo(() => DataService.getBankAccounts(), [transfers]);
@@ -4226,14 +4270,19 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     };
     // Custom time period: month+year only (no day-level picker), one pair for each end
     // of the range. Defaults to the current month so opening "Custom" starts sane.
-    const [customFromMonth, setCustomFromMonth] = useState(() => new Date().getMonth());
-    const [customFromYear, setCustomFromYear] = useState(() => new Date().getFullYear());
-    const [customToMonth, setCustomToMonth] = useState(() => new Date().getMonth());
-    const [customToYear, setCustomToYear] = useState(() => new Date().getFullYear());
+    const [customFromMonth, setCustomFromMonth] = useState(() => _f0.customFromMonth != null ? _f0.customFromMonth : new Date().getMonth());
+    const [customFromYear, setCustomFromYear] = useState(() => _f0.customFromYear != null ? _f0.customFromYear : new Date().getFullYear());
+    const [customToMonth, setCustomToMonth] = useState(() => _f0.customToMonth != null ? _f0.customToMonth : new Date().getMonth());
+    const [customToYear, setCustomToYear] = useState(() => _f0.customToYear != null ? _f0.customToYear : new Date().getFullYear());
 
     // The person sub-filter only makes sense (and is only shown) when multiple
     // participants are active — drop any stale selection once it drops back to one.
     useEffect(() => { if (activeView.length <= 1 && selectedPaidBy) setSelectedPaidBy(''); }, [activeView]);
+
+    // Persist filters for the session (see FilterMemory) so navigating away keeps them.
+    useEffect(() => {
+        FilterMemory.save('summary', { timeRange, category: selectedCategory, paidBy: selectedPaidBy, chartSeries: chartSeriesFilter, customFromMonth, customFromYear, customToMonth, customToYear });
+    }, [timeRange, selectedCategory, selectedPaidBy, chartSeriesFilter, customFromMonth, customFromYear, customToMonth, customToYear]);
     const [convertedIncome, setConvertedIncome] = useState([]);
 
     const convertAmountSync = (amount, fromCurrency, toCurrency) => {
@@ -10571,7 +10620,8 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 }
 
 function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedded }) {
-    const [activeTab, setActiveTab] = useState('owe');
+    const _f0 = FilterMemory.load('debts'); // restore last session's tab / settled toggle (see FilterMemory)
+    const [activeTab, setActiveTab] = useState(_f0.tab === 'owed' ? 'owed' : 'owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
     const [showForm, setShowForm] = useState(false);
     const [editingDebt, setEditingDebt] = useState(null);
@@ -10582,7 +10632,10 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
     const [showLinkedModal, setShowLinkedModal] = useState(null);
     const [linkedCatId, setLinkedCatId] = useState('');
     const [linkedSubcat, setLinkedSubcat] = useState('');
-    const [showSettled, setShowSettled] = useState(false);
+    const [showSettled, setShowSettled] = useState(!!_f0.showSettled);
+
+    // Persist tab + settled toggle for the session (see FilterMemory).
+    useEffect(() => { FilterMemory.save('debts', { tab: activeTab, showSettled }); }, [activeTab, showSettled]);
 
     const reload = () => setDebts(DataService.getDebts());
     const today = new Date().toISOString().split('T')[0];
@@ -11443,6 +11496,8 @@ function App() {
         // Clear session integrity token from sessionStorage (localStorage token wiped by clearAllUserData)
         sessionStorage.removeItem('financeApp_session_uid');
         sessionStorage.removeItem('financeApp_session_active');
+        // Wipe per-screen list filters so the next user on this device starts clean
+        FilterMemory.clearAll();
         // Rotate the backup signing key so it stops being valid for this account on this
         // device once logged out (a stolen key from a shared/borrowed device shouldn't
         // remain usable indefinitely)

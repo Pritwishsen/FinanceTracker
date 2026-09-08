@@ -293,6 +293,17 @@ body {
   vertical-align: middle;
 }
 
+/* Bank/card account name on card-paid expense rows, shown in .expense-description
+   right after the card icon that flags the payment method. Lighter/smaller than the
+   description text so it reads as a secondary label, not part of the description. */
+.expense-bank-name {
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: hsl(var(--text-secondary));
+  margin-left: 0.3rem;
+  white-space: nowrap;
+}
+
 /* Person label on expense/income list rows (multi-person Active View) — kept as its
    own flex child rather than appended into .expense-meta/.income-meta, since that
    line's text-overflow:ellipsis would otherwise clip the name first. */
