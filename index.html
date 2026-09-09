@@ -393,6 +393,80 @@ const FilterMemory = {
     }
 };
 
+// Local-vs-cloud tie-conflict store (see mergeById's conflictsOut, DataService.mergeBackups)
+// — nested by collection, e.g. { expenses: { [id]: { cloudSnapshot, detectedAt } }, income: {...} }.
+// Recomputed fresh on every merge (self-healing — a resolved or no-longer-tied record just
+// stops appearing), and never uploaded to the cloud.
+const SyncConflicts = {
+    read(collection) {
+        try { return (JSON.parse(localStorage.getItem('financeApp_syncConflicts')) || {})[collection] || {}; }
+        catch (_) { return {}; }
+    },
+    dismiss(collection, id) {
+        try {
+            const all = JSON.parse(localStorage.getItem('financeApp_syncConflicts')) || {};
+            if (all[collection]) { delete all[collection][String(id)]; localStorage.setItem('financeApp_syncConflicts', JSON.stringify(all)); }
+        } catch (_) { /* best-effort */ }
+    }
+};
+
+// Warning badge for a row whose local and cloud versions tied on timestamp but differ in
+// content (see SyncConflicts above). Shared across every list screen — only expense-list-
+// specific styling lived in `.expense-sync-conflict-icon` before; now generic `.sync-conflict-icon`.
+function SyncConflictBadge({ conflict, onClick }) {
+    if (!conflict) return null;
+    return <i className="fas fa-triangle-exclamation sync-conflict-icon" title="Local and cloud versions differ — showing local. Click for details." onClick={(e) => { e.stopPropagation(); onClick(); }}></i>;
+}
+
+// Generic diff + resolve modal for a tie-conflict, shared across every list screen. Shows
+// only the fields that actually differ, using the caller's field-label map and optional
+// per-field formatter. "Keep Local"/"Use Cloud Instead" both call back into the caller,
+// which is responsible for the actual DataService.update* call — that stamps a fresh
+// updatedAt, which is what breaks the tie so the flag self-heals on the next merge.
+function SyncConflictModal({ localRecord, cloudSnapshot, fieldLabels = {}, formatValue, metaKeys, onKeepLocal, onUseCloud, onClose }) {
+    if (!localRecord || !cloudSnapshot) return null;
+    const skip = metaKeys || ['id', 'createdAt', 'updatedAt'];
+    const defaultFormat = (key, value) => {
+        if (value === undefined || value === null || value === '') return '—';
+        if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (typeof value === 'object') return 'Complex data — differs';
+        return String(value);
+    };
+    const format = (key, value) => (formatValue ? formatValue(key, value, localRecord) : defaultFormat(key, value));
+    const keys = new Set([...Object.keys(localRecord), ...Object.keys(cloudSnapshot)]);
+    const diffRows = [...keys].filter(k => !skip.includes(k) && JSON.stringify(localRecord[k]) !== JSON.stringify(cloudSnapshot[k]));
+    return (
+        <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+            <div className="modal-dialog modal-dialog-centered">
+                <div className="modal-content">
+                    <div className="modal-header"><h5 className="modal-title"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync Conflict</h5></div>
+                    <div className="modal-body">
+                        <p>This record was saved at the same time on this device and in the cloud, but the details differ. The local version is currently shown — review the differences below and choose which one to keep.</p>
+                        <table className="table table-sm">
+                            <thead><tr><th></th><th>This device</th><th>Cloud</th></tr></thead>
+                            <tbody>
+                                {diffRows.map(k => (
+                                    <tr key={k}>
+                                        <td>{fieldLabels[k] || k}</td>
+                                        <td>{format(k, localRecord[k])}</td>
+                                        <td>{format(k, cloudSnapshot[k])}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div className="modal-footer">
+                        <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
+                        <button type="button" className="btn btn-outline-primary" onClick={onUseCloud}>Use Cloud Instead</button>
+                        <button type="button" className="btn btn-primary" onClick={onKeepLocal}>Keep Local</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 // App brand mark (inlined so it renders with zero extra network requests, same as
 // every other icon in this app) — used on the login screen and the main app header.
 function Logo({ size = 40, style, className }) {
@@ -1270,6 +1344,11 @@ class DataService {
         this.saveReconciliations(reconciliations);
         return record;
     }
+    static updateReconciliation(id, updates) {
+        const reconciliations = this.getReconciliations();
+        const i = reconciliations.findIndex(r => r.id === id);
+        if (i !== -1) { reconciliations[i] = { ...reconciliations[i], ...updates, updatedAt: new Date().toISOString() }; this.saveReconciliations(reconciliations); }
+    }
     static deleteReconciliation(id) {
         const reconciliations = this.getReconciliations();
         const reconciliation = reconciliations.find(r => r.id === id);
@@ -1989,7 +2068,19 @@ class DataService {
         // Union two backups by record ID — neither device loses data.
         // For the same ID, whichever record has the newer createdAt/updatedAt wins.
         // Deletion log entries from both devices are unioned so deletes propagate.
-        const mergeById = (localArr, cloudArr) => {
+        // On an exact timestamp tie where the content actually differs, local still
+        // wins (unchanged outcome) but the discrepancy is recorded via conflictsOut
+        // so the UI can warn instead of silently dropping the cloud side forever.
+        const CONFLICT_META_KEYS = new Set(['id', 'createdAt', 'updatedAt']);
+        const contentDiffers = (x, y) => {
+            const keys = new Set([...Object.keys(x || {}), ...Object.keys(y || {})]);
+            for (const k of keys) {
+                if (CONFLICT_META_KEYS.has(k)) continue;
+                if (JSON.stringify(x ? x[k] : undefined) !== JSON.stringify(y ? y[k] : undefined)) return true;
+            }
+            return false;
+        };
+        const mergeById = (localArr, cloudArr, conflictsOut) => {
             const a = Array.isArray(localArr) ? localArr : [];
             const b = Array.isArray(cloudArr) ? cloudArr : [];
             const map = new Map();
@@ -1997,12 +2088,15 @@ class DataService {
             for (const item of a) {
                 if (!item || item.id == null) continue;
                 const key = String(item.id);
-                if (!map.has(key)) { map.set(key, item); }
-                else {
-                    const lt = new Date(item.updatedAt || item.createdAt || 0).getTime();
-                    const ct = new Date(map.get(key).updatedAt || map.get(key).createdAt || 0).getTime();
-                    if (lt >= ct) map.set(key, item);
+                const cloudItem = map.get(key);
+                if (!cloudItem) { map.set(key, item); continue; }
+                const lt = new Date(item.updatedAt || item.createdAt || 0).getTime();
+                const ct = new Date(cloudItem.updatedAt || cloudItem.createdAt || 0).getTime();
+                if (lt === ct && conflictsOut && contentDiffers(item, cloudItem)) {
+                    const { id, createdAt, updatedAt, ...cloudContent } = cloudItem;
+                    conflictsOut[key] = { cloudSnapshot: cloudContent, detectedAt: new Date().toISOString() };
                 }
+                if (lt >= ct) map.set(key, item);
             }
             return Array.from(map.values());
         };
@@ -2020,7 +2114,19 @@ class DataService {
         const ld = (localBackup && localBackup.data) || {};
         const cd = (cloudBackup && cloudBackup.data) || {};
         const merged = { ...cd };
-        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(k => { merged[k] = mergeById(ld[k], cd[k]); });
+        // netWorthHistory is deliberately excluded — it's append-only with no update-in-place
+        // method anywhere, so a content-diverging tie on it is structurally impossible.
+        const CONFLICT_COLLECTIONS = new Set(['expenses','income','goals','bills','recurring','debts','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations']);
+        const allConflicts = {};
+        ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(k => {
+            const bucket = CONFLICT_COLLECTIONS.has(k) ? {} : null;
+            merged[k] = mergeById(ld[k], cd[k], bucket);
+            if (bucket) allConflicts[k] = bucket;
+        });
+        // Conflict info is deliberately kept out of `merged`/the backup payload — it's a
+        // derived, local-only UI hint recomputed fresh on every merge (self-healing), and
+        // must never affect the addedNothingNew check below or get uploaded to the cloud.
+        localStorage.setItem('financeApp_syncConflicts', JSON.stringify(allConflicts));
         // Apply merged deletion log — items deleted on either device are removed
         const deletionLog = mergeDeletionLogs(ld._deletionLog, cd._deletionLog);
         ['expenses','income','goals','bills','recurring','debts','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(key => {
@@ -2971,8 +3077,10 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [duplicateCustomDate, setDuplicateCustomDate] = useState('');
     const [duplicateDateError, setDuplicateDateError] = useState('');
     const [filterTags, setFilterTags] = useState(Array.isArray(_f0.tags) ? _f0.tags : []);
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     // The person sub-filter only makes sense (and is only shown) when multiple
     // participants are active — drop any stale selection once it drops back to one.
@@ -2980,8 +3088,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
 
     // Persist filters for the session so leaving and returning to this screen keeps them.
     useEffect(() => {
-        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo, search: searchTerm, tags: filterTags });
-    }, [filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags]);
+        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo, search: searchTerm, tags: filterTags, syncConflict: filterSyncConflict });
+    }, [filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags, filterSyncConflict]);
 
     useEffect(() => {
         if (!openMenuId) return;
@@ -2997,6 +3105,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         return m;
     }, [expenses]);
 
+    // Local-vs-cloud tie conflicts detected by DataService.mergeBackups (see mergeById).
+    // Recomputed on every merge and re-read here whenever `expenses` changes, so a
+    // resolved conflict disappears on its own without any separate cleanup step.
+    const syncConflicts = useMemo(() => SyncConflicts.read('expenses'), [expenses]);
+
     const filteredExpenses = useMemo(() => {
         let filtered = expenses;
         if (filterCategory) filtered = filtered.filter(expense => expense.categoryId === parseInt(filterCategory));
@@ -3005,10 +3118,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         else if (filterPerson) filtered = filtered.filter(expense => (expense.paidBy || '').trim() === filterPerson.trim());
         if (filterDateFrom) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) >= filterDateFrom);
         if (filterDateTo) filtered = filtered.filter(expense => (expense.date || '').substring(0, 10) <= filterDateTo);
+        if (filterSyncConflict) filtered = filtered.filter(expense => !!syncConflicts[String(expense.id)]);
         if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(e => (e.description || '').toLowerCase().includes(st) || (e.tags || []).some(tag => tag.includes(st))); }
         if (filterTags.length > 0) filtered = filtered.filter(e => filterTags.every(ft => (e.tags || []).includes(ft)));
         return filtered;
-    }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, searchTerm, filterTags]);
+    }, [expenses, filterCategory, filterSubcategory, filterPerson, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, filterTags]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredExpenses]);
 
@@ -3034,6 +3148,25 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const deletingExpense = showDeleteConfirm ? expenses.find(e => e.id === showDeleteConfirm) : null;
     const deletingIsSplit = !!(deletingExpense && deletingExpense.isSplitRecord && deletingExpense.splitGroupId);
     const editConfirmExpense = showEditConfirm ? expenses.find(e => e.id === showEditConfirm) : null;
+    const conflictExpense = showConflictDetail ? expenses.find(e => e.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const expenseConflictFieldLabels = { amount: 'Amount', date: 'Date', description: 'Description', categoryId: 'Category', subcategory: 'Subcategory', currency: 'Currency', paidBy: 'Paid By', accountId: 'Account', isCashPayment: 'Cash Payment', tags: 'Tags' };
+    const formatExpenseConflictValue = (key, value) => {
+        if (key === 'categoryId') return value ? (getCategoryName(value) || String(value)) : '—';
+        if (key === 'accountId') return value ? (accountNameById.get(String(value)) || String(value)) : '—';
+        if (key === 'amount' && value !== undefined && value !== null) return ValidationUtils.formatCurrency(value, (conflictExpense && conflictExpense.currency) || 'GBP');
+        if (key === 'isCashPayment') return value ? 'Cash' : 'Bank/Card';
+        if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = async (useCloud) => {
+        const expenseId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        await DataService.updateExpense(expenseId, updates);
+        SyncConflicts.dismiss('expenses', expenseId);
+        setShowConflictDetail(null);
+        onUpdate();
+    };
     const handleDuplicateExpense = (expense) => { setDuplicatingExpense(expense); setDuplicateDate('today'); setDuplicateCustomDate(''); setDuplicateDateError(''); };
     const handleConfirmDuplicate = () => {
         const today = new Date().toISOString().split('T')[0];
@@ -3124,8 +3257,16 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                         <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
                     </div>
                 </div>
-                {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterTags.length > 0) && (
-                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterTags([]); }}>
+                {Object.keys(syncConflicts).length > 0 && (
+                    <div className="filter-row">
+                        <div className="form-check">
+                            <input type="checkbox" className="form-check-input" id="filterSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                            <label className="form-check-label" htmlFor="filterSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                        </div>
+                    </div>
+                )}
+                {(filterCategory || filterSubcategory || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterTags.length > 0 || filterSyncConflict) && (
+                    <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterCategory(''); setFilterSubcategory(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterTags([]); setFilterSyncConflict(false); }}>
                         <i className="fas fa-times me-1"></i>Clear Filters
                     </button>
                 )}
@@ -3151,6 +3292,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                         <div className="expense-description">
                                             {expense.description}
                                             {expense.isSplitRecord && <i className="fas fa-users expense-split-icon" title="Split expense"></i>}
+                                            <SyncConflictBadge conflict={syncConflicts[String(expense.id)]} onClick={() => setShowConflictDetail(expense.id)} />
                                             {expense.isCashPayment
                                                 ? <i className="fas fa-money-bill-wave expense-cash-icon" title="Paid by cash"></i>
                                                 : expense.accountId && <React.Fragment>
@@ -3273,6 +3415,17 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                     </div>
                 </div>
             )}
+            {showConflictDetail && conflictExpense && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictExpense}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={expenseConflictFieldLabels}
+                    formatValue={formatExpenseConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
+            )}
         </div>
     );
 }
@@ -3287,6 +3440,7 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
     const [editingSubcategory, setEditingSubcategory] = useState(null);
     const [renameConfirm, setRenameConfirm] = useState(null);
     const [showBudgets, setShowBudgets] = useState(false);
+    const [showConflictDetail, setShowConflictDetail] = useState(null); // { collection, id } | null
     const [budgetChanges, setBudgetChanges] = useState({});
     const [categoryBudgetModes, setCategoryBudgetModes] = useState({});
     // Budgets are only editable while a single person is active — with multiple people
@@ -3359,6 +3513,26 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
     }, 0);
     const combinedTotalBudget = categories.reduce((sum, category) => sum + getCombinedCategoryBudget(category), 0);
 
+    // Shared across expense categories and both net-worth category types below — each
+    // collection gets its own conflict map, but the badge/modal/resolve logic is generic.
+    const categorySyncConflicts = useMemo(() => SyncConflicts.read('categories'), [categories]);
+    const categoryConflictFieldLabels = { name: 'Name', subcategories: 'Subcategories' };
+    const formatCategoryConflictValue = (key, value) => {
+        if (key === 'subcategories') return Array.isArray(value) && value.length ? value.join(', ') : '—';
+        if (key === 'personBudgets' || key === 'budgetHistory') return 'Budgets differ — review in Settings';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const conflictCategory = (showConflictDetail && showConflictDetail.collection === 'categories') ? categories.find(c => c.id === showConflictDetail.id) : null;
+    const categoryConflictSnapshot = conflictCategory ? categorySyncConflicts[String(showConflictDetail.id)] : null;
+    const handleResolveCategoryConflict = async (useCloud) => {
+        const catId = showConflictDetail.id;
+        const updates = useCloud && categoryConflictSnapshot ? categoryConflictSnapshot.cloudSnapshot : {};
+        await DataService.updateCategory(catId, updates);
+        SyncConflicts.dismiss('categories', catId);
+        setShowConflictDetail(null);
+        onUpdate();
+    };
+
     return (
         <div className="screen">
             <div className="screen-header">
@@ -3401,7 +3575,7 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                                         {errors[category.id] && (<div className="invalid-feedback d-block">{errors[category.id]}</div>)}
                                     </div>
                                 ) : (
-                                    <div className="category-info"><h6>{category.name}</h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
+                                    <div className="category-info"><h6>{category.name}<SyncConflictBadge conflict={categorySyncConflicts[String(category.id)]} onClick={() => setShowConflictDetail({ collection: 'categories', id: category.id })} /></h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
                                 )}
                                 <div className="category-actions">
                                     <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingCategory(editingCategory === category.id ? null : category.id)} title="Edit"><i className="fas fa-edit"></i></button>
@@ -3570,6 +3744,17 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                     </div>
                 </div>
             )}
+            {conflictCategory && categoryConflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictCategory}
+                    cloudSnapshot={categoryConflictSnapshot.cloudSnapshot}
+                    fieldLabels={categoryConflictFieldLabels}
+                    formatValue={formatCategoryConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveCategoryConflict(false)}
+                    onUseCloud={() => handleResolveCategoryConflict(true)}
+                />
+            )}
             <NetWorthCategorySection type="asset" title="Asset Categories" icon="fa-plus-circle" categories={assetCategories} onUpdate={onUpdate} />
             <NetWorthCategorySection type="liability" title="Liability Categories" icon="fa-minus-circle" categories={liabilityCategories} onUpdate={onUpdate} />
         </div>
@@ -3589,6 +3774,27 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
     const [editingSubcategory, setEditingSubcategory] = useState(null);
     const [renameConfirm, setRenameConfirm] = useState(null);
     const [renameCategoryConfirm, setRenameCategoryConfirm] = useState(null);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
+    const conflictCollection = type === 'asset' ? 'assetCategories' : 'liabilityCategories';
+    const syncConflicts = useMemo(() => SyncConflicts.read(conflictCollection), [categories]);
+    const conflictCategory = showConflictDetail ? categories.find(c => c.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const conflictFieldLabels = { name: 'Name', subcategories: 'Subcategories' };
+    const formatConflictValue = (key, value) => (key === 'subcategories' ? (Array.isArray(value) && value.length ? value.join(', ') : '—') : (value === undefined || value === null || value === '' ? '—' : String(value)));
+    // updateNetWorthCategory only supports renaming (and refuses locked categories entirely)
+    // — there's no bulk "replace subcategories" method, so a subcategory-only difference
+    // can't be fully auto-resolved here; the name is what "Use Cloud"/"Keep Local" affects.
+    const handleResolveCategoryConflict = (useCloud) => {
+        const catId = showConflictDetail;
+        const cat = categories.find(c => c.id === catId);
+        if (cat && !cat.locked) {
+            const newName = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot.name : cat.name;
+            DataService.updateNetWorthCategory(type, catId, newName);
+        }
+        SyncConflicts.dismiss(conflictCollection, catId);
+        setShowConflictDetail(null);
+        onUpdate();
+    };
 
     const handleAddCategory = (e) => {
         e.preventDefault();
@@ -3690,7 +3896,7 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
                                         {errors[category.id] && (<div className="invalid-feedback d-block">{errors[category.id]}</div>)}
                                     </div>
                                 ) : (
-                                    <div className="category-info"><h6>{category.name}</h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
+                                    <div className="category-info"><h6>{category.name}<SyncConflictBadge conflict={syncConflicts[String(category.id)]} onClick={() => setShowConflictDetail(category.id)} /></h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
                                 )}
                                 <div className="category-actions">
                                     {!category.locked && (
@@ -3788,6 +3994,17 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
                     </div>
                 </div>
             )}
+            {conflictCategory && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictCategory}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={conflictFieldLabels}
+                    formatValue={formatConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveCategoryConflict(false)}
+                    onUseCloud={() => handleResolveCategoryConflict(true)}
+                />
+            )}
         </div>
     );
 }
@@ -3809,10 +4026,19 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const [filterPerson, setFilterPerson] = useState(_f0.person || '');
     const [filterDateFrom, setFilterDateFrom] = useState(_f0.dateFrom || '');
     const [filterDateTo, setFilterDateTo] = useState(_f0.dateTo || '');
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
+
+    const syncConflicts = useMemo(() => SyncConflicts.read('income'), [income]);
+    const accountNameById = useMemo(() => {
+        const m = new Map();
+        DataService.getBankAccounts().forEach(a => m.set(String(a.id), a.accountName));
+        return m;
+    }, [income]);
 
     // Mirrors ExpenseList: the person sub-filter only makes sense when multiple
     // participants are active — drop any stale selection once it drops back to one.
@@ -3820,8 +4046,8 @@ function IncomeForm({ income, onUpdate, activeView }) {
 
     // Persist filters for the session (see FilterMemory) so navigating away keeps them.
     useEffect(() => {
-        FilterMemory.save('income', { search: searchTerm, source: filterSource, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo });
-    }, [searchTerm, filterSource, filterPerson, filterDateFrom, filterDateTo]);
+        FilterMemory.save('income', { search: searchTerm, source: filterSource, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo, syncConflict: filterSyncConflict });
+    }, [searchTerm, filterSource, filterPerson, filterDateFrom, filterDateTo, filterSyncConflict]);
 
     // Re-defaults the Account field to the newly-selected person's primary account (only when
     // its currency matches formData.currency) whenever "Who's Income" or the currency changes —
@@ -3871,9 +4097,10 @@ function IncomeForm({ income, onUpdate, activeView }) {
         else if (filterPerson) filtered = filtered.filter(item => (item.paidBy || '').trim() === filterPerson.trim());
         if (filterDateFrom) filtered = filtered.filter(item => (item.date || '').substring(0, 10) >= filterDateFrom);
         if (filterDateTo) filtered = filtered.filter(item => (item.date || '').substring(0, 10) <= filterDateTo);
+        if (filterSyncConflict) filtered = filtered.filter(item => !!syncConflicts[String(item.id)]);
         if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(item => (item.description || '').toLowerCase().includes(st) || (item.source || '').toLowerCase().includes(st)); }
         return filtered;
-    }, [income, filterSource, filterPerson, filterDateFrom, filterDateTo, searchTerm]);
+    }, [income, filterSource, filterPerson, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredIncome]);
 
@@ -3885,6 +4112,22 @@ function IncomeForm({ income, onUpdate, activeView }) {
         let h = 0;
         for (let i = 0; i < (name||'').length; i++) h = (h * 31 + (name||'').charCodeAt(i)) & 0xffff;
         return palette[h % palette.length];
+    };
+    const conflictIncome = showConflictDetail ? income.find(i => i.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const incomeConflictFieldLabels = { amount: 'Amount', date: 'Date', source: 'Source', description: 'Description', paidBy: 'Paid By', currency: 'Currency', accountId: 'Account' };
+    const formatIncomeConflictValue = (key, value) => {
+        if (key === 'accountId') return value ? (accountNameById.get(String(value)) || String(value)) : '—';
+        if (key === 'amount' && value !== undefined && value !== null) return ValidationUtils.formatCurrency(value, (conflictIncome && conflictIncome.currency) || 'GBP');
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = async (useCloud) => {
+        const incomeId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        await DataService.updateIncome(incomeId, updates);
+        SyncConflicts.dismiss('income', incomeId);
+        setShowConflictDetail(null);
+        onUpdate();
     };
 
     if (showSuccess) { return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Income {editingIncome ? 'Updated' : 'Added'} Successfully!</h3></div></div>); }
@@ -4024,8 +4267,16 @@ function IncomeForm({ income, onUpdate, activeView }) {
                             <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
                         </div>
                     </div>
-                    {(filterSource || filterPerson || filterDateFrom || filterDateTo || searchTerm) && (
-                        <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterSource(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); }}>
+                    {Object.keys(syncConflicts).length > 0 && (
+                        <div className="filter-row">
+                            <div className="form-check">
+                                <input type="checkbox" className="form-check-input" id="filterIncomeSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                                <label className="form-check-label" htmlFor="filterIncomeSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                            </div>
+                        </div>
+                    )}
+                    {(filterSource || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterSyncConflict) && (
+                        <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterSource(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterSyncConflict(false); }}>
                             <i className="fas fa-times me-1"></i>Clear Filters
                         </button>
                     )}
@@ -4043,7 +4294,10 @@ function IncomeForm({ income, onUpdate, activeView }) {
                                     {(incomeItem.source || '?').charAt(0).toUpperCase()}
                                 </div>
                                 <div className="income-info">
-                                    <div className="income-source">{incomeItem.source}</div>
+                                    <div className="income-source">
+                                        {incomeItem.source}
+                                        <SyncConflictBadge conflict={syncConflicts[String(incomeItem.id)]} onClick={() => setShowConflictDetail(incomeItem.id)} />
+                                    </div>
                                     <div className="income-meta">{metaParts.filter(Boolean).join(' · ')}</div>
                                 </div>
                                 {personLabel && <span className="person-badge" title={personLabel}>{personLabel}</span>}
@@ -4089,6 +4343,17 @@ function IncomeForm({ income, onUpdate, activeView }) {
                         </div>
                     </div>
                 </div>
+            )}
+            {showConflictDetail && conflictIncome && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictIncome}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={incomeConflictFieldLabels}
+                    formatValue={formatIncomeConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
             )}
         </div>
     );
@@ -4266,6 +4531,43 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     const handleDeleteReconciliation = (id) => {
         DataService.deleteReconciliation(id);
         setReconciliations(DataService.getReconciliations());
+        if (onUpdate) onUpdate();
+    };
+    // Transfers (4 subtype tables below) and Reconciliations each get their own conflict
+    // map, but share one badge/modal — showConflictDetail carries which collection+id.
+    const transferSyncConflicts = useMemo(() => SyncConflicts.read('transfers'), [transfers]);
+    const reconciliationSyncConflicts = useMemo(() => SyncConflicts.read('reconciliations'), [reconciliations]);
+    const [showConflictDetail, setShowConflictDetail] = useState(null); // { collection, id } | null
+    const transferConflictFieldLabels = { date: 'Date', fromAccountId: 'From Account', toAccountId: 'To Account', fromAmount: 'From Amount', toAmount: 'To Amount', isOverseas: 'Overseas', conversionRate: 'Conversion Rate', fee: 'Fee', feeCurrency: 'Fee Currency', notes: 'Notes', toAssetId: 'To Asset', toAssetName: 'Asset Name', isCashWithdrawal: 'Cash Withdrawal', cashWithdrawCurrency: 'Withdrawal Currency' };
+    const reconciliationConflictFieldLabels = { accountId: 'Account', person: 'Person', date: 'Date', balanceBefore: 'Balance Before', delta: 'Adjustment', balanceAfter: 'Balance After', notes: 'Notes', loggedAsTransaction: 'Logged as Transaction', transactionType: 'Transaction Type' };
+    const conflictAccountNameById = useMemo(() => {
+        const m = new Map();
+        bankAccountsForTransfers.forEach(a => m.set(String(a.id), a.accountName));
+        return m;
+    }, [bankAccountsForTransfers]);
+    const formatSyncConflictValue = (key, value) => {
+        if ((key === 'fromAccountId' || key === 'toAccountId' || key === 'accountId') && value) return conflictAccountNameById.get(String(value)) || String(value);
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (typeof value === 'number') return String(value);
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const conflictRecord = !showConflictDetail ? null
+        : showConflictDetail.collection === 'transfers' ? transfers.find(t => t.id === showConflictDetail.id)
+        : reconciliations.find(r => r.id === showConflictDetail.id);
+    const conflictRecordSnapshot = !showConflictDetail ? null
+        : (showConflictDetail.collection === 'transfers' ? transferSyncConflicts : reconciliationSyncConflicts)[String(showConflictDetail.id)];
+    const handleResolveTransferOrReconciliationConflict = (useCloud) => {
+        const { collection, id } = showConflictDetail;
+        const updates = useCloud && conflictRecordSnapshot ? conflictRecordSnapshot.cloudSnapshot : {};
+        if (collection === 'transfers') {
+            DataService.updateTransfer(id, updates);
+            setTransfers(DataService.getTransfers());
+        } else {
+            DataService.updateReconciliation(id, updates);
+            setReconciliations(DataService.getReconciliations());
+        }
+        SyncConflicts.dismiss(collection, id);
+        setShowConflictDetail(null);
         if (onUpdate) onUpdate();
     };
     // Custom time period: month+year only (no day-level picker), one pair for each end
@@ -4775,7 +5077,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ownerLabel(t.toAccountId)}</td>
                                                     <td>{accountLabel(t.toAccountId)}</td>
-                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -4821,7 +5123,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td>{ownerLabel(t.toAccountId)}</td>
-                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -4859,7 +5161,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td><span className="badge bg-secondary">Logged for audit</span></td>
-                                                    <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -4898,6 +5200,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
                                                     <td>{ValidationUtils.formatDate(t.date)}</td>
                                                     <td>
+                                                        <SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} />
                                                         <button type="button" className="btn btn-sm btn-outline-primary" style={{marginRight: '0.25rem'}} onClick={() => openEditWithdraw(t)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
                                                         <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button>
                                                     </td>
@@ -4963,7 +5266,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                                     ? <span className={'badge ' + (r.transactionType === 'expense' ? 'bg-danger' : 'bg-success')}>{r.transactionType === 'expense' ? 'Expense' : 'Income'}</span>
                                                     : <span className="badge bg-secondary">Not logged</span>}
                                                 </td>
-                                                <td><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                <td><SyncConflictBadge conflict={reconciliationSyncConflicts[String(r.id)]} onClick={() => setShowConflictDetail({ collection: 'reconciliations', id: r.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -4975,6 +5278,17 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     </div>
                 );
             })()}
+            {showConflictDetail && conflictRecord && conflictRecordSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictRecord}
+                    cloudSnapshot={conflictRecordSnapshot.cloudSnapshot}
+                    fieldLabels={showConflictDetail.collection === 'transfers' ? transferConflictFieldLabels : reconciliationConflictFieldLabels}
+                    formatValue={formatSyncConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveTransferOrReconciliationConflict(false)}
+                    onUseCloud={() => handleResolveTransferOrReconciliationConflict(true)}
+                />
+            )}
             {editingWithdraw && editWithdrawForm && (() => {
                 const account = bankAccountsForTransfers.find(a => a.id === editingWithdraw.fromAccountId);
                 return (
@@ -5090,6 +5404,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [accountErrors, setAccountErrors] = useState({});
     const [showDeleteAccountConfirm, setShowDeleteAccountConfirm] = useState(null);
     const [showLinkAccountsConfirm, setShowLinkAccountsConfirm] = useState(false);
+    const [filterBankAccountSyncConflict, setFilterBankAccountSyncConflict] = useState(!!FilterMemory.load('bankAccounts').syncConflict);
+    const [showAccountConflictDetail, setShowAccountConflictDetail] = useState(null);
     const [linkCandidates, setLinkCandidates] = useState([]);
     const [linkableExpenses, setLinkableExpenses] = useState([]);
     const [linkableIncome, setLinkableIncome] = useState([]);
@@ -5142,6 +5458,25 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         () => computeLinkCandidates(bankAccounts, linkableExpenses, linkableIncome),
         [bankAccounts, linkableExpenses, linkableIncome]
     );
+    const bankAccountSyncConflicts = useMemo(() => SyncConflicts.read('bankAccounts'), [bankAccounts]);
+    useEffect(() => { FilterMemory.save('bankAccounts', { syncConflict: filterBankAccountSyncConflict }); }, [filterBankAccountSyncConflict]);
+    // balance is derived (DataService.computeBankAccountBalance), never stored — excluded
+    // from the diff entirely so it never shows up as noise.
+    const bankAccountConflictFieldLabels = { accountName: 'Account Name', accountRef: 'Account ID', accountType: 'Type', country: 'Country', currency: 'Currency', person: 'Person', openingAmount: 'Opening Amount', isPrimary: 'Primary' };
+    const formatBankAccountConflictValue = (key, value) => {
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const conflictAccount = showAccountConflictDetail ? bankAccounts.find(a => a.id === showAccountConflictDetail) : null;
+    const accountConflictSnapshot = showAccountConflictDetail ? bankAccountSyncConflicts[String(showAccountConflictDetail)] : null;
+    const handleResolveAccountConflict = (useCloud) => {
+        const accountId = showAccountConflictDetail;
+        const updates = useCloud && accountConflictSnapshot ? accountConflictSnapshot.cloudSnapshot : {};
+        DataService.updateBankAccount(accountId, updates);
+        SyncConflicts.dismiss('bankAccounts', accountId);
+        setShowAccountConflictDetail(null);
+        setBankAccounts(DataService.getBankAccounts());
+    };
     useEffect(() => {
         const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
         setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
@@ -6037,6 +6372,13 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                 </p>
             </div>
 
+            {Object.keys(bankAccountSyncConflicts).length > 0 && (
+                <div className="form-check mb-2">
+                    <input type="checkbox" className="form-check-input" id="filterBankAccountSyncConflict" checked={filterBankAccountSyncConflict} onChange={(e) => setFilterBankAccountSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterBankAccountSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
+
             <form onSubmit={handleAddAccount} style={{marginBottom: '1rem'}}>
                 <div className="row g-2 align-items-end">
                     <div className="col">
@@ -6116,8 +6458,9 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         No bank accounts added yet.
                     </div>
                 ) : (() => {
+                    const displayAccounts = filterBankAccountSyncConflict ? bankAccounts.filter(a => !!bankAccountSyncConflicts[String(a.id)]) : bankAccounts;
                     const byPerson = new Map();
-                    bankAccounts.forEach(a => {
+                    displayAccounts.forEach(a => {
                         if (!byPerson.has(a.person)) byPerson.set(a.person, []);
                         byPerson.get(a.person).push(a);
                     });
@@ -6136,6 +6479,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                         <div>
                                             <span style={{fontWeight: '600'}}>{account.accountName}</span>
                                             {account.isPrimary && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Primary">★</span>}
+                                            <SyncConflictBadge conflict={bankAccountSyncConflicts[String(account.id)]} onClick={() => setShowAccountConflictDetail(account.id)} />
                                             <br />
                                             <span style={{color: '#6c757d', fontSize: '0.85rem'}}>
                                                 {account.accountType} · {account.currency} · {account.country}
@@ -6454,6 +6798,17 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                         <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelReconcile}>Cancel</button>
                     </form>
                 </div>
+            )}
+            {showAccountConflictDetail && conflictAccount && accountConflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictAccount}
+                    cloudSnapshot={accountConflictSnapshot.cloudSnapshot}
+                    fieldLabels={bankAccountConflictFieldLabels}
+                    formatValue={formatBankAccountConflictValue}
+                    onClose={() => setShowAccountConflictDetail(null)}
+                    onKeepLocal={() => handleResolveAccountConflict(false)}
+                    onUseCloud={() => handleResolveAccountConflict(true)}
+                />
             )}
             </React.Fragment>)}
 
@@ -7476,6 +7831,9 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
     const [addFundsGoalId, setAddFundsGoalId] = useState(null);
     const [addFundsAmount, setAddFundsAmount] = useState('');
     const [addFundsError, setAddFundsError] = useState('');
+    const _f0 = FilterMemory.load('goals');
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     const loadGoals = () => setGoals(DataService.getGoals());
 
@@ -7491,6 +7849,8 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
         };
         calcMonthlyNet();
     }, []);
+
+    useEffect(() => { FilterMemory.save('goals', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
 
     const resetForm = () => {
         setFormData({ name: '', targetAmount: '', currency: defaultCurrency || 'GBP', deadline: '', currentSaved: '', emoji: '', notes: '', owner: resolveActiveViewValue(activeView) });
@@ -7549,6 +7909,23 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
     const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const fmt = (amount, currency) => ValidationUtils.formatCurrency(amount, currency || defaultCurrency);
     const visibleGoals = goals.filter(g => matchesActiveView(g.owner, activeView));
+    const syncConflicts = useMemo(() => SyncConflicts.read('goals'), [goals]);
+    const displayGoals = filterSyncConflict ? visibleGoals.filter(g => !!syncConflicts[String(g.id)]) : visibleGoals;
+    const conflictGoal = showConflictDetail ? goals.find(g => g.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const goalConflictFieldLabels = { name: 'Name', targetAmount: 'Target Amount', currency: 'Currency', deadline: 'Deadline', notes: 'Notes', emoji: 'Emoji', currentSaved: 'Currently Saved', owner: 'Owner' };
+    const formatGoalConflictValue = (key, value) => {
+        if ((key === 'targetAmount' || key === 'currentSaved') && value !== undefined && value !== null) return fmt(value, (conflictGoal && conflictGoal.currency) || defaultCurrency);
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = (useCloud) => {
+        const goalId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        DataService.updateGoal(goalId, updates);
+        SyncConflicts.dismiss('goals', goalId);
+        setShowConflictDetail(null);
+        loadGoals(); if (onUpdate) onUpdate();
+    };
 
     return (
         <div className="screen">
@@ -7559,6 +7936,13 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                     {showForm && !editingGoal ? 'Cancel' : 'New Goal'}
                 </button>
             </div>
+
+            {Object.keys(syncConflicts).length > 0 && (
+                <div className="form-check mb-2">
+                    <input type="checkbox" className="form-check-input" id="filterGoalSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterGoalSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
 
             {showForm && (
                 <div className="card mb-3" style={{borderRadius:'12px', border:'1px solid #e9ecef'}}>
@@ -7622,7 +8006,7 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                     <p>Create your first goal!</p>
                 </div>
             ) : (
-                visibleGoals.map(goal => {
+                displayGoals.map(goal => {
                     const pct = goal.targetAmount > 0 ? Math.min((goal.currentSaved / goal.targetAmount) * 100, 100) : 0;
                     const reached = goal.currentSaved >= goal.targetAmount;
                     const projected = getProjectedCompletion(goal);
@@ -7635,6 +8019,7 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                                     <div>
                                         {goal.emoji && <span style={{fontSize:'1.4rem', marginRight:'0.4rem'}}>{goal.emoji}</span>}
                                         <strong style={{fontSize:'1rem'}}>{goal.name}</strong>
+                                        <SyncConflictBadge conflict={syncConflicts[String(goal.id)]} onClick={() => setShowConflictDetail(goal.id)} />
                                     </div>
                                     <div className="d-flex gap-1">
                                         <button className="btn btn-outline-primary btn-sm" onClick={() => handleEdit(goal)}><i className="fas fa-edit"></i></button>
@@ -7702,6 +8087,17 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                     </div>
                 </div>
             )}
+            {showConflictDetail && conflictGoal && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictGoal}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={goalConflictFieldLabels}
+                    formatValue={formatGoalConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
+            )}
         </div>
     );
 }
@@ -7718,9 +8114,16 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
     const [logExpenseCategoryId, setLogExpenseCategoryId] = useState('');
     const [logExpenseSubcategory, setLogExpenseSubcategory] = useState('');
     const [logExpenseConfirm, setLogExpenseConfirm] = useState(null);
+    const _f0 = FilterMemory.load('bills');
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     const loadBills = () => setBills(DataService.getBills());
     useEffect(() => { loadBills(); }, []);
+
+    useEffect(() => { FilterMemory.save('bills', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+
+    const syncConflicts = useMemo(() => SyncConflicts.read('bills'), [bills]);
 
     const today = new Date().toISOString().split('T')[0];
 
@@ -7751,7 +8154,9 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
 
     const monthlyCommitment = visibleBills.reduce((s, b) => s + getMonthlyAmount(b), 0);
 
-    const sortedBills = [...visibleBills].sort((a, b) => {
+    const displayBills = filterSyncConflict ? visibleBills.filter(b => !!syncConflicts[String(b.id)]) : visibleBills;
+
+    const sortedBills = [...displayBills].sort((a, b) => {
         const aOverdue = getDaysDiff(a.nextDueDate) < 0 && !a.isPaid;
         const bOverdue = getDaysDiff(b.nextDueDate) < 0 && !b.isPaid;
         const aToday = a.nextDueDate === today;
@@ -7859,6 +8264,7 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
                             <div className="d-flex align-items-center gap-2 flex-wrap">
                                 <strong style={{fontSize:'0.95rem'}}>{bill.name}</strong>
                                 {badge && <span className={'badge ' + badge.cls} style={{fontSize:'0.72rem'}}>{badge.label}</span>}
+                                <SyncConflictBadge conflict={syncConflicts[String(bill.id)]} onClick={() => setShowConflictDetail(bill.id)} />
                             </div>
                             <div style={{fontSize:'0.83rem', color:'#6c757d', marginTop:'0.15rem'}}>
                                 <strong>{fmtCurrency(bill.amount, bill.currency)}</strong> · {bill.frequency}
@@ -7886,6 +8292,24 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
         );
     };
 
+    const conflictBill = showConflictDetail ? bills.find(b => b.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const billConflictFieldLabels = { name: 'Name', amount: 'Amount', currency: 'Currency', frequency: 'Frequency', nextDueDate: 'Next Due Date', categoryId: 'Category', subcategory: 'Subcategory', reminderDaysBefore: 'Reminder (days before)', notes: 'Notes', person: 'Person', isActive: 'Active', isPaid: 'Paid' };
+    const formatBillConflictValue = (key, value) => {
+        if (key === 'categoryId') { const cat = categories.find(c => c.id === value); return cat ? cat.name : (value ? String(value) : '—'); }
+        if (key === 'amount' && value !== undefined && value !== null) return fmtCurrency(value, (conflictBill && conflictBill.currency) || 'GBP');
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = async (useCloud) => {
+        const billId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        await DataService.updateBill(billId, updates);
+        SyncConflicts.dismiss('bills', billId);
+        setShowConflictDetail(null);
+        loadBills(); onUpdate();
+    };
+
     return (
         <div className={embedded ? undefined : 'screen'}>
             <div className="screen-header" style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
@@ -7895,6 +8319,13 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
                     {showForm && !editingBill ? 'Cancel' : 'Add Bill'}
                 </button>
             </div>
+
+            {Object.keys(syncConflicts).length > 0 && (
+                <div className="form-check mb-2">
+                    <input type="checkbox" className="form-check-input" id="filterBillSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterBillSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
 
             <div className="card mb-3" style={{borderRadius:'12px', background:'linear-gradient(135deg,#4a6cf7,#6a3de8)', color:'#fff', border:'none'}}>
                 <div className="card-body py-2 px-3">
@@ -8066,6 +8497,17 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
                     </div>
                 </div>
             )}
+            {showConflictDetail && conflictBill && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictBill}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={billConflictFieldLabels}
+                    formatValue={formatBillConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
+            )}
         </div>
     );
 }
@@ -8076,9 +8518,33 @@ function RecurringList({ onUpdate, activeView, embedded }) {
     const [editSchedule, setEditSchedule] = useState(null);
     const [editForm, setEditForm] = useState({ amount: '', frequency: 'monthly', endDate: '', nextDue: '' });
     const [editErrors, setEditErrors] = useState({});
+    const _f0 = FilterMemory.load('recurring');
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     const load = () => setSchedules(DataService.getRecurring());
     useEffect(() => { load(); }, []);
+
+    useEffect(() => { FilterMemory.save('recurring', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+
+    const syncConflicts = useMemo(() => SyncConflicts.read('recurring'), [schedules]);
+    const accountNameById = useMemo(() => {
+        const m = new Map();
+        DataService.getBankAccounts().forEach(a => m.set(String(a.id), a.accountName));
+        return m;
+    }, [schedules]);
+    // templateExpense is a nested object, so the generic diff loop would show it as one
+    // opaque "differs" row — flatten it into dotted keys so the modal reads naturally.
+    const flattenScheduleForDiff = (s) => {
+        if (!s) return {};
+        const t = s.templateExpense || {};
+        return {
+            type: s.type, frequency: s.frequency, endDate: s.endDate, nextDue: s.nextDue, lastGenerated: s.lastGenerated, isActive: s.isActive,
+            'templateExpense.amount': t.amount, 'templateExpense.description': t.description, 'templateExpense.source': t.source,
+            'templateExpense.paidBy': t.paidBy, 'templateExpense.person': t.person, 'templateExpense.currency': t.currency,
+            'templateExpense.accountId': t.accountId, 'templateExpense.netWorthItemName': t.netWorthItemName
+        };
+    };
 
     const today = new Date().toISOString().split('T')[0];
     const isNetWorthType = (type) => type === 'asset' || type === 'liability';
@@ -8140,9 +8606,33 @@ function RecurringList({ onUpdate, activeView, embedded }) {
         return <span className={`badge me-1 ${m.cls}`}>{m.label}</span>;
     };
 
+    const displaySchedules = filterSyncConflict ? visibleSchedules.filter(s => !!syncConflicts[String(s.id)]) : visibleSchedules;
+    const conflictSchedule = showConflictDetail ? schedules.find(s => s.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const recurringConflictFieldLabels = { type: 'Type', frequency: 'Frequency', endDate: 'End Date', nextDue: 'Next Due', lastGenerated: 'Last Generated', isActive: 'Active', 'templateExpense.amount': 'Amount', 'templateExpense.description': 'Description', 'templateExpense.source': 'Source', 'templateExpense.paidBy': 'Paid By', 'templateExpense.person': 'Person', 'templateExpense.currency': 'Currency', 'templateExpense.accountId': 'Account', 'templateExpense.netWorthItemName': 'Item Name' };
+    const formatRecurringConflictValue = (key, value) => {
+        if (key === 'templateExpense.accountId') return value ? (accountNameById.get(String(value)) || String(value)) : '—';
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = async (useCloud) => {
+        const scheduleId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        DataService.updateRecurring(scheduleId, updates);
+        SyncConflicts.dismiss('recurring', scheduleId);
+        setShowConflictDetail(null);
+        load(); onUpdate();
+    };
+
     return (
         <div className={embedded ? undefined : 'screen'}>
             <div className="screen-header"><h2><i className="fas fa-redo me-2"></i>Recurring Transactions</h2></div>
+            {Object.keys(syncConflicts).length > 0 && (
+                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
+                    <input type="checkbox" className="form-check-input" id="filterRecurringSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterRecurringSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
             {visibleSchedules.length === 0 ? (
                 <div className="empty-state">
                     <i className="fas fa-redo fa-3x"></i>
@@ -8151,7 +8641,7 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                 </div>
             ) : (
                 <div style={{padding: '0 1rem 1rem'}}>
-                    {visibleSchedules.map(s => {
+                    {displaySchedules.map(s => {
                         const status = getStatus(s);
                         const t = s.templateExpense || {};
                         const isDueToday = s.nextDue === today;
@@ -8166,6 +8656,7 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                                             {status === 'paused' && <span className="badge bg-warning text-dark me-1">Paused</span>}
                                             {status === 'ended' && <span className="badge bg-secondary me-1">Ended</span>}
                                             {isDueToday && status === 'active' && <span className="badge bg-primary">Due Today</span>}
+                                            <SyncConflictBadge conflict={syncConflicts[String(s.id)]} onClick={() => setShowConflictDetail(s.id)} />
                                         </div>
                                         <div className="d-flex gap-1">
                                             <button className="btn btn-sm btn-outline-primary" onClick={() => openEdit(s)} title="Edit"><i className="fas fa-edit"></i></button>
@@ -8251,6 +8742,17 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                         </div>
                     </div>
                 </div>
+            )}
+            {showConflictDetail && conflictSchedule && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={flattenScheduleForDiff(conflictSchedule)}
+                    cloudSnapshot={flattenScheduleForDiff(conflictSnapshot.cloudSnapshot)}
+                    fieldLabels={recurringConflictFieldLabels}
+                    formatValue={formatRecurringConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
             )}
         </div>
     );
@@ -9805,6 +10307,8 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
     const [addMoneyErrors, setAddMoneyErrors] = useState({});
     const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('networth').syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     // Reseed the form's person whenever the active view changes (only when not mid-edit),
     // so a freshly-opened Add form defaults to whoever's view is currently active.
@@ -9816,6 +10320,29 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const categoriesForType = (type) => (type === 'asset' ? assetCategories : liabilityCategories) || [];
 
     const reload = () => { setItems(DataService.getNetWorthItems()); setHistory(DataService.getNetWorthHistory()); };
+
+    const syncConflicts = useMemo(() => SyncConflicts.read('networth'), [items]);
+    useEffect(() => { FilterMemory.save('networth', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+    const netWorthConflictFieldLabels = { name: 'Name', value: 'Value', currency: 'Currency', categoryId: 'Category', subcategory: 'Subcategory', notes: 'Notes', person: 'Person', country: 'Country' };
+    const conflictItem = showConflictDetail ? items.find(i => i.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const formatNetWorthConflictValue = (key, value) => {
+        if (key === 'value' && value !== undefined && value !== null) return fmt(value, (conflictItem && conflictItem.currency) || defaultCurrency);
+        if (key === 'categoryId') {
+            const cats = [...assetCategories, ...liabilityCategories];
+            const cat = cats.find(c => c.id === value);
+            return cat ? cat.name : (value ? String(value) : '—');
+        }
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = (useCloud) => {
+        const itemId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        DataService.updateNetWorthItem(itemId, updates, { activeView });
+        SyncConflicts.dismiss('networth', itemId);
+        setShowConflictDetail(null);
+        reload(); if (onUpdate) onUpdate();
+    };
 
     const convertToDefault = (value, currency) => CurrencyService.convertToDefaultSync(value, currency, defaultCurrency);
 
@@ -10022,10 +10549,14 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
     const assetItems = visibleItems.filter(i => i.type === 'asset');
     const liabilityItems = visibleItems.filter(i => i.type === 'liability');
-    const assetsByCat = groupBy(assetItems, 'categoryId');
-    const liabsByCat = groupBy(liabilityItems, 'categoryId');
+    // Sync-conflict filter only narrows what's *listed* below — never the totals above,
+    // which are always computed from the unfiltered assetItems/liabilityItems/visibleItems.
+    const displayAssetItems = filterSyncConflict ? assetItems.filter(i => !!syncConflicts[String(i.id)]) : assetItems;
+    const displayLiabilityItems = filterSyncConflict ? liabilityItems.filter(i => !!syncConflicts[String(i.id)]) : liabilityItems;
+    const assetsByCat = groupBy(displayAssetItems, 'categoryId');
+    const liabsByCat = groupBy(displayLiabilityItems, 'categoryId');
     // Display-only — see getPrimaryWalletBankItems's comment. Never fold into assetItems/totalAssets.
-    const primaryWalletItems = DataService.getPrimaryWalletBankItems(activeView);
+    const primaryWalletItems = filterSyncConflict ? [] : DataService.getPrimaryWalletBankItems(activeView);
     const primaryWalletItemsByCat = groupBy(primaryWalletItems, 'categoryId');
 
     // Country breakdown: a new categorization axis, separate from totalAssets/netWorth, so
@@ -10064,7 +10595,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const renderItemCard = (item, colorClass) => (
         <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid ' + (item.isPrimaryWallet ? '#ffc107' : '#e9ecef'),background:item.isPrimaryWallet ? '#fff3cd' : '#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
             <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}{item.country && <span className="country-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={item.country}><i className="fas fa-map-marker-alt"></i>{item.country}</span>}</div>
+                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}{item.country && <span className="country-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={item.country}><i className="fas fa-map-marker-alt"></i>{item.country}</span>}{!item.isPrimaryWallet && !item.isComputedCash && !item.isBankAccount && <SyncConflictBadge conflict={syncConflicts[String(item.id)]} onClick={() => setShowConflictDetail(item.id)} />}</div>
                 {/* A linked account can compute negative (overdrawn) — the asset total still
                     correctly negates by the full amount (unchanged), but showing e.g. "-£50"
                     as the headline reads as if that's cash on hand. Show £0 with the shortfall
@@ -10133,6 +10664,13 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     return (
         <div className="screen">
             <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
+
+            {Object.keys(syncConflicts).length > 0 && (
+                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
+                    <input type="checkbox" className="form-check-input" id="filterNetWorthSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterNetWorthSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
 
             {/* Summary banner — Net Worth on top, then Wallet/Savings/Investment,
                 Property/Pension/Other Asset, then Liabilities on its own row */}
@@ -10615,6 +11153,17 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     </div>
                 </div>
             )}
+            {showConflictDetail && conflictItem && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictItem}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={netWorthConflictFieldLabels}
+                    formatValue={formatNetWorthConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
+            )}
         </div>
     );
 }
@@ -10633,9 +11182,13 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
     const [linkedCatId, setLinkedCatId] = useState('');
     const [linkedSubcat, setLinkedSubcat] = useState('');
     const [showSettled, setShowSettled] = useState(!!_f0.showSettled);
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null);
 
     // Persist tab + settled toggle for the session (see FilterMemory).
-    useEffect(() => { FilterMemory.save('debts', { tab: activeTab, showSettled }); }, [activeTab, showSettled]);
+    useEffect(() => { FilterMemory.save('debts', { tab: activeTab, showSettled, syncConflict: filterSyncConflict }); }, [activeTab, showSettled, filterSyncConflict]);
+
+    const syncConflicts = useMemo(() => SyncConflicts.read('debts'), [debts]);
 
     const reload = () => setDebts(DataService.getDebts());
     const today = new Date().toISOString().split('T')[0];
@@ -10647,8 +11200,9 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
     // was active (so a debt you logged for yourself while viewing "John" still shows up
     // when you switch back to John's view, even though its `person` field is 'own').
     const personDebts = debts.filter(d => matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v)));
-    const activeDebts = personDebts.filter(d => !d.isSettled && d.direction === activeTab);
-    const settledDebts = personDebts.filter(d => d.isSettled && d.direction === activeTab);
+    const displayDebts = filterSyncConflict ? personDebts.filter(d => !!syncConflicts[String(d.id)]) : personDebts;
+    const activeDebts = displayDebts.filter(d => !d.isSettled && d.direction === activeTab);
+    const settledDebts = displayDebts.filter(d => d.isSettled && d.direction === activeTab);
     const sortedActive = [...activeDebts].sort((a, b) => (isOverdue(a) ? 0 : 1) - (isOverdue(b) ? 0 : 1) || new Date(b.createdAt) - new Date(a.createdAt));
 
     const sumByCurrency = (dir) => {
@@ -10711,6 +11265,23 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
     };
 
     const handleDelete = (id) => { DataService.deleteDebt(id); setShowDeleteModal(null); reload(); if (onUpdate) onUpdate(); };
+    const conflictDebt = showConflictDetail ? debts.find(d => d.id === showConflictDetail) : null;
+    const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
+    const debtConflictFieldLabels = { counterparty: 'Person', amount: 'Amount', currency: 'Currency', direction: 'Direction', notes: 'Notes', dueDate: 'Due Date', person: 'Owner', isSettled: 'Settled', settledAt: 'Settled On' };
+    const formatDebtConflictValue = (key, value) => {
+        if (key === 'amount' && value !== undefined && value !== null) return fmtAmt(value, (conflictDebt && conflictDebt.currency) || 'GBP');
+        if (key === 'direction') return value === 'owe' ? 'I Owe' : value === 'owed' ? 'Owed to Me' : String(value || '—');
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = (useCloud) => {
+        const debtId = showConflictDetail;
+        const updates = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {};
+        DataService.updateDebt(debtId, updates);
+        SyncConflicts.dismiss('debts', debtId);
+        setShowConflictDetail(null);
+        reload(); if (onUpdate) onUpdate();
+    };
 
     return (
         <div className={embedded ? undefined : 'screen'}>
@@ -10742,6 +11313,12 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
                     <i className={'fas fa-' + (showForm ? 'times' : 'plus')}></i>
                 </button>
             </div>
+            {Object.keys(syncConflicts).length > 0 && (
+                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
+                    <input type="checkbox" className="form-check-input" id="filterDebtSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filterDebtSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
+                </div>
+            )}
 
             {showForm && (
                 <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
@@ -10803,6 +11380,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
                                         <span className={'badge ' + (debt.direction==='owe' ? 'bg-danger' : 'bg-success')} style={{fontSize:'0.58rem'}}>{debt.direction==='owe' ? 'I OWE' : 'OWED TO ME'}</span>
                                         {overdue && <span className="badge bg-warning text-dark" style={{fontSize:'0.58rem'}}>OVERDUE</span>}
                                         <span style={{fontWeight:600,fontSize:'0.88rem'}}>{debt.counterparty}</span>
+                                        <SyncConflictBadge conflict={syncConflicts[String(debt.id)]} onClick={() => setShowConflictDetail(debt.id)} />
                                     </div>
                                     <div style={{fontSize:'0.95rem',fontWeight:700,color:debt.direction==='owe'?'#dc3545':'#198754'}}>{fmtAmt(debt.amount, debt.currency)}</div>
                                     {debt.dueDate && <div style={{fontSize:'0.75rem',color:overdue?'#e65100':'#6c757d',marginTop:'1px'}}>Due: {new Date(debt.dueDate+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
@@ -10837,7 +11415,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
                                 <div key={debt.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#f8f9fa',padding:'8px 12px'}}>
                                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
                                         <div style={{flex:1,minWidth:0}}>
-                                            <div style={{fontWeight:500,fontSize:'0.85rem',color:'#6c757d'}}>{debt.counterparty}</div>
+                                            <div style={{fontWeight:500,fontSize:'0.85rem',color:'#6c757d'}}>{debt.counterparty}<SyncConflictBadge conflict={syncConflicts[String(debt.id)]} onClick={() => setShowConflictDetail(debt.id)} /></div>
                                             <div style={{fontSize:'0.85rem',color:'#adb5bd',textDecoration:'line-through'}}>{fmtAmt(debt.amount, debt.currency)}</div>
                                             {debt.settledAt && <div style={{fontSize:'0.72rem',color:'#adb5bd'}}>Settled {new Date(debt.settledAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
                                         </div>
@@ -10937,6 +11515,17 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
                         </div>
                     </div>
                 </div>
+            )}
+            {showConflictDetail && conflictDebt && conflictSnapshot && (
+                <SyncConflictModal
+                    localRecord={conflictDebt}
+                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
+                    fieldLabels={debtConflictFieldLabels}
+                    formatValue={formatDebtConflictValue}
+                    onClose={() => setShowConflictDetail(null)}
+                    onKeepLocal={() => handleResolveConflict(false)}
+                    onUseCloud={() => handleResolveConflict(true)}
+                />
             )}
         </div>
     );

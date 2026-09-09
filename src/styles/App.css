@@ -258,6 +258,13 @@ body {
   margin-left: 0.35rem;
 }
 
+.sync-conflict-icon {
+  color: hsl(38, 92%, 50%);
+  font-size: 0.8em;
+  margin-left: 0.35rem;
+  cursor: pointer;
+}
+
 .expense-info {
   flex: 1;
   min-width: 0;
