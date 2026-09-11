@@ -453,7 +453,7 @@ function SyncConflictModal({ localRecord, cloudSnapshot, fieldLabels = {}, forma
         if (typeof value === 'object') return 'Complex data — differs';
         return String(value);
     };
-    const format = (key, value) => (formatValue ? formatValue(key, value, localRecord) : defaultFormat(key, value));
+    const format = (key, value, record) => (formatValue ? formatValue(key, value, record) : defaultFormat(key, value));
     const keys = new Set([...Object.keys(localRecord), ...Object.keys(cloudSnapshot)]);
     const diffRows = [...keys].filter(k => !skip.includes(k) && JSON.stringify(localRecord[k]) !== JSON.stringify(cloudSnapshot[k]));
     return (
@@ -469,8 +469,8 @@ function SyncConflictModal({ localRecord, cloudSnapshot, fieldLabels = {}, forma
                                 {diffRows.map(k => (
                                     <tr key={k}>
                                         <td>{fieldLabels[k] || k}</td>
-                                        <td>{format(k, localRecord[k])}</td>
-                                        <td>{format(k, cloudSnapshot[k])}</td>
+                                        <td>{format(k, localRecord[k], localRecord)}</td>
+                                        <td>{format(k, cloudSnapshot[k], cloudSnapshot)}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -3164,11 +3164,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const conflictExpense = showConflictDetail ? expenses.find(e => e.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const expenseConflictFieldLabels = { amount: 'Amount', date: 'Date', description: 'Description', categoryId: 'Category', subcategory: 'Subcategory', currency: 'Currency', paidBy: 'Paid By', accountId: 'Account', isCashPayment: 'Cash Payment', tags: 'Tags' };
-    const formatExpenseConflictValue = (key, value) => {
+    const formatExpenseConflictValue = (key, value, record) => {
         if (key === 'categoryId') return value ? (getCategoryName(value) || String(value)) : '—';
         if (key === 'accountId') return value ? (accountNameById.get(String(value)) || String(value)) : '—';
         if (key === 'amount' && value !== undefined && value !== null) return ValidationUtils.formatCurrency(value, (conflictExpense && conflictExpense.currency) || 'GBP');
-        if (key === 'isCashPayment') return value ? 'Cash' : 'Bank/Card';
+        if (key === 'isCashPayment') return value ? 'Cash' : ((record && record.accountId) ? 'Bank/Card' : 'Not Tagged');
         if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
         return value === undefined || value === null || value === '' ? '—' : String(value);
     };
