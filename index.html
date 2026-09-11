@@ -273,7 +273,7 @@ const ValidationUtils = {
     validateExpense: (expense) => {
         const errors = {};
         if (!expense.amount || expense.amount <= 0) errors.amount = 'Amount must be greater than 0';
-        if (!expense.date) { errors.date = 'Date is required'; } else { const date = new Date(expense.date); if (date > new Date()) errors.date = 'Date cannot be in the future'; }
+        if (!expense.date) { errors.date = 'Date is required'; } else if (expense.date > DateUtils.today()) { errors.date = 'Date cannot be in the future'; }
         if (!expense.categoryId) errors.categoryId = 'Category is required';
         if (!expense.subcategory) errors.subcategory = 'Subcategory is required';
         if (expense.paidBy && expense.paidBy.trim().length > 0 && expense.paidBy.trim().length < 2) errors.paidBy = 'Name must be at least 2 characters if provided';
@@ -375,6 +375,26 @@ function formatActiveViewLabel(activeView, displayName) {
     if (joined.length <= 20 || names.length === 1) return joined;
     return names[0] + ' +' + (names.length - 1);
 }
+// Date-only ("YYYY-MM-DD") helpers that never touch UTC/.toISOString() — every stored
+// transaction "date" field must represent the LOCAL calendar day, not the UTC one, which
+// new Date().toISOString().split('T')[0] silently gets wrong near local midnight (and
+// new Date(dateOnlyStr) — parsed as UTC midnight per spec — mixed with local getters/
+// setters gets wrong at month/day boundaries for negative UTC offsets). Route every such
+// read/write through here instead.
+const DateUtils = {
+    toDateStr(d = new Date()) { const pad2 = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; },
+    today() { return this.toDateStr(new Date()); },
+    parseDateStr(str) { const [y, m, d] = String(str).split('-').map(Number); return new Date(y, m - 1, d); },
+    addToDateStr(str, { days = 0, months = 0, years = 0 } = {}) {
+        const d = this.parseDateStr(str);
+        if (days) d.setDate(d.getDate() + days);
+        if (months) d.setMonth(d.getMonth() + months);
+        if (years) d.setFullYear(d.getFullYear() + years);
+        return this.toDateStr(d);
+    }
+};
+window.DateUtils = DateUtils;
+
 // Per-screen list filters (Expense/Income History, Summary, Debts) live in each
 // screen component's local state, and renderScreen() unmounts that component on
 // every navigation — so without this the user's filters silently reset the moment
@@ -1736,7 +1756,7 @@ class DataService {
             const pb = this.ensurePersonBudget(category, person);
             pb.monthlyBudget = parseFloat(budget) || 0;
             if (currency) { pb.budgetCurrency = currency; }
-            if (!pb.budgetStartDate) { pb.budgetStartDate = new Date().toISOString().split('T')[0]; }
+            if (!pb.budgetStartDate) { pb.budgetStartDate = DateUtils.today(); }
             if (!pb.budgetHistory) { pb.budgetHistory = []; }
             category.updatedAt = new Date().toISOString();
             this.saveCategories();
@@ -1770,12 +1790,12 @@ class DataService {
                     amount: pb.monthlyBudget,
                     currency: pb.budgetCurrency || 'GBP',
                     startDate: pb.budgetStartDate || null,
-                    endDate: new Date().toISOString().split('T')[0]
+                    endDate: DateUtils.today()
                 });
             }
             pb.monthlyBudget = 0;
             pb.budgetCurrency = newCurrency;
-            pb.budgetStartDate = new Date().toISOString().split('T')[0];
+            pb.budgetStartDate = DateUtils.today();
             category.updatedAt = new Date().toISOString();
             this.saveCategories();
             return true;
@@ -1793,7 +1813,7 @@ class DataService {
             const oldCurrency = (pb.subcategoryBudgetCurrencies && pb.subcategoryBudgetCurrencies[subcategoryName]) || 'GBP';
             if (oldBudget > 0) {
                 pb.subcategoryBudgetHistory[subcategoryName].push({
-                    amount: oldBudget, currency: oldCurrency, endDate: new Date().toISOString().split('T')[0]
+                    amount: oldBudget, currency: oldCurrency, endDate: DateUtils.today()
                 });
             }
             if (!pb.subcategoryBudgets) pb.subcategoryBudgets = {};
@@ -1808,7 +1828,7 @@ class DataService {
     }
     static async resetAllBudgets(newCurrency, person) {
         await this.initialize();
-        const today = new Date().toISOString().split('T')[0];
+        const today = DateUtils.today();
         this.data.categories.forEach(category => {
             const pb = this.ensurePersonBudget(category, person);
             if (!pb.budgetHistory) pb.budgetHistory = [];
@@ -1860,7 +1880,7 @@ class DataService {
         const now = new Date();
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        const monthlyExpenses = this.data.expenses.filter(expense => { const expenseDate = new Date(expense.date); return expenseDate >= startOfMonth && expenseDate <= endOfMonth && matchesActiveView(expense.paidBy, activeView); });
+        const monthlyExpenses = this.data.expenses.filter(expense => { const expenseDate = DateUtils.parseDateStr(expense.date); return expenseDate >= startOfMonth && expenseDate <= endOfMonth && matchesActiveView(expense.paidBy, activeView); });
         const budgetSummary = [];
         this.data.categories.forEach(category => {
             const categoryExpenses = monthlyExpenses.filter(expense => expense.categoryId === category.id);
@@ -1924,7 +1944,7 @@ class DataService {
     static addBill({ name, amount, currency, frequency, nextDueDate, categoryId, subcategory, reminderDaysBefore, notes, person, createdInView }) {
         if (!name || name.trim().length < 2) throw new Error('Name must be at least 2 characters');
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
-        const today = new Date().toISOString().split('T')[0];
+        const today = DateUtils.today();
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
         const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false, createdAt: new Date().toISOString() };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
@@ -1933,12 +1953,8 @@ class DataService {
     static deleteBill(id) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills.splice(i, 1); this.saveBills(bills); this.recordDeletion('bills', id); } }
     static markBillPaid(id) {
         const bills = this.getBills(); const bill = bills.find(b => b.id === id); if (!bill) return;
-        const d = new Date(bill.nextDueDate);
-        if (bill.frequency === 'Weekly') d.setDate(d.getDate() + 7);
-        else if (bill.frequency === 'Monthly') d.setMonth(d.getMonth() + 1);
-        else if (bill.frequency === 'Quarterly') d.setMonth(d.getMonth() + 3);
-        else if (bill.frequency === 'Yearly') d.setFullYear(d.getFullYear() + 1);
-        bill.nextDueDate = d.toISOString().split('T')[0]; bill.isPaid = false; bill.updatedAt = new Date().toISOString();
+        const delta = bill.frequency === 'Weekly' ? { days: 7 } : bill.frequency === 'Monthly' ? { months: 1 } : bill.frequency === 'Quarterly' ? { months: 3 } : bill.frequency === 'Yearly' ? { years: 1 } : {};
+        bill.nextDueDate = DateUtils.addToDateStr(bill.nextDueDate, delta); bill.isPaid = false; bill.updatedAt = new Date().toISOString();
         this.saveBills(bills);
     }
     static getRecurring() { return JSON.parse(localStorage.getItem('financeApp_recurring') || '[]'); }
@@ -1983,7 +1999,7 @@ class DataService {
     }
     static async processRecurringSchedules() {
         const schedules = this.getRecurring();
-        const today = new Date().toISOString().split('T')[0];
+        const today = DateUtils.today();
         let changed = false;
         for (const schedule of schedules) {
             if (!schedule.isActive) continue;
@@ -2019,7 +2035,7 @@ class DataService {
     }
     static downloadBackup() {
         const backup = this.createBackup();
-        const date = new Date().toISOString().split('T')[0];
+        const date = DateUtils.today();
         const filename = 'financetracker-backup-' + date + '.json';
         const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -2248,7 +2264,7 @@ class DataService {
         const history = JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]');
         // id is required so mergeBackups() can union history entries across devices instead
         // of dropping every entry (mergeById skips any item with id == null)
-        const entry = { id: this._uniqueId(), date: new Date().toISOString().split('T')[0], netWorth: this.computeNetWorth(activeView) };
+        const entry = { id: this._uniqueId(), date: DateUtils.today(), netWorth: this.computeNetWorth(activeView) };
         // Tag the snapshot with the view it was taken under so the history table (which is
         // per-view like everything else in Net Worth) can filter out other people's entries.
         if (activeView) entry.view = [...activeView];
@@ -2580,12 +2596,9 @@ function isSignatureAcceptable(sigResult) {
 }
 
 function computeNextDue(fromDate, frequency) {
-    const d = new Date(fromDate);
-    if (frequency === 'daily') d.setDate(d.getDate() + 1);
-    if (frequency === 'weekly') d.setDate(d.getDate() + 7);
-    if (frequency === 'monthly') d.setMonth(d.getMonth() + 1);
-    if (frequency === 'yearly') d.setFullYear(d.getFullYear() + 1);
-    return d.toISOString().split('T')[0];
+    const fromStr = fromDate instanceof Date ? DateUtils.toDateStr(fromDate) : fromDate;
+    const delta = frequency === 'daily' ? { days: 1 } : frequency === 'weekly' ? { days: 7 } : frequency === 'monthly' ? { months: 1 } : frequency === 'yearly' ? { years: 1 } : {};
+    return DateUtils.addToDateStr(fromStr, delta);
 }
 
 function Navigation({ currentScreen, onScreenChange }) {
@@ -2630,7 +2643,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         const initialPaidBy = editExpense ? (editExpense.paidBy || '') : resolveActiveViewValue(activeView);
         return {
             amount: editExpense ? editExpense.amount : '',
-            date: editExpense ? editExpense.date : new Date().toISOString().split('T')[0],
+            date: editExpense ? editExpense.date : DateUtils.today(),
             description: editExpense ? editExpense.description : '',
             categoryId: editExpense ? editExpense.categoryId : '',
             subcategory: editExpense ? editExpense.subcategory : '',
@@ -2843,7 +2856,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     };
 
     const handleQuickFill = (recentExpense) => {
-        setFormData(prev => ({ ...prev, amount: '', date: new Date().toISOString().split('T')[0], categoryId: recentExpense.categoryId, subcategory: recentExpense.subcategory, paidBy: recentExpense.paidBy || '' }));
+        setFormData(prev => ({ ...prev, amount: '', date: DateUtils.today(), categoryId: recentExpense.categoryId, subcategory: recentExpense.subcategory, paidBy: recentExpense.paidBy || '' }));
     };
 
     const selectedCategory = categories.find(cat => cat.id === parseInt(formData.categoryId));
@@ -2889,8 +2902,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 <div className="form-group">
                     <label htmlFor="date">Date *</label>
                     <div className="input-group">
-                        <input type="date" id="date" className={'form-control ' + (errors.date ? 'is-invalid' : '')} value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} max={new Date().toISOString().split('T')[0]} />
-                        <button type="button" className="btn btn-outline-secondary" onClick={() => handleInputChange('date', new Date().toISOString().split('T')[0])}>Today</button>
+                        <input type="date" id="date" className={'form-control ' + (errors.date ? 'is-invalid' : '')} value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} max={DateUtils.today()} />
+                        <button type="button" className="btn btn-outline-secondary" onClick={() => handleInputChange('date', DateUtils.today())}>Today</button>
                     </div>
                     {errors.date && <div className="invalid-feedback d-block">{errors.date}</div>}
                 </div>
@@ -3169,7 +3182,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     };
     const handleDuplicateExpense = (expense) => { setDuplicatingExpense(expense); setDuplicateDate('today'); setDuplicateCustomDate(''); setDuplicateDateError(''); };
     const handleConfirmDuplicate = () => {
-        const today = new Date().toISOString().split('T')[0];
+        const today = DateUtils.today();
         let chosenDate;
         if (duplicateDate === 'original') chosenDate = duplicatingExpense.date;
         else if (duplicateDate === 'today') chosenDate = today;
@@ -3361,7 +3374,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                     <label className="form-check-label" htmlFor="dupCustom">Pick a date</label>
                                 </div>
                                 {duplicateDate === 'custom' && (
-                                    <input type="date" className="form-control mt-2" value={duplicateCustomDate} max={new Date().toISOString().split('T')[0]} onChange={(e) => { setDuplicateCustomDate(e.target.value); setDuplicateDateError(''); }} />
+                                    <input type="date" className="form-control mt-2" value={duplicateCustomDate} max={DateUtils.today()} onChange={(e) => { setDuplicateCustomDate(e.target.value); setDuplicateDateError(''); }} />
                                 )}
                                 {duplicateDateError && <div className="text-danger mt-2 small">{duplicateDateError}</div>}
                             </div>
@@ -4011,7 +4024,7 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
 
 function IncomeForm({ income, onUpdate, activeView }) {
     const [people, setPeople] = useState([]);
-    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP') }; });
+    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: DateUtils.today(), source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP') }; });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -4080,14 +4093,14 @@ function IncomeForm({ income, onUpdate, activeView }) {
             const incomeData = { ...formData, amount: parseFloat(formData.amount) };
             if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); if (isRecurring) { DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }); } }
             setShowSuccess(true);
-            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: newPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(newPaidBy, 'GBP') }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
+            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); setFormData({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy: newPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(newPaidBy, 'GBP') }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
         setIsSubmitting(false);
     };
     const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '' }); };
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
-    const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: new Date().toISOString().split('T')[0] }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
-    const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: new Date().toISOString().split('T')[0], source: '', description: '', paidBy: '', currency: 'GBP', accountId: resolveDefaultAccountId('own', 'GBP') }); setErrors({}); };
+    const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
+    const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy: '', currency: 'GBP', accountId: resolveDefaultAccountId('own', 'GBP') }); setErrors({}); };
     const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
 
     const filteredIncome = useMemo(() => {
@@ -4626,7 +4639,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
         if (pb.budgetHistory && pb.budgetHistory.length > 0) {
             const midMonthReset = pb.budgetHistory.find(h => {
-                const endDate = new Date(h.endDate);
+                const endDate = DateUtils.parseDateStr(h.endDate);
                 return endDate >= currentMonthStart && endDate <= currentMonthEnd;
             });
             if (midMonthReset) {
@@ -4646,7 +4659,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
         if (pb.subcategoryBudgetHistory && pb.subcategoryBudgetHistory[subcatName]) {
             const midMonthReset = pb.subcategoryBudgetHistory[subcatName].find(h => {
-                const endDate = new Date(h.endDate);
+                const endDate = DateUtils.parseDateStr(h.endDate);
                 return endDate >= currentMonthStart && endDate <= currentMonthEnd;
             });
             if (midMonthReset) {
@@ -4672,7 +4685,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         const now = new Date();
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        let monthlyExpenses = convertedExpenses.filter(exp => { const d = new Date(exp.date); return d >= startOfMonth && d <= endOfMonth; });
+        let monthlyExpenses = convertedExpenses.filter(exp => { const d = DateUtils.parseDateStr(exp.date); return d >= startOfMonth && d <= endOfMonth; });
         if (selectedPaidBy) {
             if (selectedPaidBy === 'self') { monthlyExpenses = monthlyExpenses.filter(exp => !exp.paidBy || exp.paidBy.trim() === ''); }
             else { monthlyExpenses = monthlyExpenses.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy); }
@@ -4746,7 +4759,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         }
         return { startDate, endDate };
     };
-    const filterByDateRange = (data) => { const { startDate, endDate } = getDateRange(); return data.filter(item => { const itemDate = new Date(item.date); return itemDate >= startDate && itemDate <= endDate; }); };
+    const filterByDateRange = (data) => { const { startDate, endDate } = getDateRange(); return data.filter(item => { const itemDate = DateUtils.parseDateStr(item.date); return itemDate >= startDate && itemDate <= endDate; }); };
 
     let filteredExpenses = filterByDateRange(convertedExpenses);
     let filteredIncome = filterByDateRange(convertedIncome);
@@ -4777,8 +4790,8 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         return { fe, fi };
     };
     const trendBucket = (start, end, label) => {
-        const rawExpenses = convertedExpenses.filter(exp => { const d = new Date(exp.date); return d >= start && d <= end; });
-        const rawIncome = convertedIncome.filter(inc => { const d = new Date(inc.date); return d >= start && d <= end; });
+        const rawExpenses = convertedExpenses.filter(exp => { const d = DateUtils.parseDateStr(exp.date); return d >= start && d <= end; });
+        const rawIncome = convertedIncome.filter(inc => { const d = DateUtils.parseDateStr(inc.date); return d >= start && d <= end; });
         const { fe, fi } = applyTrendFilters(rawExpenses, rawIncome);
         return { label, income: fi.reduce((sum, inc) => sum + inc.amount, 0), expense: fe.reduce((sum, exp) => sum + exp.amount, 0) };
     };
@@ -5324,7 +5337,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                     </div>
                                     <div className="mb-2">
                                         <label className="form-label">Date</label>
-                                        <input type="date" className={'form-control' + (editWithdrawErrors.date ? ' is-invalid' : '')} max={new Date().toISOString().split('T')[0]} value={editWithdrawForm.date} onChange={e => setEditWithdrawForm(f => ({ ...f, date: e.target.value }))} />
+                                        <input type="date" className={'form-control' + (editWithdrawErrors.date ? ' is-invalid' : '')} max={DateUtils.today()} value={editWithdrawForm.date} onChange={e => setEditWithdrawForm(f => ({ ...f, date: e.target.value }))} />
                                         {editWithdrawErrors.date && <div className="invalid-feedback">{editWithdrawErrors.date}</div>}
                                     </div>
                                 </div>
@@ -5409,7 +5422,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [linkCandidates, setLinkCandidates] = useState([]);
     const [linkableExpenses, setLinkableExpenses] = useState([]);
     const [linkableIncome, setLinkableIncome] = useState([]);
-    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: new Date().toISOString().split('T')[0], amount: '', conversionRate: '', fee: '', toAmount: '', categoryId: '', subcategory: '', principalCategoryId: '', principalSubcategory: '', notes: '' };
+    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: DateUtils.today(), amount: '', conversionRate: '', fee: '', toAmount: '', categoryId: '', subcategory: '', principalCategoryId: '', principalSubcategory: '', notes: '' };
     const [showTransferForm, setShowTransferForm] = useState(false);
     const [transferForm, setTransferForm] = useState(emptyTransferForm);
     const [transferErrors, setTransferErrors] = useState({});
@@ -5419,7 +5432,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
     const [reconcileForm, setReconcileForm] = useState(emptyReconcileForm);
     const [reconcileErrors, setReconcileErrors] = useState({});
     const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
-    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', feeCurrency: 'GBP', deductedAmount: '', date: new Date().toISOString().split('T')[0] };
+    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', feeCurrency: 'GBP', deductedAmount: '', date: DateUtils.today() };
     const [withdrawAccount, setWithdrawAccount] = useState(null);
     const [withdrawForm, setWithdrawForm] = useState(emptyWithdrawForm);
     const [withdrawErrors, setWithdrawErrors] = useState({});
@@ -5798,7 +5811,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             }
             const isLiability = DataService.LIABILITY_ACCOUNT_TYPES.includes(reconcileAccount.accountType);
             const asExpense = isLiability ? delta > 0 : delta < 0;
-            const today = new Date().toISOString().split('T')[0];
+            const today = DateUtils.today();
             const description = `Balance reconciliation: ${reconcileAccount.accountName}` + (reconcileForm.notes ? ` — ${reconcileForm.notes}` : '');
 
             if (reconcileForm.logAsTransaction && asExpense) {
@@ -6558,7 +6571,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                 </div>
                                 <div className="mb-2">
                                     <label className="form-label">Date</label>
-                                    <input type="date" className={'form-control' + (withdrawErrors.date ? ' is-invalid' : '')} max={new Date().toISOString().split('T')[0]} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} />
+                                    <input type="date" className={'form-control' + (withdrawErrors.date ? ' is-invalid' : '')} max={DateUtils.today()} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} />
                                     {withdrawErrors.date && <div className="invalid-feedback">{withdrawErrors.date}</div>}
                                 </div>
                             </div>
@@ -7266,7 +7279,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     return;
                 }
                 const rows = [];
-                const today = new Date().toISOString().split('T')[0];
+                const today = DateUtils.today();
                 for (let i = 1; i < lines.length; i++) {
                     const vals = parseCSVLine(lines[i]);
                     const errors = [];
@@ -7342,7 +7355,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     return;
                 }
                 const rows = [];
-                const today = new Date().toISOString().split('T')[0];
+                const today = DateUtils.today();
                 for (let i = 1; i < lines.length; i++) {
                     const vals = parseCSVLine(lines[i]);
                     const errors = [];
@@ -7582,7 +7595,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         const account = DataService.getBankAccounts().find(a => a.id === row.fundAccountId);
                         if (account) {
                             DataService.addTransfer({
-                                date: new Date().toISOString().split('T')[0],
+                                date: DateUtils.today(),
                                 fromAccountId: account.id, toAccountId: null,
                                 fromAmount: row.value, toAmount: row.value,
                                 isOverseas: false, conversionRate: 1, fee: 0,
@@ -7843,8 +7856,8 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
             const now = new Date();
             const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
             const [expenses, income] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
-            const monthExp = expenses.filter(e => new Date(e.date) >= startOfMonth).reduce((s, e) => s + e.amount, 0);
-            const monthInc = income.filter(i => new Date(i.date) >= startOfMonth).reduce((s, i) => s + i.amount, 0);
+            const monthExp = expenses.filter(e => DateUtils.parseDateStr(e.date) >= startOfMonth).reduce((s, e) => s + e.amount, 0);
+            const monthInc = income.filter(i => DateUtils.parseDateStr(i.date) >= startOfMonth).reduce((s, i) => s + i.amount, 0);
             setMonthlyNet(Math.max(0, monthInc - monthExp));
         };
         calcMonthlyNet();
@@ -8106,7 +8119,7 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
     const [bills, setBills] = useState([]);
     const [showForm, setShowForm] = useState(false);
     const [editingBill, setEditingBill] = useState(null);
-    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: new Date().toISOString().split('T')[0], categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
+    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: DateUtils.today(), categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
     const [formErrors, setFormErrors] = useState({});
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [logMsg, setLogMsg] = useState('');
@@ -8125,7 +8138,7 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
 
     const syncConflicts = useMemo(() => SyncConflicts.read('bills'), [bills]);
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = DateUtils.today();
 
     const getDaysDiff = (dateStr) => Math.ceil((new Date(dateStr) - new Date(today)) / 86400000);
 
@@ -8205,12 +8218,8 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
     // Expense" moves the due date the same way "Mark Paid" does (e.g. +1 month for
     // a Monthly bill) instead of a second, divergent notion of "next due date".
     const computeNextDueDate = (bill) => {
-        const d = new Date(bill.nextDueDate);
-        if (bill.frequency === 'Weekly') d.setDate(d.getDate() + 7);
-        else if (bill.frequency === 'Monthly') d.setMonth(d.getMonth() + 1);
-        else if (bill.frequency === 'Quarterly') d.setMonth(d.getMonth() + 3);
-        else if (bill.frequency === 'Yearly') d.setFullYear(d.getFullYear() + 1);
-        return d.toISOString().split('T')[0];
+        const delta = bill.frequency === 'Weekly' ? { days: 7 } : bill.frequency === 'Monthly' ? { months: 1 } : bill.frequency === 'Quarterly' ? { months: 3 } : bill.frequency === 'Yearly' ? { years: 1 } : {};
+        return DateUtils.addToDateStr(bill.nextDueDate, delta);
     };
 
     const handleLogExpense = (bill) => {
@@ -8546,7 +8555,7 @@ function RecurringList({ onUpdate, activeView, embedded }) {
         };
     };
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = DateUtils.today();
     const isNetWorthType = (type) => type === 'asset' || type === 'liability';
     // Schedules have no field of their own — expense/income schedules inherit paidBy from
     // the template record they were created from; asset/liability ones carry person directly
@@ -9575,13 +9584,13 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
 
     const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
 
-    const todayStr = () => new Date().toISOString().split('T')[0];
+    const todayStr = () => DateUtils.today();
 
     const getDateRange = () => {
         if (fromDate || toDate) return { from: fromDate || null, to: toDate || null };
         if (scope === 'current-month') {
             const n = new Date(), y = n.getFullYear(), m = n.getMonth();
-            return { from: new Date(y, m, 1).toISOString().split('T')[0], to: new Date(y, m + 1, 0).toISOString().split('T')[0] };
+            return { from: DateUtils.toDateStr(new Date(y, m, 1)), to: DateUtils.toDateStr(new Date(y, m + 1, 0)) };
         }
         return { from: null, to: null };
     };
@@ -10294,7 +10303,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
     const [showForm, setShowForm] = useState(false);
     const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
+    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
     const [formErrors, setFormErrors] = useState({});
     const [showDeleteModal, setShowDeleteModal] = useState(null);
     const [showHistory, setShowHistory] = useState(true);
@@ -10304,7 +10313,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [valuationError, setValuationError] = useState('');
     const [bankAccounts] = useState(() => DataService.getBankAccounts());
     const [addMoneyItem, setAddMoneyItem] = useState(null);
-    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
+    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
     const [addMoneyErrors, setAddMoneyErrors] = useState({});
     const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('networth').syncConflict);
@@ -10323,11 +10332,11 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 
     const syncConflicts = useMemo(() => SyncConflicts.read('networth'), [items]);
     useEffect(() => { FilterMemory.save('networth', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
-    const netWorthConflictFieldLabels = { name: 'Name', value: 'Value', currency: 'Currency', categoryId: 'Category', subcategory: 'Subcategory', notes: 'Notes', person: 'Person', country: 'Country' };
+    const netWorthConflictFieldLabels = { name: 'Name', value: 'Value', originalAmount: 'Original Amount', currency: 'Currency', categoryId: 'Category', subcategory: 'Subcategory', notes: 'Notes', person: 'Person', country: 'Country' };
     const conflictItem = showConflictDetail ? items.find(i => i.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const formatNetWorthConflictValue = (key, value) => {
-        if (key === 'value' && value !== undefined && value !== null) return fmt(value, (conflictItem && conflictItem.currency) || defaultCurrency);
+        if ((key === 'value' || key === 'originalAmount') && value !== undefined && value !== null) return fmt(value, (conflictItem && conflictItem.currency) || defaultCurrency);
         if (key === 'categoryId') {
             const cats = [...assetCategories, ...liabilityCategories];
             const cat = cats.find(c => c.id === value);
@@ -10419,14 +10428,14 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const openAddForm = () => {
         setEditingItem(null);
         const firstAssetCat = assetCategories && assetCategories[0];
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
+        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
         setFormErrors({});
         setShowForm(true);
     };
 
     const openEditForm = (item) => {
         setEditingItem(item);
-        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
+        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
         setFormErrors({});
         setShowForm(true);
     };
@@ -10455,7 +10464,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     // Funded via the Transfer ledger (not an Expense) — this is an investment
                     // move, not spending; it's logged in Summary's Asset Funding table instead.
                     DataService.addTransfer({
-                        date: new Date().toISOString().split('T')[0],
+                        date: DateUtils.today(),
                         fromAccountId: account.id, toAccountId: null,
                         fromAmount: amount, toAmount: amount,
                         isOverseas: false, conversionRate: 1, fee: 0,
@@ -10501,7 +10510,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         if (onUpdate) onUpdate();
     };
 
-    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' }); setAddMoneyErrors({}); };
+    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' }); setAddMoneyErrors({}); };
 
     const handleAddMoneySubmit = async (e) => {
         e.preventDefault();
@@ -10517,7 +10526,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 const account = bankAccounts.find(a => a.id === parseInt(addMoneyForm.accountId));
                 if (account) {
                     DataService.addTransfer({
-                        date: new Date().toISOString().split('T')[0],
+                        date: DateUtils.today(),
                         fromAccountId: account.id, toAccountId: null,
                         fromAmount: amount, toAmount: amount,
                         isOverseas: false, conversionRate: 1, fee: 0,
@@ -10537,7 +10546,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 });
             }
             setAddMoneyItem(null);
-            setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: new Date().toISOString().split('T')[0], recurringEndDate: '' });
+            setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
             setAddMoneyErrors({});
             reload();
             if (onUpdate) onUpdate();
@@ -11191,7 +11200,7 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
     const syncConflicts = useMemo(() => SyncConflicts.read('debts'), [debts]);
 
     const reload = () => setDebts(DataService.getDebts());
-    const today = new Date().toISOString().split('T')[0];
+    const today = DateUtils.today();
     const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const isOverdue = (d) => d.dueDate && d.dueDate < today && !d.isSettled;
 
@@ -11621,7 +11630,7 @@ function App() {
     const [storagePreference, setStoragePreference] = useState(() => localStorage.getItem('financeApp_storagePreference') || '');
     const [showStoragePicker, setShowStoragePicker] = useState(false);
     const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(
-        () => localStorage.getItem('financeApp_localBannerDismissed') === new Date().toISOString().split('T')[0]
+        () => localStorage.getItem('financeApp_localBannerDismissed') === DateUtils.today()
     );
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncTime, setLastSyncTime] = useState(() => localStorage.getItem('financeApp_lastCloudSync') || '');
@@ -11673,7 +11682,7 @@ function App() {
                 screen: 'categories'
             }));
         }
-        const todayStr = new Date().toISOString().split('T')[0];
+        const todayStr = DateUtils.today();
         const dueSoon = DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
         const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'manage' }));
         const activeAlerts = [...budgetActive, ...billActive];
@@ -11938,7 +11947,7 @@ function App() {
         if (authLoading) return;
         const maybeAutoBackup = async () => {
             try {
-                const todayStr = new Date().toISOString().split('T')[0];
+                const todayStr = DateUtils.today();
                 const appSettings = await DataService.getSettings();
                 const hasData = DataService.data.expenses.length > 0 || DataService.data.income.length > 0;
                 if (appSettings.autoBackupEnabled !== false && hasData && !SyncService.isCloudEnabled() && DataService.hasDataChangedSinceLastBackup()) {
@@ -12459,7 +12468,7 @@ function App() {
                         <button className="btn btn-link btn-sm p-0 fw-semibold" style={{verticalAlign:'baseline',fontSize:'0.83rem'}} onClick={() => setCurrentScreen('settings')}>Import a backup</button>{' '}
                         to restore it here, or switch your storage in Settings.
                     </div>
-                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => { localStorage.setItem('financeApp_localBannerDismissed', new Date().toISOString().split('T')[0]); setLocalDeviceBannerDismissed(true); }}></button>
+                    <button className="btn-close flex-shrink-0" style={{fontSize:'0.6rem'}} onClick={() => { localStorage.setItem('financeApp_localBannerDismissed', DateUtils.today()); setLocalDeviceBannerDismissed(true); }}></button>
                 </div>
             )}
             <div className="app-content">{renderScreen()}</div>
