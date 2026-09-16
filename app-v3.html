@@ -4022,7 +4022,7 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
     );
 }
 
-function IncomeForm({ income, onUpdate, activeView }) {
+function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
     const [people, setPeople] = useState([]);
     const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: DateUtils.today(), source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP') }; });
     const [errors, setErrors] = useState({});
@@ -4101,7 +4101,7 @@ function IncomeForm({ income, onUpdate, activeView }) {
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
     const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
     const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy: '', currency: 'GBP', accountId: resolveDefaultAccountId('own', 'GBP') }); setErrors({}); };
-    const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
+    const totalIncome = income.reduce((sum, item) => sum + CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP'), 0);
 
     const filteredIncome = useMemo(() => {
         let filtered = income;
@@ -4149,7 +4149,7 @@ function IncomeForm({ income, onUpdate, activeView }) {
         <div className="screen">
             <div className="screen-header">
                 <h2>Income Management</h2>
-                <div className="income-total">Total Income: {ValidationUtils.formatCurrency(totalIncome, income[0]?.currency || 'GBP')}</div>
+                <div className="income-total">Total Income: {ValidationUtils.formatCurrency(totalIncome, defaultCurrency || 'GBP')}</div>
             </div>
             <div className="income-form-section">
                 <h5>{editingIncome ? 'Edit Income' : 'Add New Income'}</h5>
@@ -12312,7 +12312,7 @@ function App() {
             case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
-            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} />;
+            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
