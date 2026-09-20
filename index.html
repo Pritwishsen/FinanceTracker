@@ -1509,9 +1509,18 @@ class DataService {
         this.data.expenses.filter(e => e.isCashPayment).forEach(e => {
             bucket(e.paidBy, e.currency).value -= e.amount;
         });
+        // Unlogged reconciliations adjust — or, for a person|currency with no withdrawal/expense
+        // activity yet, create — a bucket directly. This is the only way a Cash item can be
+        // corrected, since its value is otherwise fully computed (see NetWorth's cash-update
+        // modal); same compute-time fold-in idiom as computeBankAccountBalance above, keyed by
+        // this function's own synthetic 'cash-'+key id instead of a real bank accountId.
+        this.getReconciliations().filter(r => !r.loggedAsTransaction && typeof r.accountId === 'string' && r.accountId.startsWith('cash-')).forEach(r => {
+            const [person, currency] = r.accountId.slice(5).split('|');
+            bucket(person, currency).value += r.delta;
+        });
         const keys = Object.keys(totals);
         if (keys.length === 0) return [];
-        const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash Withdraw');
+        const cashCat = this.getOrCreateNetWorthCategoryByName('asset', 'Cash');
         return keys
             .map(key => ({ id: 'cash-' + key, name: 'Cash', value: totals[key].value, currency: totals[key].currency, categoryId: cashCat.id, subcategory: '', type: 'asset', person: totals[key].person, country: '', isBankAccount: true, isComputedCash: true }))
             .filter(item => !activeView || matchesActiveView(item.person, activeView));
@@ -1521,9 +1530,14 @@ class DataService {
     // and would show up as a duplicate alongside the computed figure. Idempotent: a no-op once
     // the category has no real items left. recordDeletion (not deleteNetWorthItem, to avoid a
     // history-snapshot entry per item) still logs each removal so it propagates on next sync.
+    // Also renames an existing "Cash Withdraw" category to "Cash" in place (preserving its id/
+    // locked-state) so pre-existing accounts pick up the rename too, not just fresh installs.
     static migrateCashWithdrawItemsToComputed() {
         const cats = this.getNetWorthCategories('asset');
         const cashCat = cats.find(c => c.name.trim().toLowerCase() === 'cash withdraw');
+        if (cashCat && !cats.some(c => c.id !== cashCat.id && c.name.trim().toLowerCase() === 'cash')) {
+            this.saveNetWorthCategories('asset', cats.map(c => c.id === cashCat.id ? { ...c, name: 'Cash' } : c));
+        }
         if (!cashCat) return;
         const items = this.getNetWorthItems();
         const stale = items.filter(i => i.categoryId === cashCat.id);
@@ -2269,7 +2283,11 @@ class DataService {
         // per-view like everything else in Net Worth) can filter out other people's entries.
         if (activeView) entry.view = [...activeView];
         history.push(entry);
-        localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.slice(-24)));
+        // Kept by date, not count — grouping the history table by month (see NetWorth's
+        // monthlyHistory) needs real snapshots spanning back ~6 months, which a fixed
+        // "last 24" count can't guarantee once a single busy day fills most of that budget.
+        const cutoff = DateUtils.addToDateStr(DateUtils.today(), { months: -7 });
+        localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history.filter(e => e.date >= cutoff)));
     }
     static getNetWorthHistory() { return JSON.parse(localStorage.getItem('financeApp_netWorthHistory') || '[]'); }
     static clearNetWorthHistory() { localStorage.setItem('financeApp_netWorthHistory', '[]'); }
@@ -2285,7 +2303,7 @@ class DataService {
                 { name: 'Pension & Retirement', locked: true },
                 { name: 'Vehicles', locked: true },
                 { name: 'Bank & Savings', locked: true },
-                { name: 'Cash Withdraw', locked: false },
+                { name: 'Cash', locked: false },
                 { name: 'Other Asset', locked: false }
             ]
             : [
@@ -2927,7 +2945,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     <label htmlFor="category">Category *</label>
                     <select id="category" className={'form-select ' + (errors.categoryId ? 'is-invalid' : '')} value={formData.categoryId} onChange={(e) => handleInputChange('categoryId', e.target.value)}>
                         <option value="">Select a category</option>
-                        {categories.map(category => (<option key={category.id} value={category.id}>{category.name}</option>))}
+                        {[...categories].sort((a, b) => a.name.localeCompare(b.name)).map(category => (<option key={category.id} value={category.id}>{category.name}</option>))}
                     </select>
                     {errors.categoryId && <div className="invalid-feedback">{errors.categoryId}</div>}
                 </div>
@@ -2936,7 +2954,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                         <label htmlFor="subcategory">Subcategory *</label>
                         <select id="subcategory" className={'form-select ' + (errors.subcategory ? 'is-invalid' : '')} value={formData.subcategory} onChange={(e) => handleInputChange('subcategory', e.target.value)}>
                             <option value="">Select a subcategory</option>
-                            {selectedCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
+                            {[...selectedCategory.subcategories].sort((a, b) => a.localeCompare(b)).map(sub => (<option key={sub} value={sub}>{sub}</option>))}
                         </select>
                         {errors.subcategory && <div className="invalid-feedback">{errors.subcategory}</div>}
                     </div>
@@ -5253,9 +5271,20 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 const visibleReconciliations = dateFilteredReconciliations.filter(r => matchesActiveView(r.person, activeView));
                 const sortedReconciliations = [...visibleReconciliations].sort((a, b) => new Date(b.date) - new Date(a.date));
                 const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
-                const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
                 const personLabel = (person) => (!person || person === 'own') ? 'Me' : person;
-                const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
+                // Cash reconciliations use a synthetic 'cash-{person}|{currency}' accountId (no
+                // real bank account behind them) instead of a numeric bank account id — see
+                // NetWorth's cash-update modal, which is the only writer of these.
+                const isCashRecon = (id) => typeof id === 'string' && id.startsWith('cash-');
+                const cashRefFromId = (id) => { const [person, currency] = id.slice(5).split('|'); return { person, currency }; };
+                const accountLabel = (id) => {
+                    if (isCashRecon(id)) { const ref = cashRefFromId(id); return `Cash (${personLabel(ref.person)} · ${ref.currency})`; }
+                    const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account';
+                };
+                const currencyOf = (id) => {
+                    if (isCashRecon(id)) return cashRefFromId(id).currency;
+                    const a = findAccount(id); return a ? a.currency : defaultCurrency;
+                };
                 if (reconciliations.length === 0) return null;
                 return (
                     <div style={{marginTop: '1.25rem'}}>
@@ -7444,7 +7473,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     // account to match against, so it's recognized by its fixed name+category
                     // instead — a low-risk heuristic given how specific that combination is.
                     const isLinkedBankRow = !!bankVal && DataService.getBankAccounts().some(a => a.accountName.toLowerCase() === bankVal.toLowerCase());
-                    const isComputedCashRow = type === 'asset' && nameVal.toLowerCase() === 'cash' && catVal.trim().toLowerCase() === 'cash withdraw';
+                    const isComputedCashRow = type === 'asset' && nameVal.toLowerCase() === 'cash' && catVal.trim().toLowerCase() === 'cash';
                     const skip = isLinkedBankRow || isComputedCashRow;
 
                     if (!nameVal) errors.push('Name is required');
@@ -10316,6 +10345,12 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
     const [addMoneyErrors, setAddMoneyErrors] = useState({});
     const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
+    // cashUpdateTarget.locked is true when opened from an existing Cash item card (person/
+    // currency fixed to that item) vs. the "Update Cash Balance" button (both editable, for
+    // setting a balance where no withdrawal history/item exists yet).
+    const [cashUpdateTarget, setCashUpdateTarget] = useState(null);
+    const [cashUpdateForm, setCashUpdateForm] = useState({ amount: '', notes: '' });
+    const [cashUpdateError, setCashUpdateError] = useState('');
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('networth').syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
 
@@ -10555,6 +10590,45 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         }
     };
 
+    // person/currency are fixed (not user-editable in the modal) when opened from an existing
+    // Cash item card; both are editable when opened via "Update Cash Balance" for a person/
+    // currency with no computed item yet — see cashUpdateTarget.locked.
+    const openCashUpdate = (person, currency, locked) => {
+        setCashUpdateTarget({ person: person || '', currency: currency || defaultCurrency || 'GBP', locked: !!locked });
+        setCashUpdateForm({ amount: '', notes: '' });
+        setCashUpdateError('');
+    };
+
+    const cashUpdateCurrentValue = (() => {
+        if (!cashUpdateTarget) return 0;
+        const found = DataService.getCashWithdrawItems(null).find(i => i.person === (cashUpdateTarget.person || 'own') && i.currency === cashUpdateTarget.currency);
+        return found ? found.value : 0;
+    })();
+
+    const handleCashUpdateSubmit = (e) => {
+        e.preventDefault();
+        const actual = parseFloat(cashUpdateForm.amount);
+        if (cashUpdateForm.amount === '' || isNaN(actual)) { setCashUpdateError('Enter the actual cash amount'); return; }
+        const balanceBefore = cashUpdateCurrentValue;
+        const delta = Math.round((actual - balanceBefore) * 100) / 100;
+        if (delta === 0) { setCashUpdateError('Already matches — no adjustment needed.'); return; }
+        const person = cashUpdateTarget.person || 'own';
+        // Always unlogged — a Cash balance correction must never create an Expense/Income,
+        // unlike the bank reconcile form's optional "log as transaction" checkbox.
+        DataService.addReconciliation({
+            accountId: 'cash-' + person + '|' + cashUpdateTarget.currency,
+            person, date: DateUtils.today(),
+            balanceBefore, delta, balanceAfter: actual,
+            notes: cashUpdateForm.notes || '',
+            loggedAsTransaction: false, transactionType: null, transactionId: null
+        });
+        setCashUpdateTarget(null);
+        setCashUpdateForm({ amount: '', notes: '' });
+        setCashUpdateError('');
+        reload();
+        if (onUpdate) onUpdate();
+    };
+
     const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
     const assetItems = visibleItems.filter(i => i.type === 'asset');
     const liabilityItems = visibleItems.filter(i => i.type === 'liability');
@@ -10594,6 +10668,21 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     // rather than showing them under every person's view, which produced the same
     // mismatched-jump symptom this fix was meant to eliminate.
     const sortedHistory = [...history].filter(entry => entry.view ? entry.view.some(v => activeView.includes(v)) : activeView.includes('own')).reverse();
+
+    // Collapse the (already newest-first) sortedHistory into one row per calendar month, capped
+    // to the 6 most recent months. The first entry seen per month is its most recent snapshot —
+    // i.e. that month's ending balance — so diffing adjacent groups' netWorth below telescopes
+    // to the sum of that month's individual changes, without a separate summing pass.
+    const monthlyHistory = (() => {
+        const groups = [];
+        const seen = new Set();
+        for (const entry of sortedHistory) {
+            const key = entry.date.slice(0, 7); // YYYY-MM
+            if (!seen.has(key)) { seen.add(key); groups.push({ key, date: entry.date, netWorth: entry.netWorth }); }
+            if (groups.length === 6) break;
+        }
+        return groups;
+    })();
 
     const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
 
@@ -10642,9 +10731,9 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     <i className="fas fa-wallet me-1"></i>In Wallet
                 </div>
             ) : item.isComputedCash ? (
-                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from your cash withdrawals minus expenses marked Paid by Cash">
+                <button type="button" className="btn btn-sm btn-outline-secondary" style={{fontSize:'0.68rem',padding:'2px 7px',flexShrink:0}} title="Computed from your cash withdrawals minus expenses marked Paid by Cash — click to correct it" onClick={() => openCashUpdate(item.person, item.currency, true)}>
                     <i className="fas fa-link me-1"></i>Computed
-                </div>
+                </button>
             ) : item.isBankAccount ? (
                 <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from this account's linked transactions — edit its Opening Amount in Settings → Bank Accounts to adjust">
                     <i className="fas fa-link me-1"></i>Linked account
@@ -10767,6 +10856,12 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                     onClick={() => { if (showForm) { setShowForm(false); setEditingItem(null); } else openAddForm(); }}>
                     <i className={'fas fa-' + (showForm ? 'times' : 'plus') + ' me-1'}></i>
                     {showForm ? 'Cancel' : 'Add Asset / Liability'}
+                </button>
+                {/* Always available (not just on an existing Cash card) so a person/currency with
+                    no withdrawal history yet can still have a starting Cash balance set. */}
+                <button type="button" className="btn btn-sm btn-outline-secondary flex-fill"
+                    onClick={() => openCashUpdate(resolveActiveViewValue(activeView), defaultCurrency, false)}>
+                    <i className="fas fa-money-bill-wave me-1"></i>Update Cash Balance
                 </button>
             </div>
 
@@ -10989,35 +11084,35 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 <div style={{display:'flex',gap:'6px',marginBottom:'8px'}}>
                     <button type="button" className="btn btn-sm btn-outline-secondary flex-grow-1" onClick={() => setShowHistory(v => !v)}>
                         <i className={'fas fa-' + (showHistory ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
-                        {showHistory ? 'Hide' : 'Show'} History ({sortedHistory.length} snapshots)
+                        {showHistory ? 'Hide' : 'Show'} History ({monthlyHistory.length} months)
                     </button>
-                    {sortedHistory.length > 0 && (
+                    {monthlyHistory.length > 0 && (
                         <button type="button" className="btn btn-sm btn-outline-danger" title="Delete all history" onClick={() => setShowClearHistoryConfirm(true)}>
                             <i className="fas fa-trash-alt"></i>
                         </button>
                     )}
                 </div>
                 {showHistory && (
-                    sortedHistory.length === 0
+                    monthlyHistory.length === 0
                         ? <div style={{textAlign:'center',padding:'1rem',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No history yet. Add your first asset or liability above.</div>
                         : <div style={{borderRadius:'10px',overflow:'hidden',border:'1px solid #dee2e6'}}>
                             <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.8rem'}}>
                                 <thead>
                                     <tr style={{background:'#f8f9fa'}}>
-                                        <th style={{padding:'7px 10px',textAlign:'left',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Date</th>
+                                        <th style={{padding:'7px 10px',textAlign:'left',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Month</th>
                                         <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Net Worth</th>
                                         <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Change</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {sortedHistory.map((entry, idx) => {
-                                        const prev = sortedHistory[idx + 1];
+                                    {monthlyHistory.map((entry, idx) => {
+                                        const prev = monthlyHistory[idx + 1];
                                         const change = prev != null ? entry.netWorth - prev.netWorth : null;
                                         const isFirst = idx === 0;
                                         return (
-                                            <tr key={idx} style={{borderBottom:idx < sortedHistory.length-1 ? '1px solid #f0f0f0' : 'none', background:isFirst?'#f0fff4':'#fff'}}>
+                                            <tr key={entry.key} style={{borderBottom:idx < monthlyHistory.length-1 ? '1px solid #f0f0f0' : 'none', background:isFirst?'#f0fff4':'#fff'}}>
                                                 <td style={{padding:'7px 10px',color:'#495057'}}>
-                                                    {new Date(entry.date+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+                                                    {new Date(entry.date+'T00:00:00').toLocaleDateString('en-GB',{month:'long',year:'numeric'})}
                                                     {isFirst && <span className="badge bg-success ms-1" style={{fontSize:'0.58rem'}}>Latest</span>}
                                                 </td>
                                                 <td style={{padding:'7px 10px',textAlign:'right',fontWeight:isFirst?700:400,color:entry.netWorth>=0?'#198754':'#dc3545'}}>
@@ -11157,6 +11252,47 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                 <button type="submit" className="btn btn-success btn-sm" disabled={addMoneySubmitting}>
                                     {addMoneySubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Adding…</> : <><i className="fas fa-piggy-bank me-1"></i>Add Money</>}
                                 </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+            {/* Cash Update modal — records a reconciliation (see openCashUpdate/handleCashUpdateSubmit)
+                instead of mutating a stored item, since Cash is fully computed. */}
+            {cashUpdateTarget && (
+                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
+                    <div className="modal-dialog modal-dialog-centered">
+                        <form className="modal-content" onSubmit={handleCashUpdateSubmit}>
+                            <div className="modal-header"><h5 className="modal-title">Update Cash — {personDisplayLabel(cashUpdateTarget.person)} ({cashUpdateTarget.currency})</h5></div>
+                            <div className="modal-body">
+                                {!cashUpdateTarget.locked && (
+                                    <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+                                        <div>
+                                            <label className="form-label">Person</label>
+                                            <PersonSelect value={cashUpdateTarget.person} onChange={v => setCashUpdateTarget(t => ({...t, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
+                                        </div>
+                                        <div>
+                                            <label className="form-label">Currency</label>
+                                            <select className="form-select form-select-sm" value={cashUpdateTarget.currency} onChange={e => setCashUpdateTarget(t => ({...t, currency: e.target.value}))}>
+                                                {CURRENCIES.map(code => (<option key={code} value={code}>{code}</option>))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
+                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current (computed): {fmt(cashUpdateCurrentValue, cashUpdateTarget.currency)}. This records a reconciliation — it won't appear in your Expense/Income history.</p>
+                                <div className="mb-2">
+                                    <label className="form-label">Actual cash amount ({cashUpdateTarget.currency})</label>
+                                    <input type="number" step="0.01" className={'form-control' + (cashUpdateError ? ' is-invalid' : '')} value={cashUpdateForm.amount} onChange={e => { setCashUpdateForm(f => ({...f, amount: e.target.value})); setCashUpdateError(''); }} autoFocus />
+                                    {cashUpdateError && <div className="invalid-feedback">{cashUpdateError}</div>}
+                                </div>
+                                <div className="mb-2">
+                                    <label className="form-label">Notes (optional)</label>
+                                    <input type="text" className="form-control" value={cashUpdateForm.notes} onChange={e => setCashUpdateForm(f => ({...f, notes: e.target.value}))} />
+                                </div>
+                            </div>
+                            <div className="modal-footer">
+                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setCashUpdateTarget(null)}>Cancel</button>
+                                <button type="submit" className="btn btn-success btn-sm"><i className="fas fa-money-bill-wave me-1"></i>Save</button>
                             </div>
                         </form>
                     </div>
