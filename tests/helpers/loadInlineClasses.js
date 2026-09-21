@@ -13,7 +13,15 @@ function extractSnippet(source, name) {
     const pattern = new RegExp(
         `(?:class\\s+${name}\\b|const\\s+${name}\\s*=)[\\s\\S]*?\\nwindow\\.${name} = ${name};`
     );
-    const match = source.match(pattern);
+    let match = source.match(pattern);
+    if (!match) {
+        // Plain top-level helper functions (e.g. getBackupTimestamp, matchesActiveView)
+        // have no "window.NAME = NAME;" anchor. They're formatted with the closing
+        // brace alone at column 0, which is used as the end marker instead. A function
+        // declaration in a vm context becomes a property of the sandbox on its own.
+        match = source.match(new RegExp(`\\nfunction\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`));
+        if (match) return match[0].trimStart();
+    }
     if (!match) {
         throw new Error(
             `loadInlineClasses: could not find an anchored declaration for "${name}" in app-v3.html ` +
@@ -50,6 +58,9 @@ function loadInlineClasses(names) {
 
     const result = {};
     names.forEach(name => { result[name] = sandbox[name]; });
+    // Escape hatch for tests that need to seed/inspect the sandbox's localStorage
+    // stub or stub a browser global such as fetch (assign it onto __sandbox).
+    result.__sandbox = sandbox;
     return result;
 }
 
