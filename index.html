@@ -1276,6 +1276,62 @@ class DataService {
         let reconciliationsChanged = false;
         reconciliations.forEach(r => { if (r.person === oldName) { r.person = newName; r.updatedAt = now; reconciliationsChanged = true; } });
         if (reconciliationsChanged) this.saveReconciliations(reconciliations);
+        // Goals, recurring schedules, Net Worth history snapshots, per-person category budgets and
+        // the stored Active View are person-scoped by NAME as well (matchesActiveView filters goals
+        // on .owner and recurring schedules on templateExpense.paidBy/.person, the history table
+        // filters on .view, budgets are looked up as personBudgets[<name>]) — leaving any of them
+        // out made a renamed person's data silently vanish from its screen, exactly as the
+        // collections above once did. updatedAt is stamped so the rename wins a cross-device merge.
+        const goals = this.getGoals();
+        let goalsChanged = false;
+        goals.forEach(g => { if (g.owner === oldName) { g.owner = newName; g.updatedAt = now; goalsChanged = true; } });
+        if (goalsChanged) this.saveGoals(goals);
+        const schedules = this.getRecurring();
+        let schedulesChanged = false;
+        schedules.forEach(s => {
+            const t = s.templateExpense;
+            if (!t) return;
+            let touched = false;
+            // Expense/income schedules are scoped by paidBy, asset/liability ones by person.
+            if (t.paidBy === oldName) { t.paidBy = newName; touched = true; }
+            if (t.person === oldName) { t.person = newName; touched = true; }
+            if (touched) { s.updatedAt = now; schedulesChanged = true; }
+        });
+        if (schedulesChanged) this.saveRecurring(schedules);
+        const history = this.getNetWorthHistory();
+        let historyChanged = false;
+        history.forEach(entry => {
+            if (Array.isArray(entry.view) && entry.view.includes(oldName)) {
+                entry.view = entry.view.map(v => v === oldName ? newName : v);
+                entry.updatedAt = now;
+                historyChanged = true;
+            }
+        });
+        if (historyChanged) localStorage.setItem('financeApp_netWorthHistory', JSON.stringify(history));
+        // A budget entry already sitting under the new name (left behind by a since-deleted person
+        // — deletePerson doesn't clear budgets) is never overwritten; the old entry stays put too,
+        // so nothing is destroyed in that rare collision.
+        const hasOwn = (obj, k) => Object.prototype.hasOwnProperty.call(obj, k);
+        let categoriesChanged = false;
+        (this.data.categories || []).forEach(cat => {
+            const pb = cat.personBudgets;
+            if (!pb || !hasOwn(pb, oldName) || hasOwn(pb, newName)) return;
+            pb[newName] = pb[oldName];
+            delete pb[oldName];
+            cat.updatedAt = now;
+            categoriesChanged = true;
+        });
+        if (categoriesChanged) this.saveCategories();
+        // The selected Active View is stored by name too. Left alone it keeps pointing at the old
+        // name, which no record carries any more, so every screen would look empty until the user
+        // re-picked the person. (Key mirrors ACTIVE_VIEW_KEY; the UI re-syncs App's own state.)
+        try {
+            const rawView = localStorage.getItem('financeApp_activeView');
+            const view = rawView ? JSON.parse(rawView) : null;
+            if (Array.isArray(view) && view.includes(oldName)) {
+                localStorage.setItem('financeApp_activeView', JSON.stringify(view.map(v => v === oldName ? newName : v)));
+            }
+        } catch (_) { /* a corrupt stored view is already treated as ['own'] by getActiveView */ }
     }
     static setDefaultPerson(id) {
         if (!this.data.settings.people) return;
@@ -5665,6 +5721,11 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         try {
             if (editingPerson) {
                 DataService.updatePerson(editingPerson.id, { name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
+                // A rename also rewrites the stored Active View (migratePersonName); App keeps its
+                // own copy in React state, so push the new value up or it would keep filtering by
+                // the old name and every screen would look empty.
+                const storedView = getActiveView();
+                if (onActiveViewChange && JSON.stringify(storedView) !== JSON.stringify(activeView)) onActiveViewChange(storedView);
             } else {
                 DataService.addPerson({ name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
             }
