@@ -308,7 +308,11 @@ const ValidationUtils = {
         return symbols[currency] || CurrencyService.getCurrencySymbol(currency);
     },
     formatDate: (date) => {
-        return new Date(date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        // A stored date-only "YYYY-MM-DD" string must be parsed as a LOCAL calendar day —
+        // new Date(str) reads it as UTC midnight, which displays the previous day in any
+        // negative-UTC-offset timezone. Full timestamps/Date objects still go through new Date().
+        const d = (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) ? DateUtils.parseDateStr(date) : new Date(date);
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
     },
     getPasswordStrength: (password) => {
         if (!password) return { label: '', className: '', percent: 0 };
@@ -1424,12 +1428,9 @@ class DataService {
     // mismatched-currency record. For Credit Card/Loan accounts the sign is reversed:
     // expenses (charges) increase what's owed, income (payments) reduces it.
     static computeBankAccountBalance(account) {
-        const convert = (amount, currency) => {
-            if (currency === account.currency) return amount;
-            const rates = CurrencyService.fallbackRates[currency];
-            const rate = rates ? (rates[account.currency] || 1) : 1;
-            return amount * rate;
-        };
+        // convertToDefaultSync covers built-in fallback rates AND custom currencies (rated against
+        // another currency); a pair with no known rate still comes back unconverted, as before.
+        const convert = (amount, currency) => CurrencyService.convertToDefaultSync(amount, currency, account.currency);
         const linkedIncome = this.data.income.filter(i => String(i.accountId) === String(account.id)).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
         const linkedExpenses = this.data.expenses.filter(e => String(e.accountId) === String(account.id)).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
         // fromAmount/toAmount are always stored in the respective account's own currency
@@ -2264,7 +2265,11 @@ class DataService {
     // activeView, when passed, scopes the total to items belonging to the currently selected
     // person(s) — matching what's actually shown on screen — instead of summing everyone combined.
     static computeNetWorth(activeView) {
-        const defaultCurrency = (JSON.parse(localStorage.getItem('financeApp_settings') || '{}')).defaultCurrency || 'GBP';
+        // Settings persist the default currency as `currency` (initialize/updateSettings rename the
+        // legacy `defaultCurrency` key to it), so read that first; `defaultCurrency` is only a
+        // fallback for settings that haven't been through that migration yet.
+        const savedSettings = JSON.parse(localStorage.getItem('financeApp_settings') || '{}');
+        const defaultCurrency = savedSettings.currency || savedSettings.defaultCurrency || 'GBP';
         const items = this.getNetWorthItems();
         const visibleItems = activeView ? items.filter(item => matchesActiveView(item.person, activeView)) : items;
         let total = 0;
