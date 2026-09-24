@@ -559,10 +559,10 @@ function ConflictCompare({ localRecord, cloudSnapshot, detectedAt, fieldLabels =
 }
 
 // Fixed save button at the bottom of add/edit screens (hides the dock via CSS while shown).
-function PinnedCta({ label, icon, onClick, disabled, type = 'button' }) {
+function PinnedCta({ label, icon, onClick, disabled, type = 'button', variant }) {
     return (
         <div className="sp-cta-wrap">
-            <button type={type} className="sp-cta" onClick={onClick} disabled={disabled}>
+            <button type={type} className={'sp-cta' + (variant === 'dark' ? ' is-dark' : '')} onClick={onClick} disabled={disabled}>
                 {icon && <i className={icon}></i>}{label}
             </button>
         </div>
@@ -4421,9 +4421,21 @@ function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
     );
 }
 
-function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
+// Display-only icon for an income source (design: coloured tile per source), guessed from the name.
+const SP_INCOME_ICONS = [
+    [/salary|wage|payroll|pay\b/i, 'fas fa-briefcase', '#dcfce7', '#16a34a'], [/freelance|contract|consult|client|invoice/i, 'fas fa-laptop-code', '#eef2ff', '#4f46e5'],
+    [/dividend|invest|interest|stock|share/i, 'fas fa-chart-line', '#dbeafe', '#2563eb'], [/rent|property|lodger/i, 'fas fa-house', '#ffedd5', '#ea580c'],
+    [/refund|cashback|rebate/i, 'fas fa-rotate-left', '#ccfbf1', '#0d9488'], [/gift|present/i, 'fas fa-gift', '#fae8ff', '#c026d3'],
+    [/debt|loan|repay/i, 'fas fa-handshake', '#fce7f3', '#db2777'], [/bonus/i, 'fas fa-star', '#fef3c7', '#d97706']
+];
+function spIncomeLook(source) {
+    const hit = SP_INCOME_ICONS.find(([re]) => re.test(source || ''));
+    return hit ? { icon: hit[1], tint: hit[2], ink: hit[3] } : { icon: 'fas fa-coins', tint: '#fef3c7', ink: '#d97706' };
+}
+
+function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenForm, onFormOpened }) {
     const [people, setPeople] = useState([]);
-    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: DateUtils.today(), source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP') }; });
+    const [formData, setFormData] = useState(() => { const initialPaidBy = resolveActiveViewValue(activeView); return { amount: '', date: DateUtils.today(), source: '', description: '', paidBy: initialPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(initialPaidBy, 'GBP'), tags: [] }; });
     const [errors, setErrors] = useState({});
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
@@ -4434,16 +4446,27 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
     const [recurringEndDate, setRecurringEndDate] = useState('');
     const _f0 = FilterMemory.load('income');
     const [searchTerm, setSearchTerm] = useState(_f0.search || '');
-    const [filterSource, setFilterSource] = useState(_f0.source || '');
-    const [filterPerson, setFilterPerson] = useState(_f0.person || '');
+    // Source and person filters are multi-select ("any of"); '__mine__' = your own income.
+    const [filterSources, setFilterSources] = useState(() => Array.isArray(_f0.sources) ? _f0.sources : (_f0.source ? [_f0.source] : []));
+    const [filterPersons, setFilterPersons] = useState(() => Array.isArray(_f0.persons) ? _f0.persons : (_f0.person ? [_f0.person] : []));
     const [filterDateFrom, setFilterDateFrom] = useState(_f0.dateFrom || '');
     const [filterDateTo, setFilterDateTo] = useState(_f0.dateTo || '');
+    const [datePreset, setDatePreset] = useState(() => _f0.datePreset || ((_f0.dateFrom || _f0.dateTo) ? 'custom' : 'all'));
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [visibleCount, setVisibleCount] = useState(50);
-    const [openMenuId, setOpenMenuId] = useState(null);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
+    // Redesign (Phase 3) — layout state only.
+    const [showForm, setShowForm] = useState(false);
+    const [openRowId, setOpenRowId] = useState(null);
+    const [showFilterSheet, setShowFilterSheet] = useState(false);
+    const [stopRepeat, setStopRepeat] = useState(false);
+    const [tagError, setTagError] = useState('');
+    const [showCurrencySheet, setShowCurrencySheet] = useState(false);
+    const [repeatEndMode, setRepeatEndMode] = useState('never');
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
+    // Opened from the + sheet: show the form straight away.
+    useEffect(() => { if (autoOpenForm) { setShowForm(true); if (onFormOpened) onFormOpened(); } }, [autoOpenForm]);
 
     const syncConflicts = useMemo(() => SyncConflicts.read('income'), [income]);
     const accountNameById = useMemo(() => {
@@ -4454,12 +4477,12 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
 
     // Mirrors ExpenseList: the person sub-filter only makes sense when multiple
     // participants are active — drop any stale selection once it drops back to one.
-    useEffect(() => { if (activeView.length <= 1 && filterPerson) setFilterPerson(''); }, [activeView]);
+    useEffect(() => { if (activeView.length <= 1 && filterPersons.length) setFilterPersons([]); }, [activeView]);
 
     // Persist filters for the session (see FilterMemory) so navigating away keeps them.
     useEffect(() => {
-        FilterMemory.save('income', { search: searchTerm, source: filterSource, person: filterPerson, dateFrom: filterDateFrom, dateTo: filterDateTo, syncConflict: filterSyncConflict });
-    }, [searchTerm, filterSource, filterPerson, filterDateFrom, filterDateTo, filterSyncConflict]);
+        FilterMemory.save('income', { search: searchTerm, sources: filterSources, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, syncConflict: filterSyncConflict });
+    }, [searchTerm, filterSources, filterPersons, filterDateFrom, filterDateTo, datePreset, filterSyncConflict]);
 
     // Re-defaults the Account field to the newly-selected person's primary account (only when
     // its currency matches formData.currency) whenever "Who's Income" or the currency changes —
@@ -4471,66 +4494,62 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
         setFormData(prev => (prev.accountId === nextId ? prev : { ...prev, accountId: nextId }));
     }, [formData.paidBy, formData.currency]);
 
-    useEffect(() => {
-        if (!openMenuId) return;
-        const close = () => setOpenMenuId(null);
-        document.addEventListener('click', close);
-        return () => document.removeEventListener('click', close);
-    }, [openMenuId]);
-
     const handleInputChange = (field, value) => {
         // See ExpenseForm's handleInputChange for why accountId is normalized to a number here.
         const normalized = (field === 'accountId' && value !== '') ? Number(value) : value;
         setFormData(prev => ({ ...prev, [field]: normalized }));
         if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
     };
+    const blankForm = (paidBy) => ({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy, currency: 'GBP', accountId: resolveDefaultAccountId(paidBy || 'own', 'GBP'), tags: [] });
     const handleSubmit = (e) => {
         e.preventDefault(); setIsSubmitting(true);
         const validation = ValidationUtils.validateIncome({ ...formData, amount: parseFloat(formData.amount) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
         try {
             const incomeData = { ...formData, amount: parseFloat(formData.amount) };
-            if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); } else { DataService.addIncomeWithConversion(incomeData); if (isRecurring) { DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }); } }
+            if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); }
+            else {
+                // Repeat: create the schedule first so the income saved here records its id.
+                const schedule = isRecurring ? DataService.addRecurring({ templateExpense: incomeData, frequency: recurringFreq, endDate: recurringEndDate, type: 'income' }) : null;
+                DataService.addIncomeWithConversion(schedule ? { ...incomeData, recurringId: schedule.id } : incomeData);
+            }
             setShowSuccess(true);
-            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); setFormData({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy: newPaidBy, currency: 'GBP', accountId: resolveDefaultAccountId(newPaidBy, 'GBP') }); setEditingIncome(null); setShowSuccess(false); onUpdate(); }, 1000);
+            setTimeout(() => { const newPaidBy = resolveActiveViewValue(activeView); setFormData(blankForm(newPaidBy)); setEditingIncome(null); setShowSuccess(false); setShowForm(false); setIsRecurring(false); setRecurringEndDate(''); setRepeatEndMode('never'); onUpdate(); }, 1000);
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
         setIsSubmitting(false);
     };
-    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '' }); };
+    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setShowForm(true); setErrors({}); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '', tags: incomeItem.tags || [] }); window.scrollTo({ top: 0, behavior: 'smooth' }); };
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
-    const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; DataService.addIncome(duplicate); onUpdate(); };
-    const handleCancelEdit = () => { setEditingIncome(null); setFormData({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy: '', currency: 'GBP', accountId: resolveDefaultAccountId('own', 'GBP') }); setErrors({}); };
+    // A copy isn't generated by the original's repeat schedule, so it doesn't inherit the link.
+    const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; delete duplicate.recurringId; DataService.addIncome(duplicate); onUpdate(); };
+    const handleCancelEdit = () => { setEditingIncome(null); setShowForm(false); setFormData(blankForm('')); setErrors({}); setTagError(''); setIsRecurring(false); };
     const totalIncome = income.reduce((sum, item) => sum + CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP'), 0);
 
     const filteredIncome = useMemo(() => {
         let filtered = income;
-        if (filterSource) filtered = filtered.filter(item => item.source === filterSource);
-        if (filterPerson === '__mine__') filtered = filtered.filter(item => !(item.paidBy || '').trim());
-        else if (filterPerson) filtered = filtered.filter(item => (item.paidBy || '').trim() === filterPerson.trim());
+        if (filterSources.length) filtered = filtered.filter(item => filterSources.includes(item.source));
+        if (filterPersons.length) filtered = filtered.filter(item => {
+            const who = (item.paidBy || '').trim();
+            return filterPersons.some(p => p === '__mine__' ? !who : who === p.trim());
+        });
         if (filterDateFrom) filtered = filtered.filter(item => (item.date || '').substring(0, 10) >= filterDateFrom);
         if (filterDateTo) filtered = filtered.filter(item => (item.date || '').substring(0, 10) <= filterDateTo);
         if (filterSyncConflict) filtered = filtered.filter(item => !!syncConflicts[String(item.id)]);
-        if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(item => (item.description || '').toLowerCase().includes(st) || (item.source || '').toLowerCase().includes(st)); }
+        if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(item => (item.description || '').toLowerCase().includes(st) || (item.source || '').toLowerCase().includes(st) || (item.tags || []).some(tag => tag.includes(st))); }
         return filtered;
-    }, [income, filterSource, filterPerson, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm]);
+    }, [income, filterSources, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredIncome]);
 
     const visibleIncome = filteredIncome.slice(0, visibleCount);
     const incomeSources = [...new Set(income.map(item => item.source).filter(Boolean))].sort();
-    const incomeByCurrency = filteredIncome.reduce((acc, item) => { const currency = item.currency || 'GBP'; if (!acc[currency]) acc[currency] = { total: 0, count: 0 }; acc[currency].total += item.amount; acc[currency].count += 1; return acc; }, {});
-    const getSourceColor = (name) => {
-        const palette = ['#4a6cf7','#e67e22','#2ecc71','#e74c3c','#9b59b6','#1abc9c','#f39c12','#3498db','#e91e63','#00bcd4','#ff5722','#607d8b'];
-        let h = 0;
-        for (let i = 0; i < (name||'').length; i++) h = (h * 31 + (name||'').charCodeAt(i)) & 0xffff;
-        return palette[h % palette.length];
-    };
     const conflictIncome = showConflictDetail ? income.find(i => i.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
-    const incomeConflictFieldLabels = { amount: 'Amount', date: 'Date', source: 'Source', description: 'Description', paidBy: 'Paid By', currency: 'Currency', accountId: 'Account' };
+    const incomeConflictFieldLabels = { amount: 'Amount', date: 'Date', source: 'Source', description: 'Description', paidBy: 'Paid By', currency: 'Currency', accountId: 'Account', tags: 'Tags' };
     const formatIncomeConflictValue = (key, value) => {
         if (key === 'accountId') return value ? (accountNameById.get(String(value)) || String(value)) : '—';
         if (key === 'amount' && value !== undefined && value !== null) return ValidationUtils.formatCurrency(value, (conflictIncome && conflictIncome.currency) || 'GBP');
+        if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
         return value === undefined || value === null || value === '' ? '—' : String(value);
     };
     const handleResolveConflict = async (useCloud) => {
@@ -4542,230 +4561,326 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency }) {
         onUpdate();
     };
 
-    if (showSuccess) { return (<div className="screen"><div className="success-message"><i className="fas fa-check-circle"></i><h3>Income {editingIncome ? 'Updated' : 'Added'} Successfully!</h3></div></div>); }
+    // ── Presentation (Phase 3) ──
+    const allTags = useMemo(() => [...new Set((DataService.data.income || []).flatMap(i => i.tags || []).concat((DataService.data.expenses || []).flatMap(e => e.tags || [])))].sort(), [income]);
+    const recentCurrencies = useMemo(() => {
+        const seen = [];
+        (DataService.data.income || []).forEach(i => { if (i.currency && !seen.includes(i.currency)) seen.push(i.currency); });
+        let list = seen.slice(0, 3);
+        if (!list.includes(formData.currency)) list = [formData.currency, ...list].slice(0, 3);
+        return list;
+    }, [formData.currency]);
+
+    if (showSuccess) {
+        return (<div className="sp-page"><div className="sp-saved"><i className="fas fa-circle-check"></i><div className="sp-sheet-title">{editingIncome ? 'Income updated' : 'Income added'}</div></div></div>);
+    }
+
+    const today = DateUtils.today();
+    const monthKey = today.slice(0, 7);
+    const scheduleById = new Map(DataService.getRecurring().map(r => [r.id, r]));
+    const formOpen = showForm || !!editingIncome;
+    const accounts = DataService.getAccountsForPerson(formData.paidBy || 'own');
+    const isCash = !formData.accountId;
+    const firstRepeat = computeNextDue(new Date(), recurringFreq);
+    const upcoming = [1, 2, 3].reduce((acc) => { acc.push(computeNextDue(acc[acc.length - 1], recurringFreq)); return acc; }, [firstRepeat]).slice(1);
+    const firstError = errors.general || errors.amount || errors.date || errors.source || errors.paidBy || tagError;
+    const presetRange = (key) => {
+        if (key === 'month') return [monthKey + '-01', today];
+        if (key === 'last') { const first = DateUtils.addToDateStr(monthKey + '-01', { months: -1 }); return [first, DateUtils.addToDateStr(monthKey + '-01', { days: -1 })]; }
+        if (key === '30d') return [DateUtils.addToDateStr(today, { days: -29 }), today];
+        if (key === 'all') return ['', ''];
+        return [filterDateFrom, filterDateTo];
+    };
+    const applyPreset = (key) => { const [f, t] = presetRange(key); setDatePreset(key); setFilterDateFrom(f); setFilterDateTo(t); };
+    const PRESET_LABELS = { all: 'All time', month: 'This month', last: 'Last month', '30d': 'Last 30 days', custom: 'Custom' };
+    const personName = (key) => key === '__mine__' ? 'You' : key;
+    const clearAll = () => { setFilterSources([]); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterSyncConflict(false); };
+    const activeChips = [];
+    filterPersons.forEach(p => activeChips.push({ key: 'p:' + p, label: personName(p), onRemove: () => setFilterPersons(prev => prev.filter(x => x !== p)) }));
+    filterSources.forEach(s => activeChips.push({ key: 's:' + s, label: s, onRemove: () => setFilterSources(prev => prev.filter(x => x !== s)) }));
+    if (datePreset !== 'all' && (filterDateFrom || filterDateTo)) activeChips.push({ key: 'date', label: datePreset === 'custom' ? [filterDateFrom && ValidationUtils.formatDate(filterDateFrom), filterDateTo && ValidationUtils.formatDate(filterDateTo)].filter(Boolean).join(' – ') : PRESET_LABELS[datePreset], onRemove: () => applyPreset('all') });
+    if (filterSyncConflict) activeChips.push({ key: 'cf', label: 'Sync conflicts', onRemove: () => setFilterSyncConflict(false) });
+    const deletingIncome = showDeleteConfirm ? income.find(i => i.id === showDeleteConfirm) : null;
+    const deleteSchedule = deletingIncome && deletingIncome.recurringId ? scheduleById.get(deletingIncome.recurringId) : null;
+    const closeDelete = () => { setShowDeleteConfirm(null); setStopRepeat(false); };
+    const whoLabel = (i) => (i.paidBy || '').trim() ? i.paidBy : 'You';
+    const freqLabel = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
 
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2>Income Management</h2>
-                <div className="income-total">Total Income: {ValidationUtils.formatCurrency(totalIncome, defaultCurrency || 'GBP')}</div>
+        <div className="sp-page">
+            <div className="sp-head">
+                <div><div className="sp-head-kicker">{new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}</div><h2>Income</h2></div>
+                <button type="button" className="sp-filterbtn" onClick={() => setShowFilterSheet(true)} title="Filters">
+                    <i className="fas fa-sliders-h"></i>
+                    {activeChips.length > 0 && <span className="sp-filterbtn-count">{activeChips.length}</span>}
+                </button>
             </div>
-            <div className="income-form-section">
-                <h5>{editingIncome ? 'Edit Income' : 'Add New Income'}</h5>
-                <form onSubmit={handleSubmit} className="income-form">
-                    {errors.general && (<div className="alert alert-danger">{errors.general}</div>)}
-                    <div className="form-group">
-                        <label htmlFor="currency">Currency *</label>
-                        <select id="currency" className="form-select" value={formData.currency} onChange={(e) => handleInputChange('currency', e.target.value)}>
-                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.symbol})</option>))}
-                        </select>
+            <div className="sp-hero" style={{borderRadius: '22px', padding: '18px'}}>
+                <div className="sp-hero-label">Total received</div>
+                <div className="sp-hero-value">{ValidationUtils.formatCurrency(totalIncome, defaultCurrency || 'GBP')}</div>
+                <div className="sp-hero-pills" style={{marginTop: '10px'}}><span className="sp-hero-pill is-green">{income.length} entr{income.length === 1 ? 'y' : 'ies'}</span></div>
+            </div>
+
+            {formOpen && (
+                <form onSubmit={handleSubmit} className="sp-formcard" style={{marginTop: 0, marginBottom: '12px', padding: '4px 16px 14px', boxShadow: editingIncome ? '0 0 0 2px #6366f1' : 'none'}} noValidate>
+                    {editingIncome && <div style={{display: 'flex', alignItems: 'center', gap: '7px', padding: '11px 0 3px', fontSize: '12px', fontWeight: 800, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '.06em'}}><i className="fas fa-pen" style={{fontSize: '10px'}}></i>Editing income</div>}
+                    {firstError && <div className="sp-alert sp-alert-err" style={{marginTop: '10px'}}><i className="fas fa-triangle-exclamation"></i><span>{firstError}</span></div>}
+                    <div className={'sp-formrow' + (errors.source ? ' is-bad' : '')}>
+                        <span>Source</span>
+                        <input type="text" value={formData.source} onChange={(e) => handleInputChange('source', e.target.value)} placeholder="e.g. Salary" list="sp-income-sources" style={{width: '60%'}} />
+                        <datalist id="sp-income-sources">{incomeSources.map(s => <option key={s} value={s} />)}</datalist>
                     </div>
-                    <div className="form-group">
-                        <label htmlFor="amount">Amount *</label>
-                        <div className="input-group">
-                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
-                            <input type="number" id="amount" className={'form-control ' + (errors.amount ? 'is-invalid' : '')} value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" step="0.01" min="0" />
+                    <div className={'sp-formblock' + (errors.amount ? ' is-bad' : '')} style={{borderTop: '1px solid #f1f5f9'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                            <span style={{fontSize: '14px', color: errors.amount ? '#e11d48' : '#64748b', fontWeight: 600}}>Amount</span>
+                            <div style={{display: 'flex', alignItems: 'baseline', gap: '3px'}}>
+                                <span style={{fontSize: '14px', color: '#94a3b8', fontWeight: 700}}>{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
+                                <input type="number" step="0.01" min="0" inputMode="decimal" value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" style={{border: 'none', fontSize: '14px', color: '#0f172a', fontWeight: 700, textAlign: 'right', outline: 'none', width: '110px', padding: 0, background: 'none', fontFamily: 'inherit', colorScheme: 'light'}} />
+                            </div>
                         </div>
-                        {errors.amount && <div className="invalid-feedback d-block">{errors.amount}</div>}
+                        <div style={{display: 'flex', justifyContent: 'flex-end', gap: '5px', marginTop: '9px', flexWrap: 'wrap'}}>
+                            {recentCurrencies.map(code => (
+                                <button key={code} type="button" className="sp-curchip" style={formData.currency === code ? {background: '#10b981', color: '#06281c'} : {background: '#f1f5f9', color: '#475569'}} onClick={() => handleInputChange('currency', code)}>{formData.currency === code ? ValidationUtils.getCurrencySymbol(code) + ' ' + code : code}</button>
+                            ))}
+                            <button type="button" className="sp-curchip" style={{background: '#f1f5f9', color: '#475569'}} onClick={() => setShowCurrencySheet(true)}>More<i className="fas fa-chevron-down" style={{fontSize: '9px'}}></i></button>
+                        </div>
                     </div>
-                    <div className="form-group">
-                        <label htmlFor="date">Date *</label>
-                        <input type="date" id="date" className={'form-control ' + (errors.date ? 'is-invalid' : '')} value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} />
-                        {errors.date && <div className="invalid-feedback">{errors.date}</div>}
+                    <div className={'sp-formrow' + (errors.date ? ' is-bad' : '')} style={{borderTop: '1px solid #f1f5f9'}}>
+                        <span>Date</span>
+                        <input type="date" value={formData.date} onChange={(e) => handleInputChange('date', e.target.value)} />
                     </div>
-                    <div className="form-group">
-                        <label htmlFor="source">Income Source *</label>
-                        <input type="text" id="source" className={'form-control ' + (errors.source ? 'is-invalid' : '')} value={formData.source} onChange={(e) => handleInputChange('source', e.target.value)} placeholder="e.g., Salary, Freelance, Investment" />
-                        {errors.source && <div className="invalid-feedback">{errors.source}</div>}
+                    <div className="sp-formrow">
+                        <span>Note</span>
+                        <input type="text" value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Optional" style={{width: '60%'}} />
                     </div>
-                    <div className="form-group">
-                        <label htmlFor="description">Description (Optional)</label>
-                        <input type="text" id="description" className="form-control" value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Additional details" />
+                    <div className="sp-formblock">
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
+                            <span style={{fontSize: '14px', color: '#64748b', fontWeight: 600}}>Tags</span>
+                            <span className="sp-hint">Enter or comma to add</span>
+                        </div>
+                        <TagInput tags={formData.tags || []} onChange={(tags) => setFormData(prev => ({ ...prev, tags }))} allTags={allTags} onError={setTagError} noun="income" />
                     </div>
-                    {/* Hidden when a single Active View is selected — the income is auto-tagged
-                        to that person. Reappears, restricted to the selected participants,
-                        when multiple are active. */}
-                    {activeView.length > 1 && (
-                        <div className="form-group">
-                            <label htmlFor="paidBy">Who's Income</label>
-                            <PersonSelect id="paidBy" value={formData.paidBy} onChange={(v) => handleInputChange('paidBy', v)} activeView={activeView} className="form-select" />
-                            <div className="form-text">Select who received this income</div>
+                    {activeView.length > 1 ? (
+                        <div className={'sp-formrow' + (errors.paidBy ? ' is-bad' : '')}>
+                            <span>Earned by</span>
+                            <PersonSelect id="paidBy" value={formData.paidBy} onChange={(v) => handleInputChange('paidBy', v)} activeView={activeView} className="sp-row-input" />
+                        </div>
+                    ) : (
+                        <div className="sp-formrow">
+                            <span>Earned by</span>
+                            <span style={{display: 'inline-flex', alignItems: 'center', gap: '7px', fontSize: '13px', fontWeight: 700, color: '#0f172a'}}>{formData.paidBy || 'You'}<i className="fas fa-lock" style={{fontSize: '10px', color: '#cbd5e1'}}></i></span>
                         </div>
                     )}
-                    {DataService.getAccountsForPerson(formData.paidBy || 'own').length > 0 && (
-                        <div className="form-group">
-                            <label htmlFor="incomeAccountId">Account</label>
-                            <select id="incomeAccountId" className="form-select" value={formData.accountId} onChange={(e) => handleInputChange('accountId', e.target.value)}>
-                                <option value="">— None —</option>
-                                {DataService.getAccountsForPerson(formData.paidBy || 'own').map(a => (<option key={a.id} value={a.id}>{a.accountName}{a.isPrimary ? ' ★' : ''}</option>))}
-                            </select>
-                            <div className="form-text">Defaults to this person's primary account</div>
+                    <div className="sp-panel-label" style={{margin: '6px 0 8px'}}>Received as</div>
+                    <div className="sp-seg is-light">
+                        <button type="button" className={!isCash ? 'is-active' : ''} onClick={() => { if (isCash) handleInputChange('accountId', resolveDefaultAccountId(formData.paidBy, formData.currency) || (accounts[0] ? accounts[0].id : '')); }}><i className="fas fa-building-columns" style={{marginRight: '6px'}}></i>Bank</button>
+                        <button type="button" className={isCash ? 'is-active' : ''} onClick={() => handleInputChange('accountId', '')}><i className="fas fa-money-bill-wave" style={{marginRight: '6px'}}></i>Cash</button>
+                    </div>
+                    {!isCash && accounts.length > 0 && (
+                        <div style={{marginTop: '8px', background: '#f8fafc', borderRadius: '14px', padding: '2px 12px'}}>
+                            {accounts.map(a => {
+                                const on = String(formData.accountId) === String(a.id);
+                                return (
+                                    <button key={a.id} type="button" className="sp-bankrow" style={{padding: '10px 0'}} onClick={() => handleInputChange('accountId', a.id)}>
+                                        <span className="sp-tile" style={{width: '32px', height: '32px', borderRadius: '10px', background: on ? '#dbeafe' : '#fff', color: on ? '#1d4ed8' : '#64748b', fontSize: '12px'}}><i className="fas fa-building-columns"></i></span>
+                                        <div className="sp-row-main">
+                                            <div style={{display: 'flex', alignItems: 'center', gap: '6px'}}><span className="sp-row-title" style={{fontSize: '13px'}}>{a.accountName}</span>{a.isPrimary && <span className="sp-badge-primary">PRIMARY</span>}</div>
+                                            <div className="sp-row-sub" style={{fontSize: '11px'}}>{a.accountType || 'Account'} · {a.currency}</div>
+                                        </div>
+                                        <i className={on ? 'fas fa-circle-check' : 'far fa-circle'} style={{color: on ? '#10b981' : '#cbd5e1', fontSize: '15px'}}></i>
+                                    </button>
+                                );
+                            })}
                         </div>
+                    )}
+                    {accounts.length === 0 && (
+                        <div className="sp-alert sp-alert-warn" style={{marginTop: '8px'}}><i className="fas fa-circle-info"></i><span>No bank accounts for {formData.paidBy || 'you'} yet, so this is recorded as cash. Add accounts in Settings.</span></div>
                     )}
                     {!editingIncome && (
-                        <div className="form-group">
-                            <div className="form-check">
-                                <input className="form-check-input" type="checkbox" id="isRecurringIncome" checked={isRecurring} onChange={e => setIsRecurring(e.target.checked)} />
-                                <label className="form-check-label" htmlFor="isRecurringIncome"><i className="fas fa-redo me-1"></i>Make this a recurring income</label>
-                            </div>
+                        <React.Fragment>
+                            <button type="button" onClick={() => setIsRecurring(v => !v)} style={{marginTop: '12px', display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', borderRadius: '14px', background: '#f8fafc', cursor: 'pointer', width: '100%', border: 'none', fontFamily: 'inherit', textAlign: 'left', boxShadow: isRecurring ? '0 0 0 2px #7c3aed' : 'none'}}>
+                                <span className="sp-tile" style={{background: '#ede9fe', color: '#7c3aed'}}><i className="fas fa-rotate"></i></span>
+                                <div className="sp-row-main"><div className="sp-row-title" style={{fontSize: '13px'}}>Repeat</div><div style={{fontSize: '11px', fontWeight: 700, color: '#7c3aed'}}>{isRecurring ? freqLabel(recurringFreq) : 'Off · one-time income'}</div></div>
+                                <span className={'sp-switch' + (isRecurring ? ' is-on' : '')} style={{background: isRecurring ? '#7c3aed' : undefined}}><span></span></span>
+                            </button>
                             {isRecurring && (
-                                <div className="mt-2">
-                                    <select className="form-select mb-2" value={recurringFreq} onChange={e => {
-                                        const freq = e.target.value;
-                                        setRecurringFreq(freq);
-                                        const minEnd = computeNextDue(new Date(), freq);
-                                        if (recurringEndDate && recurringEndDate < minEnd) setRecurringEndDate('');
-                                    }}>
-                                        <option value="daily">Daily</option>
-                                        <option value="weekly">Weekly</option>
-                                        <option value="monthly">Monthly</option>
-                                        <option value="yearly">Yearly</option>
-                                    </select>
-                                    <label className="form-label small text-muted">End Date (Optional)</label>
-                                    <input type="date" className="form-control" value={recurringEndDate} min={computeNextDue(new Date(), recurringFreq)} onChange={e => setRecurringEndDate(e.target.value)} />
+                                <div style={{marginTop: '8px', background: '#f8fafc', borderRadius: '14px', padding: '12px'}}>
+                                    <div className="sp-panel-label" style={{fontSize: '11px', marginBottom: '8px'}}>Repeat every</div>
+                                    <div className="sp-seg" style={{marginTop: 0, borderRadius: '11px', padding: '3px'}}>
+                                        {['daily', 'weekly', 'monthly', 'quarterly', 'yearly'].map(f => (
+                                            <button key={f} type="button" className={recurringFreq === f ? 'is-active' : ''} style={{fontSize: '12px', padding: '7px 2px', borderRadius: '9px'}} onClick={() => {
+                                                setRecurringFreq(f);
+                                                const minEnd = computeNextDue(new Date(), f);
+                                                if (recurringEndDate && recurringEndDate < minEnd) setRecurringEndDate('');
+                                            }}>{f === 'quarterly' ? 'Quarter' : freqLabel(f)}</button>
+                                        ))}
+                                    </div>
+                                    <div className="sp-panel-label" style={{fontSize: '11px', margin: '12px 0 7px'}}>Ends</div>
+                                    <div className="sp-endtabs">
+                                        <button type="button" className={'sp-endtab' + (repeatEndMode === 'never' ? ' is-active' : '')} onClick={() => { setRepeatEndMode('never'); setRecurringEndDate(''); }}>Never</button>
+                                        <button type="button" className={'sp-endtab' + (repeatEndMode === 'date' ? ' is-active' : '')} onClick={() => setRepeatEndMode('date')}>On a date</button>
+                                    </div>
+                                    {repeatEndMode === 'date' && (
+                                        <div className="sp-formrow" style={{borderTop: '1px solid #e2e8ef', marginTop: '8px', padding: '10px 0 2px'}}>
+                                            <span style={{fontSize: '13px'}}>End date</span>
+                                            <input type="date" value={recurringEndDate} min={firstRepeat} onChange={e => setRecurringEndDate(e.target.value)} />
+                                        </div>
+                                    )}
+                                    <div className="sp-infobox" style={{background: '#ede9fe', marginTop: '10px'}}>
+                                        <div className="sp-infobox-row">
+                                            <span className="sp-infobox-icon" style={{color: '#7c3aed'}}><i className="fas fa-calendar-check"></i></span>
+                                            <div><div className="sp-infobox-kicker" style={{color: '#7c3aed'}}>First repeat</div><div className="sp-infobox-value">{ValidationUtils.formatDate(firstRepeat)}</div></div>
+                                        </div>
+                                        <div className="sp-infobox-dates">{upcoming.map(d => <span key={d}>{ValidationUtils.formatDate(d)}</span>)}</div>
+                                        <div className="sp-infobox-foot" style={{color: '#7c3aed'}}>Adds a schedule under Scheduled → Recurring.</div>
+                                    </div>
                                 </div>
                             )}
-                        </div>
+                        </React.Fragment>
                     )}
-                    <div className="form-actions">
-                        {editingIncome && (<button type="button" className="btn btn-secondary" onClick={handleCancelEdit} disabled={isSubmitting}>Cancel</button>)}
-                        <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-                            {isSubmitting ? (<><span className="spinner-border spinner-border-sm me-2"></span>{editingIncome ? 'Updating...' : 'Adding...'}</>) : (<><i className="fas fa-save me-2"></i>{editingIncome ? 'Update Income' : 'Add Income'}</>)}
-                        </button>
-                    </div>
+                    <button type="submit" className="sp-btn sp-btn-dark" style={{marginTop: '12px', height: '42px', borderRadius: '12px', fontSize: '14px'}} disabled={isSubmitting}>
+                        {isSubmitting ? <><i className="fas fa-spinner fa-spin"></i>{editingIncome ? 'Updating…' : 'Saving…'}</> : (editingIncome ? 'Save changes' : 'Save income')}
+                    </button>
                 </form>
+            )}
+
+            <div className="sp-search">
+                <i className="fas fa-search"></i>
+                <input type="text" placeholder="Search income" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             </div>
-            <div className="income-history">
-                <div className="d-flex align-items-center justify-content-between mb-2" style={{flexWrap: 'wrap', gap: '0.5rem'}}>
-                    <h5 className="mb-0">Income History</h5>
-                    {Object.keys(incomeByCurrency).length === 1 ? (
-                        <div className="income-total">Total: {ValidationUtils.formatCurrency(Object.values(incomeByCurrency)[0].total, Object.keys(incomeByCurrency)[0])}</div>
-                    ) : Object.keys(incomeByCurrency).length > 1 ? (
-                        <div className="income-total-multi">
-                            {Object.entries(incomeByCurrency).map(([currency, data]) => (<div key={currency} className="income-total-item">{ValidationUtils.formatCurrency(data.total, currency)}</div>))}
-                        </div>
-                    ) : null}
-                </div>
-                <div className="filters-section">
-                    <div className="search-box">
-                        <div className="input-group">
-                            <span className="input-group-text"><i className="fas fa-search"></i></span>
-                            <input type="text" className="form-control" placeholder="Search income..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-                        </div>
-                    </div>
-                    <div className="filter-row">
-                        <select className="form-select" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}>
-                            <option value="">All Sources</option>
-                            {incomeSources.map(source => (<option key={source} value={source}>{source}</option>))}
-                        </select>
-                        {/* Hidden when a single Active View is selected — income is already
-                            scoped to that person upstream. Reappears, restricted to just the
-                            selected participants, when multiple are active. */}
-                        {activeView.length > 1 && (
-                            <select className="form-select" value={filterPerson} onChange={(e) => setFilterPerson(e.target.value)}>
-                                <option value="">All (selected participants)</option>
-                                {activeView.includes('own') && <option value="__mine__">My Income Only</option>}
-                                {activeView.filter(v => v !== 'own').map(name => (<option key={name} value={name}>{name}</option>))}
-                            </select>
-                        )}
-                    </div>
-                    <div className="filter-row">
-                        <div className="flex-fill">
-                            <label className="form-label small text-muted mb-1">From</label>
-                            <input type="date" className="form-control" title="From Date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
-                        </div>
-                        <div className="flex-fill">
-                            <label className="form-label small text-muted mb-1">To</label>
-                            <input type="date" className="form-control" title="To Date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
-                        </div>
-                    </div>
-                    {Object.keys(syncConflicts).length > 0 && (
-                        <div className="filter-row">
-                            <div className="form-check">
-                                <input type="checkbox" className="form-check-input" id="filterIncomeSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
-                                <label className="form-check-label" htmlFor="filterIncomeSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                            </div>
-                        </div>
-                    )}
-                    {(filterSource || filterPerson || filterDateFrom || filterDateTo || searchTerm || filterSyncConflict) && (
-                        <button className="btn btn-sm btn-outline-secondary" onClick={() => { setFilterSource(''); setFilterPerson(''); setFilterDateFrom(''); setFilterDateTo(''); setSearchTerm(''); setFilterSyncConflict(false); }}>
-                            <i className="fas fa-times me-1"></i>Clear Filters
-                        </button>
-                    )}
-                </div>
-                {filteredIncome.length === 0 ? (
-                    <div className="empty-state"><i className="fas fa-piggy-bank fa-3x"></i><h4>No income found</h4><p>{income.length === 0 ? "Start by adding your first income entry!" : "Try adjusting your filters or search term."}</p></div>
-                ) : (
-                    <div className="income-list">
-                        {visibleIncome.map(incomeItem => {
-                            const metaParts = [incomeItem.description, ValidationUtils.formatDate(incomeItem.date)];
-                            const personLabel = activeView.length > 1 ? incomeItem.paidBy : '';
-                            return (
-                            <div key={incomeItem.id} className="income-item">
-                                <div className="income-avatar" style={{background: getSourceColor(incomeItem.source)}}>
-                                    {(incomeItem.source || '?').charAt(0).toUpperCase()}
-                                </div>
-                                <div className="income-info">
-                                    <div className="income-source">
-                                        {incomeItem.source}
-                                        <SyncConflictBadge conflict={syncConflicts[String(incomeItem.id)]} onClick={() => setShowConflictDetail(incomeItem.id)} />
-                                    </div>
-                                    <div className="income-meta">{metaParts.filter(Boolean).join(' · ')}</div>
-                                </div>
-                                {personLabel && <span className="person-badge" title={personLabel}>{personLabel}</span>}
-                                <div className="income-right">
-                                    <div className="income-amount">{ValidationUtils.formatCurrency(incomeItem.amount, incomeItem.currency || 'GBP')}</div>
-                                    <div className="income-menu-wrap">
-                                        <button className="income-menu-btn" title="Actions"
-                                            onClick={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === incomeItem.id ? null : incomeItem.id); }}>
-                                            <i className="fas fa-ellipsis-v"></i>
-                                        </button>
-                                        {openMenuId === incomeItem.id && (
-                                            <div className="income-menu-dropdown">
-                                                <button onClick={() => { handleEdit(incomeItem); setOpenMenuId(null); }}><i className="fas fa-edit"></i>Edit</button>
-                                                <button onClick={() => { handleDuplicateIncome(incomeItem); setOpenMenuId(null); }}><i className="fas fa-copy"></i>Duplicate</button>
-                                                <button className="danger" onClick={() => { setShowDeleteConfirm(incomeItem.id); setOpenMenuId(null); }}><i className="fas fa-trash"></i>Delete</button>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                            );
-                        })}
-                    </div>
-                )}
-                {visibleCount < filteredIncome.length && (
-                    <div className="text-center py-3">
-                        <button className="btn btn-outline-primary" onClick={() => setVisibleCount(c => c + 50)}>
-                            <i className="fas fa-chevron-down me-2"></i>Load more ({filteredIncome.length - visibleCount} remaining)
-                        </button>
-                    </div>
-                )}
-            </div>
-            {showDeleteConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Confirm Delete</h5></div>
-                            <div className="modal-body"><p>Are you sure you want to delete this income entry? This action cannot be undone.</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => handleDelete(showDeleteConfirm)}>Delete</button>
-                            </div>
-                        </div>
-                    </div>
+            {activeChips.length > 0 && (
+                <div className="sp-activechips">
+                    {activeChips.map(c => <button key={c.key} type="button" className="sp-activechip" onClick={c.onRemove}>{c.label}<i className="fas fa-xmark" style={{fontSize: '10px'}}></i></button>)}
+                    <button type="button" className="sp-clearlink" onClick={clearAll}>Clear all</button>
                 </div>
             )}
-            {showConflictDetail && conflictIncome && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictIncome}
-                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
-                    fieldLabels={incomeConflictFieldLabels}
-                    formatValue={formatIncomeConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveConflict(false)}
-                    onUseCloud={() => handleResolveConflict(true)}
-                />
+            <div className="sp-resultlabel">{filteredIncome.length} entr{filteredIncome.length === 1 ? 'y' : 'ies'} · tap a row for actions</div>
+
+            {filteredIncome.length === 0 ? (
+                <div className="sp-empty"><i className="fas fa-wallet"></i>{income.length === 0 ? 'No income yet — tap Add income to record some.' : 'No income matches your filters.'}</div>
+            ) : visibleIncome.map(item => {
+                const look = spIncomeLook(item.source);
+                const isOpen = openRowId === item.id;
+                const conflict = syncConflicts[String(item.id)];
+                const cfOpen = conflict && showConflictDetail === item.id;
+                const bankName = item.accountId ? (accountNameById.get(String(item.accountId)) || 'Bank') : '';
+                const schedule = item.recurringId ? scheduleById.get(item.recurringId) : null;
+                const oc = spPersonColor((item.paidBy || '').trim() ? item.paidBy : 'own', people);
+                const tags = item.tags || [];
+                return (
+                    <div key={item.id} className="sp-listcard" style={{marginBottom: '10px'}}>
+                        <div role="button" tabIndex={0} className={'sp-item-row' + (isOpen ? ' is-open' : '')} style={{padding: '12px 14px', gap: '12px'}} onClick={() => setOpenRowId(isOpen ? null : item.id)} onKeyDown={e => { if (e.key === 'Enter') setOpenRowId(isOpen ? null : item.id); }}>
+                            <span className="sp-cattile" style={{width: '40px', height: '40px', borderRadius: '13px', fontSize: '15px', background: look.tint, color: look.ink}}><i className={look.icon}></i></span>
+                            <div className="sp-item-main">
+                                <div className="sp-item-title">
+                                    <span style={{fontSize: '14px'}}>{item.source}</span>
+                                    {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></button>}
+                                </div>
+                                <div className="sp-item-meta">
+                                    {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{whoLabel(item).charAt(0).toUpperCase()}</span>{whoLabel(item)}</span>}
+                                    {bankName
+                                        ? <span className="sp-paybadge is-card"><i className="fas fa-building-columns" style={{fontSize: '9px'}}></i>{bankName}</span>
+                                        : <span className="sp-paybadge is-cash"><i className="fas fa-money-bill-wave" style={{fontSize: '9px'}}></i>Cash</span>}
+                                    {schedule && <span className="sp-paybadge" style={{background: '#ede9fe', color: '#6d28d9'}}><i className="fas fa-rotate" style={{fontSize: '9px'}}></i>{freqLabel(schedule.frequency)}</span>}
+                                    <span className="sp-item-sub">{ValidationUtils.formatDate(item.date)}{item.description ? ' · ' + item.description : ''}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
+                                </div>
+                            </div>
+                            <div style={{fontSize: '15px', fontWeight: 800, color: '#16a34a', whiteSpace: 'nowrap'}}>+{ValidationUtils.formatCurrency(item.amount, item.currency || 'GBP')}</div>
+                        </div>
+                        {cfOpen && (
+                            <ConflictCompare localRecord={item} cloudSnapshot={conflict.cloudSnapshot} detectedAt={conflict.detectedAt}
+                                fieldLabels={incomeConflictFieldLabels} formatValue={formatIncomeConflictValue}
+                                onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
+                        )}
+                        {isOpen && (
+                            <div className="sp-rowactions" style={{padding: '0 14px 11px 66px'}}>
+                                <button type="button" className="sp-rowaction" onClick={() => handleEdit(item)}><i className="fas fa-pen" style={{fontSize: '10px'}}></i>Edit</button>
+                                <button type="button" className="sp-rowaction is-indigo" onClick={() => handleDuplicateIncome(item)}><i className="fas fa-copy" style={{fontSize: '10px'}}></i>Duplicate</button>
+                                <button type="button" className="sp-rowaction is-danger" onClick={() => { setStopRepeat(false); setShowDeleteConfirm(item.id); }}><i className="fas fa-trash" style={{fontSize: '10px'}}></i>Delete</button>
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+            {visibleCount < filteredIncome.length && (
+                <div className="sp-more-wrap">
+                    <button type="button" className="sp-more-btn" onClick={() => setVisibleCount(c => c + 50)}><i className="fas fa-chevron-down" style={{fontSize: '11px', color: '#10b981'}}></i>Show {Math.min(50, filteredIncome.length - visibleCount)} more</button>
+                    <span className="sp-hint">Showing {visibleCount} of {filteredIncome.length}</span>
+                </div>
+            )}
+            <div style={{height: '84px'}}></div>
+            {formOpen
+                ? <PinnedCta label="Cancel" icon="fas fa-xmark" variant="dark" onClick={handleCancelEdit} />
+                : <PinnedCta label="Add income" icon="fas fa-plus" onClick={() => { setShowForm(true); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
+
+            {showFilterSheet && (
+                <Sheet onClose={() => setShowFilterSheet(false)}>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px'}}>
+                        <div className="sp-sheet-title">Filter income</div>
+                        <button type="button" className="sp-link" style={{color: '#e11d48'}} onClick={clearAll}>Reset</button>
+                    </div>
+                    {activeView.length > 1 && (
+                        <React.Fragment>
+                            <div className="sp-labelrow"><span>Person</span><span>pick any</span></div>
+                            <div className="sp-chipgrid">
+                                {[...(activeView.includes('own') ? ['__mine__'] : []), ...activeView.filter(v => v !== 'own')].map(p => {
+                                    const on = filterPersons.includes(p);
+                                    const c = spPersonColor(p === '__mine__' ? 'own' : p, people);
+                                    return <button key={p} type="button" className={'sp-sheetchip' + (on ? ' is-active' : '')} onClick={() => setFilterPersons(prev => on ? prev.filter(x => x !== p) : [...prev, p])}><span className="sp-sheetchip-dot" style={{background: c[1]}}></span>{personName(p)}</button>;
+                                })}
+                            </div>
+                        </React.Fragment>
+                    )}
+                    {incomeSources.length > 0 && (
+                        <React.Fragment>
+                            <div className="sp-labelrow"><span>Source</span><span>pick any</span></div>
+                            <div className="sp-chipgrid">
+                                {incomeSources.map(s => { const on = filterSources.includes(s); const look = spIncomeLook(s); return <button key={s} type="button" className={'sp-sheetchip' + (on ? ' is-active' : '')} onClick={() => setFilterSources(prev => on ? prev.filter(x => x !== s) : [...prev, s])}><i className={look.icon} style={{color: on ? '#34d399' : look.ink}}></i>{s}</button>; })}
+                            </div>
+                        </React.Fragment>
+                    )}
+                    <div className="sp-labelrow"><span>Date</span></div>
+                    <div className="sp-chipgrid" style={{marginBottom: '10px'}}>
+                        {Object.keys(PRESET_LABELS).map(k => <button key={k} type="button" className={'sp-sheetchip' + (datePreset === k ? ' is-active' : '')} onClick={() => applyPreset(k)}>{PRESET_LABELS[k]}</button>)}
+                    </div>
+                    {datePreset === 'custom' && (
+                        <div className="sp-rowcard">
+                            <div className="sp-formrow"><span>From</span><input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} /></div>
+                            <div className="sp-formrow"><span>To</span><input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} /></div>
+                        </div>
+                    )}
+                    {Object.keys(syncConflicts).length > 0 && (
+                        <div className="sp-rowcard"><div className="sp-row"><i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i><span className="sp-row-title" style={{flex: 1}}>Sync conflicts only</span><SpSwitch on={filterSyncConflict} onToggle={() => setFilterSyncConflict(v => !v)} label="Sync conflicts only" /></div></div>
+                    )}
+                    <button type="button" className="sp-btn sp-btn-primary" style={{marginTop: '8px'}} onClick={() => setShowFilterSheet(false)}>Show {filteredIncome.length} result{filteredIncome.length === 1 ? '' : 's'}</button>
+                </Sheet>
+            )}
+
+            {deletingIncome && (
+                <Sheet danger onClose={closeDelete}
+                    footer={<React.Fragment>
+                        <button type="button" className="sp-btn sp-btn-cancel" onClick={closeDelete}>Cancel</button>
+                        <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" onClick={() => { if (stopRepeat && deleteSchedule) DataService.deleteRecurring(deleteSchedule.id); setStopRepeat(false); setOpenRowId(null); handleDelete(deletingIncome.id); }}><i className="fas fa-trash"></i>Delete</button>
+                    </React.Fragment>}>
+                    <div className="sp-card-head">
+                        <span className="sp-tile" style={{width: '42px', height: '42px', background: '#fee2e2', color: '#e11d48', fontSize: '16px'}}><i className="fas fa-trash"></i></span>
+                        <div><div className="sp-sheet-title">Delete income?</div><div className="sp-row-sub">This can't be undone.</div></div>
+                    </div>
+                    <div className="sp-delcard">
+                        <div style={{minWidth: 0}}><div className="sp-row-title">{deletingIncome.source}</div><div className="sp-row-sub">{ValidationUtils.formatDate(deletingIncome.date)}</div></div>
+                        <div className="sp-row-title" style={{fontSize: '15px', fontWeight: 800}}>{ValidationUtils.formatCurrency(deletingIncome.amount, deletingIncome.currency || 'GBP')}</div>
+                    </div>
+                    {deleteSchedule && (
+                        <label className="sp-check" style={{marginTop: '10px', display: 'flex'}}>
+                            <input type="checkbox" checked={stopRepeat} onChange={e => setStopRepeat(e.target.checked)} />
+                            Also stop repeating ({(deleteSchedule.frequency || '').toLowerCase()} schedule)
+                        </label>
+                    )}
+                </Sheet>
+            )}
+
+            {showCurrencySheet && (
+                <CurrencySheet value={formData.currency} onClose={() => setShowCurrencySheet(false)} onPick={(code) => { handleInputChange('currency', code); setShowCurrencySheet(false); }} />
             )}
         </div>
     );
@@ -12350,6 +12465,7 @@ function App() {
     // Redesign shell (Phase 0): header sheets + back-navigation history. UI state only.
     const [shellSheet, setShellSheet] = useState(null); // null | 'view' | 'sync' | 'profile' | 'add'
     const [screenHistory, setScreenHistory] = useState([]);
+    const [incomeAutoOpen, setIncomeAutoOpen] = useState(false); // + sheet → Income opens its form
     const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
@@ -13060,7 +13176,7 @@ function App() {
             case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
-            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} />;
+            case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} autoOpenForm={incomeAutoOpen} onFormOpened={() => setIncomeAutoOpen(false)} />;
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
@@ -13246,7 +13362,7 @@ function App() {
                 </Sheet>
             )}
             {shellSheet === 'add' && (
-                <QuickAddSheet onClose={() => setShellSheet(null)} onPick={(screen) => navigate(screen)} />
+                <QuickAddSheet onClose={() => setShellSheet(null)} onPick={(screen) => { if (screen === 'income') setIncomeAutoOpen(true); navigate(screen); }} />
             )}
             {showCloudHistory && (
                 <CloudHistoryModal
