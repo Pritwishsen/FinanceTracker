@@ -188,3 +188,146 @@
 .sp-stat-title { font-size: 13px; font-weight: 800; color: var(--sp-green-700); }
 .sp-stat-sub { font-size: 12px; font-weight: 600; color: var(--sp-green-600); margin-top: 2px; }
 .sp-footnote { font-size: 11px; color: var(--sp-slate-400); font-weight: 600; text-align: center; margin-top: 10px; }
+
+/* ---------- App shell (Phase 0) ---------- */
+/* Overrides the legacy .mobile-app frame: design background + font, phone-width column. */
+.mobile-app.sp-shell { max-width: 440px; background: var(--sp-bg); font-family: var(--sp-font); box-shadow: 0 0 0 1px rgba(15, 23, 42, .04); }
+.sp-shell .app-content { padding-bottom: 110px; }
+body:has(.sp-shell) { background: #e3e7ee; }
+
+.sp-top {
+    position: sticky; top: 0; z-index: 900; background: var(--sp-bg);
+    display: flex; align-items: center; gap: 8px; padding: 12px 16px 8px;
+}
+.sp-viewbar {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; background: #fff; border-radius: 14px;
+    padding: 6px 10px 6px 6px; cursor: pointer; border: none; font-family: inherit; text-align: left;
+}
+.sp-viewbar-avatars { display: flex; flex-shrink: 0; }
+.sp-av {
+    width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 800; border: 2px solid #fff; flex-shrink: 0;
+}
+.sp-av + .sp-av { margin-left: -8px; }
+.sp-viewbar-kicker { font-size: 10px; font-weight: 700; color: var(--sp-green-600); text-transform: uppercase; letter-spacing: .06em; }
+.sp-viewbar-label { font-size: 12px; font-weight: 800; color: var(--sp-navy); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-viewbar-change { font-size: 11px; font-weight: 800; color: var(--sp-green-600); display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.sp-iconbtn {
+    position: relative; width: 38px; height: 38px; border-radius: 12px; background: #fff; border: none; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; color: var(--sp-slate-500); font-size: 14px; cursor: pointer;
+}
+.sp-iconbtn-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--sp-rose); border: 2px solid #fff; }
+.sp-iconbtn-count {
+    position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; border-radius: 999px; background: var(--sp-rose); color: #fff;
+    font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid var(--sp-bg);
+}
+.sp-avatar-btn {
+    width: 38px; height: 38px; border-radius: 50%; background: var(--sp-navy); color: #fff; border: none; flex-shrink: 0;
+    font-size: 14px; font-weight: 800; cursor: pointer; font-family: inherit;
+}
+
+/* Floating dock */
+.sp-dock {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 950;
+    width: min(320px, calc(100% - 32px)); height: 64px; background: #fff; border-radius: 24px;
+    box-shadow: 0 12px 30px -12px rgba(15, 23, 42, .35), 0 0 0 1px rgba(15, 23, 42, .04);
+    display: flex; align-items: center; justify-content: space-around; padding: 0 8px; font-family: var(--sp-font);
+}
+.sp-dock-item {
+    width: 52px; height: 46px; border-radius: 14px; border: none; background: transparent; color: var(--sp-slate-400);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; cursor: pointer; font-family: inherit;
+}
+.sp-dock-item i { font-size: 16px; }
+.sp-dock-item span { font-size: 10px; font-weight: 700; }
+.sp-dock-item.is-active { color: var(--sp-green); background: #10b98118; }
+.sp-dock-plus {
+    width: 50px; height: 50px; border-radius: 17px; border: none; background: var(--sp-navy); color: #fff; font-size: 18px; cursor: pointer;
+    box-shadow: 0 10px 20px -10px rgba(15, 23, 42, .6);
+}
+
+/* Bottom sheets */
+.sp-scrim { position: fixed; inset: 0; z-index: 1050; background: rgba(15, 23, 42, .45); display: flex; align-items: flex-end; justify-content: center; font-family: var(--sp-font); }
+.sp-scrim.is-danger { background: rgba(15, 23, 42, .55); }
+.sp-sheet {
+    width: 100%; max-width: 440px; max-height: 92vh; overflow-y: auto; background: var(--sp-bg); color: var(--sp-navy);
+    border-radius: 28px 28px 0 0; padding: 12px 20px 22px; box-sizing: border-box;
+}
+.sp-sheet * { box-sizing: border-box; }
+.sp-sheet-grab { width: 40px; height: 5px; border-radius: 999px; background: var(--sp-slate-300); margin: 0 auto 14px; }
+.sp-sheet-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 4px; }
+.sp-sheet-title { font-size: 17px; font-weight: 800; color: var(--sp-navy); }
+.sp-sheet-sub { font-size: 12px; font-weight: 600; color: var(--sp-slate-500); margin-bottom: 14px; line-height: 1.45; }
+.sp-sheet-close { margin-left: auto; width: 32px; height: 32px; border-radius: 10px; border: none; background: #fff; color: var(--sp-slate-500); cursor: pointer; flex-shrink: 0; }
+.sp-sheet-foot { display: flex; gap: 8px; margin-top: 14px; }
+.sp-sheet-foot .sp-btn { height: 50px; font-size: 14px; }
+.sp-btn-cancel { flex: 1; background: #fff; color: var(--sp-slate-500); }
+.sp-btn-grow { flex: 1.6; }
+
+/* White card of rows (settings lists, profile, form rows) */
+.sp-rowcard { background: #fff; border-radius: 18px; padding: 2px 14px; margin-bottom: 12px; }
+.sp-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; min-height: 44px; }
+.sp-row + .sp-row { border-top: 1px solid var(--sp-slate-100); }
+.sp-row-label { font-size: 13px; font-weight: 600; color: var(--sp-slate-500); }
+.sp-row-value { margin-left: auto; font-size: 14px; font-weight: 700; color: var(--sp-navy); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sp-row-main { flex: 1; min-width: 0; }
+.sp-row-title { font-size: 14px; font-weight: 700; color: var(--sp-navy); }
+.sp-row-sub { font-size: 12px; font-weight: 600; color: var(--sp-slate-400); }
+.sp-row-input { margin-left: auto; border: none; outline: none; background: transparent; text-align: right; font-size: 14px; font-weight: 700; color: var(--sp-navy); font-family: inherit; min-width: 0; flex: 1; color-scheme: light; }
+.sp-row-btn { border: none; background: none; color: var(--sp-slate-400); cursor: pointer; font-size: 13px; padding: 4px; }
+.sp-section-label { font-size: 11px; font-weight: 800; color: var(--sp-slate-500); letter-spacing: .06em; text-transform: uppercase; margin: 14px 4px 8px; }
+
+/* Toggle switch */
+.sp-switch { width: 40px; height: 22px; border-radius: 11px; border: none; background: var(--sp-slate-200); cursor: pointer; padding: 2px; flex-shrink: 0; }
+.sp-switch span { display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); transition: transform .15s; }
+.sp-switch.is-on { background: var(--sp-green); }
+.sp-switch.is-on span { transform: translateX(18px); }
+
+/* Pop-up messages (replace the old full-width banners) */
+.sp-toasts { padding: 0 16px; display: flex; flex-direction: column; gap: 8px; }
+.sp-toast {
+    display: flex; align-items: center; gap: 10px; background: var(--sp-navy); color: #fff; border-radius: 16px; padding: 10px 10px 10px 10px;
+    font-family: var(--sp-font); box-shadow: 0 12px 24px -14px rgba(15, 23, 42, .6);
+}
+.sp-toast-tile { width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; }
+.sp-toast-ok .sp-toast-tile { background: #10b98126; color: #34d399; }
+.sp-toast-warn .sp-toast-tile { background: #f59e0b26; color: #fbbf24; }
+.sp-toast-err .sp-toast-tile { background: #e11d4833; color: #fb7185; }
+.sp-toast-info .sp-toast-tile { background: #6366f133; color: #a5b4fc; }
+.sp-toast-body { flex: 1; min-width: 0; }
+.sp-toast-title { font-size: 12px; font-weight: 800; }
+.sp-toast-text { font-size: 11px; font-weight: 600; color: var(--sp-slate-300); line-height: 1.4; }
+.sp-toast-action { border: none; background: #ffffff1a; color: #fff; font-size: 11px; font-weight: 800; border-radius: 9px; padding: 7px 10px; cursor: pointer; white-space: nowrap; font-family: inherit; }
+.sp-toast-x { border: none; background: none; color: var(--sp-slate-400); cursor: pointer; padding: 4px 6px; font-size: 12px; }
+
+/* Secondary-screen back bar */
+.sp-backbar { display: flex; align-items: center; gap: 8px; padding: 6px 16px 0; font-family: var(--sp-font); }
+.sp-backbtn { width: 36px; height: 36px; border-radius: 12px; border: none; background: #fff; color: var(--sp-navy); cursor: pointer; font-size: 14px; }
+.sp-backbar-title { font-size: 13px; font-weight: 700; color: var(--sp-slate-500); }
+
+/* More screen */
+.sp-page { padding: 4px 20px 0; font-family: var(--sp-font); color: var(--sp-navy); }
+.sp-page-kicker { font-size: 13px; color: var(--sp-slate-500); font-weight: 600; }
+.sp-page-title { margin: 2px 0 14px; font-size: 24px; font-weight: 800; letter-spacing: -.02em; color: var(--sp-navy); }
+.sp-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.sp-tileitem {
+    background: #fff; border-radius: 18px; border: none; padding: 14px 8px 12px; cursor: pointer; font-family: inherit;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.sp-tileitem-icon { width: 40px; height: 40px; border-radius: 13px; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.sp-tileitem-label { font-size: 12px; font-weight: 700; color: var(--sp-navy); }
+
+/* Quick-add sheet actions */
+.sp-quick { display: flex; flex-direction: column; gap: 8px; }
+.sp-quick-item { display: flex; align-items: center; gap: 12px; background: #fff; border: none; border-radius: 16px; padding: 12px 14px; cursor: pointer; font-family: inherit; text-align: left; }
+
+/* Inline confirm (destructive actions) */
+.sp-confirm { background: #fff1f2; border: 1px solid #fecdd3; border-radius: 14px; padding: 12px; margin-top: 8px; }
+.sp-confirm-text { display: flex; gap: 8px; font-size: 12px; font-weight: 700; color: #9f1239; line-height: 1.45; }
+.sp-confirm-btns { display: flex; gap: 8px; margin-top: 10px; }
+.sp-confirm-btns button { flex: 1; height: 40px; border-radius: 12px; border: none; font-size: 13px; font-weight: 800; cursor: pointer; font-family: inherit; }
+.sp-confirm-keep { background: #fff; color: var(--sp-slate-600); }
+.sp-confirm-go { background: var(--sp-rose); color: #fff; }
+
+@media print {
+    .sp-top, .sp-dock, .sp-toasts, .sp-backbar { display: none !important; }
+}
