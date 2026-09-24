@@ -1,0 +1,190 @@
+/* Spendly redesign — design tokens + components.
+   Everything is scoped under .sp-* classes so existing (Bootstrap) screens are untouched
+   until each redesign phase moves them over. */
+
+:root {
+    --sp-navy: #0f172a;
+    --sp-navy-2: #1e293b;
+    --sp-slate-600: #475569;
+    --sp-slate-500: #64748b;
+    --sp-slate-400: #94a3b8;
+    --sp-slate-300: #cbd5e1;
+    --sp-slate-200: #e2e8f0;
+    --sp-slate-100: #f1f5f9;
+    --sp-slate-50: #f8fafc;
+    --sp-bg: #eef1f5;
+    --sp-card: #ffffff;
+    --sp-green: #10b981;
+    --sp-green-ink: #06281c;
+    --sp-green-700: #15803d;
+    --sp-green-600: #16a34a;
+    --sp-green-link: #059669;
+    --sp-green-tint: #dcfce7;
+    --sp-green-ring: #86efac;
+    --sp-rose: #e11d48;
+    --sp-rose-700: #be123c;
+    --sp-rose-tint: #fee2e2;
+    --sp-rose-ring: #fda4af;
+    --sp-amber: #d97706;
+    --sp-amber-ink: #92400e;
+    --sp-amber-tint: #fffbeb;
+    --sp-amber-line: #fde68a;
+    --sp-indigo: #4f46e5;
+    --sp-indigo-tint: #eef2ff;
+    --sp-font: 'Plus Jakarta Sans', system-ui, sans-serif;
+}
+
+/* ---------- Auth / gate layout (Phase 1) ---------- */
+.sp-auth {
+    min-height: 100vh;
+    background: var(--sp-bg);
+    font-family: var(--sp-font);
+    color: var(--sp-navy);
+    display: flex;
+    justify-content: center;
+}
+.sp-auth * { box-sizing: border-box; }
+.sp-auth-col { width: 100%; max-width: 420px; display: flex; flex-direction: column; }
+.sp-auth-head {
+    background: var(--sp-navy);
+    border-radius: 0 0 34px 34px;
+    padding: 34px 24px 58px;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+.sp-auth-logo { border-radius: 20px; box-shadow: 0 12px 28px -10px rgba(16, 185, 129, .6); }
+.sp-auth-title { font-size: 26px; font-weight: 800; letter-spacing: -.02em; margin-top: 16px; }
+.sp-auth-tagline { font-size: 13px; color: var(--sp-slate-300); font-weight: 500; line-height: 1.5; margin-top: 6px; max-width: 260px; }
+.sp-auth-icon {
+    width: 68px; height: 68px; border-radius: 20px;
+    background: var(--sp-green); color: var(--sp-green-ink);
+    display: flex; align-items: center; justify-content: center; font-size: 26px;
+    box-shadow: 0 12px 28px -10px rgba(16, 185, 129, .6);
+}
+.sp-card {
+    margin: -36px 16px 0;
+    background: var(--sp-card);
+    border-radius: 26px;
+    padding: 18px 18px 20px;
+    box-shadow: 0 20px 40px -24px rgba(15, 23, 42, .35);
+}
+.sp-auth-foot { display: flex; justify-content: center; padding: 18px 16px 26px; }
+.sp-auth-foot-link { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--sp-slate-500); cursor: pointer; background: none; border: none; font-family: inherit; }
+.sp-auth-foot-link strong { color: var(--sp-navy); font-weight: 700; }
+
+/* Full-screen loading (signing in, checking cloud) */
+.sp-loading {
+    min-height: 100vh; background: var(--sp-navy); color: #fff; font-family: var(--sp-font);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 24px;
+}
+.sp-loading-title { font-size: 15px; font-weight: 800; }
+.sp-loading-sub { font-size: 12px; color: var(--sp-slate-400); font-weight: 600; margin-top: -8px; }
+.sp-spin { font-size: 20px; color: var(--sp-green); }
+
+.sp-form { font-family: var(--sp-font); color: var(--sp-navy); }
+.sp-form * { box-sizing: border-box; }
+
+/* Segmented tabs */
+.sp-tabs { display: flex; background: var(--sp-slate-100); border-radius: 14px; padding: 4px; margin-bottom: 18px; }
+.sp-tab {
+    flex: 1; text-align: center; padding: 10px 0; border-radius: 11px; font-size: 13px; font-weight: 800;
+    cursor: pointer; background: transparent; color: var(--sp-slate-500); border: none; font-family: inherit;
+}
+.sp-tab.is-active { background: #fff; color: var(--sp-navy); box-shadow: 0 1px 3px rgba(15, 23, 42, .1); }
+
+/* Fields */
+.sp-label { font-size: 11px; font-weight: 800; color: var(--sp-slate-500); letter-spacing: .05em; margin: 0 2px 6px; text-transform: uppercase; }
+.sp-field {
+    display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 14px;
+    background: var(--sp-slate-100); border-radius: 14px; margin-bottom: 12px;
+}
+.sp-field.is-ok { box-shadow: inset 0 0 0 2px var(--sp-green-ring); }
+.sp-field.is-bad { box-shadow: inset 0 0 0 2px var(--sp-rose-ring); }
+.sp-field > i.sp-field-icon { color: var(--sp-slate-400); font-size: 13px; width: 14px; text-align: center; flex-shrink: 0; }
+.sp-field input {
+    flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+    font-size: 14px; font-weight: 600; color: var(--sp-navy); font-family: inherit; color-scheme: light;
+}
+/* Edge/IE draw their own reveal/clear buttons inside password/text inputs — we have our own eye toggle */
+.sp-field input::-ms-reveal, .sp-field input::-ms-clear { display: none; }
+.sp-field-eye { color: var(--sp-slate-400); font-size: 13px; cursor: pointer; padding: 6px; background: none; border: none; }
+.sp-input {
+    width: 100%; height: 50px; border: none; background: var(--sp-slate-100); border-radius: 14px; padding: 0 14px;
+    font-size: 14px; font-weight: 600; color: var(--sp-navy); outline: none; font-family: inherit; color-scheme: light;
+}
+.sp-textarea {
+    width: 100%; border: none; background: var(--sp-slate-100); border-radius: 14px; padding: 12px 14px;
+    font-size: 14px; font-weight: 600; color: var(--sp-navy); outline: none; font-family: inherit; resize: none; line-height: 1.45; color-scheme: light;
+}
+.sp-hint { font-size: 10px; color: var(--sp-slate-400); font-weight: 600; }
+
+/* Buttons */
+.sp-btn {
+    width: 100%; height: 52px; border: none; border-radius: 16px; font-size: 15px; font-weight: 800; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit;
+}
+.sp-btn:disabled { opacity: .6; cursor: default; }
+.sp-btn-primary { background: var(--sp-green); color: var(--sp-green-ink); box-shadow: 0 10px 20px -10px rgba(16, 185, 129, .7); }
+.sp-btn-dark { background: var(--sp-navy); color: #fff; }
+.sp-btn-soft { background: var(--sp-slate-100); color: var(--sp-navy); font-size: 13px; font-weight: 700; height: 48px; border-radius: 14px; }
+.sp-btn-dark.sp-btn-sm { font-size: 13px; height: 48px; border-radius: 14px; }
+.sp-btn-row { display: flex; gap: 8px; width: 100%; }
+.sp-link { font-size: 12px; font-weight: 700; color: var(--sp-green-link); cursor: pointer; background: none; border: none; padding: 0; font-family: inherit; }
+.sp-back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--sp-slate-500); cursor: pointer; margin-bottom: 12px; background: none; border: none; padding: 0; font-family: inherit; }
+.sp-divider { display: flex; align-items: center; gap: 10px; margin: 16px 0 12px; }
+.sp-divider::before, .sp-divider::after { content: ''; flex: 1; height: 1px; background: var(--sp-slate-200); }
+.sp-divider span { font-size: 11px; font-weight: 700; color: var(--sp-slate-400); }
+.sp-social { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.sp-social button {
+    height: 48px; border: 1px solid var(--sp-slate-200); border-radius: 14px; background: #fff; color: var(--sp-navy);
+    font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit;
+}
+.sp-social button:disabled { opacity: .6; cursor: default; }
+
+/* Checkbox row (Remember me, TOFU confirm) */
+.sp-check { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--sp-slate-500); cursor: pointer; user-select: none; }
+.sp-check input { width: 16px; height: 16px; accent-color: var(--sp-green); cursor: pointer; }
+
+/* Alerts */
+.sp-alert { border-radius: 12px; padding: 9px 12px; font-size: 12px; font-weight: 700; display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; line-height: 1.45; }
+.sp-alert > i { margin-top: 2px; flex-shrink: 0; }
+.sp-alert-err { background: var(--sp-rose-tint); color: var(--sp-rose-700); }
+.sp-alert-ok { background: var(--sp-green-tint); color: var(--sp-green-700); }
+.sp-alert-warn { background: var(--sp-amber-tint); color: var(--sp-amber-ink); border: 1px solid var(--sp-amber-line); }
+.sp-alert-info { background: var(--sp-indigo-tint); color: var(--sp-indigo); }
+
+/* Headings inside a card */
+.sp-card-title { font-size: 18px; font-weight: 800; color: var(--sp-navy); }
+.sp-card-sub { font-size: 13px; color: var(--sp-slate-500); font-weight: 500; line-height: 1.5; margin: 4px 0 16px; }
+.sp-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.sp-tile { width: 36px; height: 36px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; }
+.sp-tile-indigo { background: var(--sp-indigo-tint); color: var(--sp-indigo); }
+.sp-tile-green { background: var(--sp-green-tint); color: var(--sp-green-600); }
+.sp-card-head-title { font-size: 15px; font-weight: 800; color: var(--sp-navy); }
+.sp-card-head-sub { font-size: 11px; color: var(--sp-slate-400); font-weight: 600; }
+.sp-done { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 8px 4px 4px; }
+.sp-done-tile { width: 56px; height: 56px; border-radius: 18px; background: var(--sp-green-tint); color: var(--sp-green-600); display: flex; align-items: center; justify-content: center; font-size: 22px; }
+
+/* Topic chips (Contact us) */
+.sp-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+.sp-chip { font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 999px; cursor: pointer; background: #fff; color: var(--sp-slate-600); border: 1px solid var(--sp-slate-200); font-family: inherit; }
+.sp-chip.is-active { background: var(--sp-navy); color: #fff; border-color: var(--sp-navy); }
+
+/* Selectable option rows (storage picker) */
+.sp-options { background: var(--sp-slate-50); border-radius: 16px; overflow: hidden; margin-bottom: 12px; }
+.sp-option { display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; background: none; border: none; width: 100%; text-align: left; font-family: inherit; }
+.sp-option + .sp-option { border-top: 1px solid var(--sp-slate-200); }
+.sp-option:disabled { cursor: default; opacity: .55; }
+.sp-option-tile { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+.sp-option-label { font-size: 14px; font-weight: 700; color: var(--sp-navy); }
+.sp-option-sub { font-size: 12px; font-weight: 600; color: var(--sp-slate-400); }
+.sp-option-check { margin-left: auto; font-size: 18px; }
+
+/* Summary box (cloud restore) */
+.sp-stat { background: var(--sp-green-tint); border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; }
+.sp-stat-title { font-size: 13px; font-weight: 800; color: var(--sp-green-700); }
+.sp-stat-sub { font-size: 12px; font-weight: 600; color: var(--sp-green-600); margin-top: 2px; }
+.sp-footnote { font-size: 11px; color: var(--sp-slate-400); font-weight: 600; text-align: center; margin-top: 10px; }
