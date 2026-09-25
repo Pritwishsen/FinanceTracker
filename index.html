@@ -429,55 +429,6 @@ const SyncConflicts = {
     }
 };
 
-// Generic diff + resolve modal for a tie-conflict, shared across every list screen. Shows
-// only the fields that actually differ, using the caller's field-label map and optional
-// per-field formatter. "Keep Local"/"Use Cloud Instead" both call back into the caller,
-// which is responsible for the actual DataService.update* call — that stamps a fresh
-// updatedAt, which is what breaks the tie so the flag self-heals on the next merge.
-function SyncConflictModal({ localRecord, cloudSnapshot, fieldLabels = {}, formatValue, metaKeys, onKeepLocal, onUseCloud, onClose }) {
-    if (!localRecord || !cloudSnapshot) return null;
-    const skip = metaKeys || ['id', 'createdAt', 'updatedAt'];
-    const defaultFormat = (key, value) => {
-        if (value === undefined || value === null || value === '') return '—';
-        if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
-        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-        if (typeof value === 'object') return 'Complex data — differs';
-        return String(value);
-    };
-    const format = (key, value, record) => (formatValue ? formatValue(key, value, record) : defaultFormat(key, value));
-    const keys = new Set([...Object.keys(localRecord), ...Object.keys(cloudSnapshot)]);
-    const diffRows = [...keys].filter(k => !skip.includes(k) && JSON.stringify(localRecord[k]) !== JSON.stringify(cloudSnapshot[k]));
-    return (
-        <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-            <div className="modal-dialog modal-dialog-centered">
-                <div className="modal-content">
-                    <div className="modal-header"><h5 className="modal-title"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync Conflict</h5></div>
-                    <div className="modal-body">
-                        <p>This record was saved at the same time on this device and in the cloud, but the details differ. The local version is currently shown — review the differences below and choose which one to keep.</p>
-                        <table className="table table-sm">
-                            <thead><tr><th></th><th>This device</th><th>Cloud</th></tr></thead>
-                            <tbody>
-                                {diffRows.map(k => (
-                                    <tr key={k}>
-                                        <td>{fieldLabels[k] || k}</td>
-                                        <td>{format(k, localRecord[k], localRecord)}</td>
-                                        <td>{format(k, cloudSnapshot[k], cloudSnapshot)}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                    <div className="modal-footer">
-                        <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
-                        <button type="button" className="btn btn-outline-primary" onClick={onUseCloud}>Use Cloud Instead</button>
-                        <button type="button" className="btn btn-primary" onClick={onKeepLocal}>Keep Local</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
 // ── Redesign: shared list / form helpers (Phase 2) ──────────────────────────
 const SP_CAT_LOOKS = [['#dcfce7', '#16a34a'], ['#dbeafe', '#2563eb'], ['#ffedd5', '#ea580c'], ['#fef3c7', '#d97706'], ['#fae8ff', '#c026d3'], ['#e0e7ff', '#4f46e5'], ['#fee2e2', '#e11d48'], ['#e0f2fe', '#0284c7'], ['#fce7f3', '#db2777'], ['#ccfbf1', '#0d9488'], ['#ede9fe', '#7c3aed']];
 const SP_CAT_ICON_GUESS = [
@@ -505,7 +456,7 @@ function spDayLabel(dateStr) {
     return ValidationUtils.formatDate(dateStr);
 }
 
-// Inline version of SyncConflictModal (same diff rule); the caller still does the resolve.
+// Inline compare panel for a sync conflict: shows only the fields that differ; the caller does the resolve.
 function ConflictCompare({ localRecord, cloudSnapshot, detectedAt, fieldLabels = {}, formatValue, metaKeys, onKeepLocal, onUseCloud }) {
     if (!localRecord || !cloudSnapshot) return null;
     const skip = metaKeys || ['id', 'createdAt', 'updatedAt'];
@@ -524,11 +475,11 @@ function ConflictCompare({ localRecord, cloudSnapshot, detectedAt, fieldLabels =
             <div className="sp-cf-head">
                 <i className="fas fa-code-compare" style={{color: '#4f46e5', fontSize: '12px'}}></i>
                 <div style={{flex: 1, minWidth: 0}}>
-                    <div className="sp-cf-title">Local and cloud copies differ</div>
-                    <div className="sp-cf-when">{detectedAt ? 'Found ' + new Date(detectedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Showing the version on this device'}</div>
+                    <div className="sp-cf-title">Two versions of this record</div>
+                    <div className="sp-cf-when">{detectedAt ? 'Changed in two places · found ' + new Date(detectedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Showing the version on this device'}</div>
                 </div>
             </div>
-            <div className="sp-cf-grid sp-cf-cols"><span></span><span>THIS DEVICE</span><span>CLOUD</span></div>
+            <div className="sp-cf-grid sp-cf-cols"><span></span><span>SAVED</span><span>OTHER VERSION</span></div>
             {diffRows.map(k => (
                 <div key={k} className="sp-cf-grid sp-cf-row">
                     <span className="sp-cf-label">{fieldLabels[k] || k}</span>
@@ -537,8 +488,8 @@ function ConflictCompare({ localRecord, cloudSnapshot, detectedAt, fieldLabels =
                 </div>
             ))}
             <div className="sp-cf-btns">
-                <button type="button" className="sp-cf-keep" onClick={onKeepLocal}>Keep local version</button>
-                <button type="button" className="sp-cf-cloudbtn" onClick={onUseCloud}>Update to cloud</button>
+                <button type="button" className="sp-cf-keep" onClick={onKeepLocal}>Keep saved version</button>
+                <button type="button" className="sp-cf-cloudbtn" onClick={onUseCloud}>Use other version</button>
             </div>
         </div>
     );
@@ -1342,7 +1293,7 @@ class DataService {
         const duplicate = this.data.settings.people.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
         if (duplicate) throw new Error('A person with this name already exists');
         if (isDefault) this.data.settings.people.forEach(p => { p.isDefault = false; });
-        const person = { id: DataService._uniqueId(), name: trimmed, relationship: (relationship || '').trim(), isDefault: !!isDefault, systemManaged: !!systemManaged };
+        const person = { id: DataService._uniqueId(), name: trimmed, relationship: (relationship || '').trim(), isDefault: !!isDefault, systemManaged: !!systemManaged, updatedAt: new Date().toISOString() };
         this.data.settings.people.push(person);
         this.saveSettings();
         return person;
@@ -1367,6 +1318,7 @@ class DataService {
         } else if (updates.isDefault === false) {
             person.isDefault = false;
         }
+        person.updatedAt = new Date().toISOString();
         this.saveSettings();
         return person;
     }
@@ -1376,6 +1328,7 @@ class DataService {
         if (index === -1) return null;
         const deleted = this.data.settings.people.splice(index, 1)[0];
         this.saveSettings();
+        this.recordDeletion('people', id);
         return deleted;
     }
     static getCustomCurrencies() { return this.data.settings.customCurrencies || []; }
@@ -1400,6 +1353,7 @@ class DataService {
     static deleteCustomCurrency(id) {
         this.data.settings.customCurrencies = this.getCustomCurrencies().filter(c => c.id !== id);
         this.saveSettings();
+        this.recordDeletion('customCurrencies', id);
     }
     // How many records use a currency code. An added currency can only be deleted at 0 (register #13).
     static countCurrencyUsage(code) {
@@ -2404,7 +2358,18 @@ class DataService {
             }
             return false;
         };
-        const mergeById = (localArr, cloudArr, conflictsOut) => {
+        // Net Worth items keep a per-item history; both copies' entries are kept (by entry id,
+        // in date order) so a top-up on one device and a valuation on the other both survive.
+        const unionHistory = (x, y) => {
+            const byId = new Map();
+            [...(x || []), ...(y || [])].forEach(h => { if (h && h.id != null && !byId.has(String(h.id))) byId.set(String(h.id), h); });
+            return Array.from(byId.values()).sort((p, q) => String(p.date || '').localeCompare(String(q.date || '')) || Number(p.id) - Number(q.id));
+        };
+        // This device's last successful cloud sync. A record whose local AND cloud copies were both
+        // saved after it was changed on two devices in between — the newer copy is still kept, but
+        // the other one is recorded as a conflict instead of being dropped silently.
+        const lastSyncMs = (() => { try { const v = localStorage.getItem('financeApp_lastCloudSync'); const ms = v ? new Date(v).getTime() : 0; return isNaN(ms) ? 0 : ms; } catch (_) { return 0; } })();
+        const mergeById = (localArr, cloudArr, conflictsOut, opts = {}) => {
             const a = Array.isArray(localArr) ? localArr : [];
             const b = Array.isArray(cloudArr) ? cloudArr : [];
             const map = new Map();
@@ -2416,13 +2381,38 @@ class DataService {
                 if (!cloudItem) { map.set(key, item); continue; }
                 const lt = new Date(item.updatedAt || item.createdAt || 0).getTime();
                 const ct = new Date(cloudItem.updatedAt || cloudItem.createdAt || 0).getTime();
-                if (lt === ct && conflictsOut && contentDiffers(item, cloudItem)) {
-                    const { id, createdAt, updatedAt, ...cloudContent } = cloudItem;
-                    conflictsOut[key] = { cloudSnapshot: cloudContent, detectedAt: new Date().toISOString() };
+                let winner = lt >= ct ? item : cloudItem;
+                let other = lt >= ct ? cloudItem : item;
+                if (opts.history && (item.history || cloudItem.history)) {
+                    const history = unionHistory(item.history, cloudItem.history);
+                    winner = { ...winner, history };
+                    other = { ...other, history };
                 }
-                if (lt >= ct) map.set(key, item);
+                if (conflictsOut) {
+                    const tie = lt === ct;
+                    const bothEdited = !tie && lastSyncMs > 0 && lt > lastSyncMs && ct > lastSyncMs;
+                    if ((tie || bothEdited) && contentDiffers(winner, other)) {
+                        const { id, createdAt, updatedAt, ...otherContent } = other;
+                        conflictsOut[key] = { cloudSnapshot: otherContent, detectedAt: new Date().toISOString(), ...(bothEdited ? { concurrent: true } : {}) };
+                    }
+                }
+                map.set(key, winner);
             }
             return Array.from(map.values());
+        };
+        // People and added currencies live inside the settings blob. They're merged item by item
+        // (newer edit wins, duplicates by name/code dropped) so one device can't wipe the other's.
+        const mergeSettingsList = (baseArr, otherArr, sameKey) => {
+            const out = (Array.isArray(baseArr) ? baseArr : []).slice();
+            const stamp = (x) => new Date(x.updatedAt || x.rateUpdatedAt || x.createdAt || 0).getTime();
+            for (const item of (Array.isArray(otherArr) ? otherArr : [])) {
+                if (!item || item.id == null) continue;
+                const i = out.findIndex(x => x && String(x.id) === String(item.id));
+                if (i !== -1) { if (stamp(item) > stamp(out[i])) out[i] = item; continue; }
+                if (out.some(x => x && sameKey(x, item))) continue;
+                out.push(item);
+            }
+            return out;
         };
         const mergeDeletionLogs = (l, c) => {
             const lo = l || {}, co = c || {}, out = {};
@@ -2444,12 +2434,25 @@ class DataService {
         const allConflicts = {};
         ['expenses','income','goals','bills','recurring','debts','netWorthHistory','categories','assetCategories','liabilityCategories','networth','bankAccounts','transfers','reconciliations'].forEach(k => {
             const bucket = CONFLICT_COLLECTIONS.has(k) ? {} : null;
-            merged[k] = mergeById(ld[k], cd[k], bucket);
+            merged[k] = mergeById(ld[k], cd[k], bucket, { history: k === 'networth' });
             if (bucket) allConflicts[k] = bucket;
         });
         // Conflict info is deliberately kept out of `merged`/the backup payload — it's a
         // derived, local-only UI hint recomputed fresh on every merge (self-healing), and
         // must never affect the addedNothingNew check below or get uploaded to the cloud.
+        // Exception: a "changed on both devices" conflict can only be detected once (the next
+        // sync moves lastCloudSync past both edits), so it is carried forward until the user
+        // resolves it, the record goes away, or the two versions become identical.
+        try {
+            const prev = JSON.parse(localStorage.getItem('financeApp_syncConflicts') || '{}') || {};
+            Object.keys(allConflicts).forEach(k => {
+                Object.entries(prev[k] || {}).forEach(([id, entry]) => {
+                    if (!entry || !entry.concurrent || allConflicts[k][id]) return;
+                    const rec = (merged[k] || []).find(r => r && String(r.id) === id);
+                    if (rec && contentDiffers(rec, entry.cloudSnapshot)) allConflicts[k][id] = entry;
+                });
+            });
+        } catch (_) { /* best-effort */ }
         localStorage.setItem('financeApp_syncConflicts', JSON.stringify(allConflicts));
         // Apply merged deletion log — items deleted on either device are removed
         const deletionLog = mergeDeletionLogs(ld._deletionLog, cd._deletionLog);
@@ -2458,6 +2461,9 @@ class DataService {
                 merged[key] = merged[key].filter(item => !deletionLog[key][String(item.id)]);
             }
         });
+        // A conflict on a record that was deleted on either device is moot.
+        Object.keys(allConflicts).forEach(k => { if (deletionLog[k]) Object.keys(allConflicts[k]).forEach(id => { if (deletionLog[k][id]) delete allConflicts[k][id]; }); });
+        localStorage.setItem('financeApp_syncConflicts', JSON.stringify(allConflicts));
         merged._deletionLog = deletionLog;
         // mergeById's union order is cloud-items-then-local-only-items, not chronological —
         // the history table reads adjacent entries as consecutive-in-time, so restore date order
@@ -2465,6 +2471,20 @@ class DataService {
         // For scalar blobs (settings, notifSettings), prefer the newer backup's version
         const cloudNewer = getBackupTimestamp(cloudBackup) >= getBackupTimestamp(localBackup);
         if (!cloudNewer) { if (ld.settings) merged.settings = ld.settings; if (ld.notifSettings) merged.notifSettings = ld.notifSettings; }
+        // Scalar settings (default currency, display name, backup options…) still follow the newer
+        // backup; the people and added-currency lists are merged from both sides.
+        if (ld.settings && cd.settings) {
+            const base = cloudNewer ? cd.settings : ld.settings;
+            const other = cloudNewer ? ld.settings : cd.settings;
+            const sameName = (x, y) => String(x.name || '').toLowerCase() === String(y.name || '').toLowerCase() || (x.systemManaged && y.systemManaged);
+            const sameCode = (x, y) => String(x.code || '').toUpperCase() === String(y.code || '').toUpperCase();
+            const gone = (type) => (id) => !(deletionLog[type] && deletionLog[type][String(id)]);
+            const people = mergeSettingsList(base.people, other.people, sameName).filter(p => gone('people')(p.id));
+            const customCurrencies = mergeSettingsList(base.customCurrencies, other.customCurrencies, sameCode).filter(c => gone('customCurrencies')(c.id));
+            merged.settings = { ...base };
+            if (base.people || other.people) merged.settings.people = people;
+            if (base.customCurrencies || other.customCurrencies) merged.settings.customCurrencies = customCurrencies;
+        }
         // Only advance the timestamp if the merge actually added something cloud didn't
         // already have — otherwise every no-op merge re-stamps "now" and looks newer to
         // the other device, triggering an unnecessary re-merge on its very next edit.
