@@ -766,3 +766,27 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 .sp-icongrid > button.is-active { border-color: var(--sp-navy); }
 .sp-catpage { padding-bottom: 90px; }
 .sp-subview .sp-budgetin { padding: 6px 8px; }
+
+/* ---------- Goals (Phase 7) ---------- */
+.sp-goalspage { padding-bottom: 90px; }
+.sp-goalform { background: #fff; border-radius: 20px; padding: 14px 16px 16px; margin-bottom: 14px; }
+.sp-goalform-title { font-size: 15px; font-weight: 800; color: var(--sp-navy); }
+.sp-goalform .sp-formrow + .sp-formrow, .sp-goalform .sp-formrow + .sp-formblock, .sp-goalform .sp-formblock + .sp-formrow { border-top: 1px solid var(--sp-slate-100); }
+.sp-formrow-hint { display: block; font-size: 11px; font-weight: 600; color: var(--sp-slate-400); white-space: normal; }
+.sp-curchips.is-light { justify-content: flex-end; margin-top: 0; }
+.sp-curchips.is-light .sp-curchip { background: var(--sp-slate-100); color: var(--sp-slate-600); }
+.sp-curchips.is-light .sp-curchip.is-active { background: var(--sp-navy); color: #fff; }
+.sp-goalcard { background: #fff; border-radius: 20px; padding: 16px; margin-bottom: 12px; }
+.sp-goalhead { display: flex; align-items: center; gap: 12px; }
+.sp-goalemoji { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 28px; flex-shrink: 0; }
+.sp-goalmain { flex: 1; min-width: 0; }
+.sp-goalamts { font-size: 13px; font-weight: 700; color: var(--sp-slate-400); margin-top: 2px; }
+.sp-goalbadges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; align-self: flex-start; }
+.sp-goalcur { background: var(--sp-slate-50); color: var(--sp-navy); font-size: 11px; font-weight: 800; padding: 4px 8px; border-radius: 8px; }
+.sp-goalpct { font-size: 12px; font-weight: 800; padding: 4px 9px; border-radius: 8px; }
+.sp-goalmeta { font-size: 12px; font-weight: 600; color: var(--sp-slate-400); margin-top: 8px; }
+.sp-goalnote { display: flex; align-items: flex-start; gap: 6px; font-size: 11px; font-weight: 600; color: var(--sp-slate-500); margin-top: 6px; line-height: 1.4; }
+.sp-goalnote i { color: var(--sp-slate-400); margin-top: 2px; font-size: 10px; }
+.sp-goalactions { display: flex; gap: 6px; margin-top: 12px; }
+.sp-goalactions input { flex: 1; min-width: 0; border: none; background: var(--sp-slate-50); border-radius: 12px; padding: 0 10px; height: 42px; font-size: 13px; font-weight: 600; color: var(--sp-navy); font-family: inherit; outline: none; color-scheme: light; }
+.sp-goaladd { border: none; color: #fff; border-radius: 12px; padding: 0 14px; height: 42px; font-size: 14px; font-weight: 800; cursor: pointer; font-family: inherit; }
