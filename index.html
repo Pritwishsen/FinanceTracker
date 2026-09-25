@@ -374,15 +374,6 @@ function getInitials(name) {
     const parts = trimmed.split(/\s+/);
     return (parts.length === 1 ? parts[0].charAt(0) : parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
 }
-// Renders the header pill / any other "who's active" label, using initials in place
-// of full names. 'own' maps to the user's display name's initials; past ~20 combined
-// characters (rare now that names are this short), collapses to "First +N".
-function formatActiveViewLabel(activeView, displayName) {
-    const names = (activeView.length ? activeView : ['own']).map(v => getInitials(v === 'own' ? (displayName || 'Own') : v));
-    const joined = names.join(', ');
-    if (joined.length <= 20 || names.length === 1) return joined;
-    return names[0] + ' +' + (names.length - 1);
-}
 // Date-only ("YYYY-MM-DD") helpers that never touch UTC/.toISOString() — every stored
 // transaction "date" field must represent the LOCAL calendar day, not the UTC one, which
 // new Date().toISOString().split('T')[0] silently gets wrong near local midnight (and
@@ -437,14 +428,6 @@ const SyncConflicts = {
         } catch (_) { /* best-effort */ }
     }
 };
-
-// Warning badge for a row whose local and cloud versions tied on timestamp but differ in
-// content (see SyncConflicts above). Shared across every list screen — only expense-list-
-// specific styling lived in `.expense-sync-conflict-icon` before; now generic `.sync-conflict-icon`.
-function SyncConflictBadge({ conflict, onClick }) {
-    if (!conflict) return null;
-    return <i className="fas fa-triangle-exclamation sync-conflict-icon" title="Local and cloud versions differ — showing local. Click for details." onClick={(e) => { e.stopPropagation(); onClick(); }}></i>;
-}
 
 // Generic diff + resolve modal for a tie-conflict, shared across every list screen. Shows
 // only the fields that actually differ, using the caller's field-label map and optional
@@ -593,7 +576,7 @@ function CurrencySheet({ value, onPick, onClose }) {
                 ))}
                 {list.length === 0 && <div className="sp-row"><span className="sp-row-sub">No currency matches “{q}”.</span></div>}
             </div>
-            <div className="sp-hint" style={{margin: '0 4px'}}>Need another currency? Add it in Settings → Currency.</div>
+            <div className="sp-hint" style={{margin: '0 4px'}}>Need another currency? Add it in More → Default currency.</div>
         </Sheet>
     );
 }
@@ -1417,6 +1400,13 @@ class DataService {
     static deleteCustomCurrency(id) {
         this.data.settings.customCurrencies = this.getCustomCurrencies().filter(c => c.id !== id);
         this.saveSettings();
+    }
+    // How many records use a currency code. An added currency can only be deleted at 0 (register #13).
+    static countCurrencyUsage(code) {
+        const uses = (list, pick = (r) => r.currency) => (list || []).filter(r => pick(r) === code).length;
+        return uses(this.data.expenses) + uses(this.data.income) + uses(this.getBankAccounts()) + uses(this.getNetWorthItems())
+            + uses(this.getGoals()) + uses(this.getBills()) + uses(this.getDebts())
+            + uses(this.getRecurring(), (r) => (r.templateExpense || {}).currency);
     }
     static refreshCustomCurrencySymbols() {
         const currencies = this.getCustomCurrencies();
@@ -2940,33 +2930,6 @@ function computeNextDue(fromDate, frequency) {
     return DateUtils.addToDateStr(fromStr, delta);
 }
 
-function Navigation({ currentScreen, onScreenChange }) {
-    const navItems = [
-        { key: 'expenses', icon: 'fas fa-list', label: 'Expenses' },
-        { key: 'add-expense', icon: 'fas fa-plus', label: 'Add' },
-        { key: 'categories', icon: 'fas fa-tags', label: 'Categories' },
-        { key: 'income', icon: 'fas fa-wallet', label: 'Income' },
-        { key: 'goals', icon: 'fas fa-piggy-bank', label: 'Goals' },
-        { key: 'manage', icon: 'fas fa-layer-group', label: 'Scheduled' },
-        { key: 'bulk-upload', icon: 'fas fa-upload', label: 'Upload' },
-        { key: 'networth', icon: 'fas fa-balance-scale', label: 'Net Worth' },
-        { key: 'export', icon: 'fas fa-file-export', label: 'Export' },
-        { key: 'trends', icon: 'fas fa-chart-line', label: 'Trends' },
-        { key: 'summary', icon: 'fas fa-chart-bar', label: 'Summary' },
-        { key: 'settings', icon: 'fas fa-cog', label: 'Settings' }
-    ];
-    return (
-        <nav className="bottom-navigation">
-            {navItems.map(item => (
-                <button key={item.key} className={'nav-item ' + (currentScreen === item.key ? 'active' : '')} onClick={() => onScreenChange(item.key)}>
-                    <i className={item.icon}></i>
-                    <span>{item.label}</span>
-                </button>
-            ))}
-        </nav>
-    );
-}
-
 function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null, activeView }) {
     const [people, setPeople] = useState([]);
     const [formData, setFormData] = useState(() => {
@@ -4265,7 +4228,7 @@ function CategoryManager({ categories, assetCategories, liabilityCategories, onU
                     <div className="sp-cathero-top"><span className="sp-hero-label">Total monthly budget · {whoName}</span><span className="sp-cathero-cur"><i className="fas fa-lock"></i>{defaultCurrency} · default</span></div>
                     <div className="sp-hero-value">{fmt0(totalBudget, heroCurrency)}</div>
                     <div className="sp-cathero-foot">
-                        <span>{budgetedCount} of {categories.length} categories budgeted · currency follows your default in Settings</span>
+                        <span>{budgetedCount} of {categories.length} categories budgeted · currency follows your default in More</span>
                         {budgetedCount > 0 && !askReset && <button type="button" className="sp-cathero-reset" onClick={() => setAskReset(true)}><i className="fas fa-rotate-left"></i>Reset all</button>}
                     </div>
                     {askReset && (
@@ -4845,102 +4808,6 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
         </div>
     );
 }
-
-// Draws a bar that grows upward from a baseline with rounded top corners and a
-// square bottom edge (per the app's chart mark spec — data-end rounded, baseline square).
-function verticalBarPath(x, yTop, w, h, r) {
-    if (h <= 0) return '';
-    const radius = Math.min(r, w / 2, h);
-    return `M ${x} ${yTop + h} L ${x} ${yTop + radius} Q ${x} ${yTop} ${x + radius} ${yTop} L ${x + w - radius} ${yTop} Q ${x + w} ${yTop} ${x + w} ${yTop + radius} L ${x + w} ${yTop + h} Z`;
-}
-const formatCompactAmount = (value, defaultCurrency) => {
-    const symbol = ValidationUtils.getCurrencySymbol(defaultCurrency);
-    return symbol + new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
-};
-
-// Grouped vertical bar chart: income vs expense across a series of periods (days,
-// a single month, or a run of months — the caller decides the bucketing and just
-// passes {label, income, expense} entries). Colors match the existing summary
-// cards above it (success green / danger red) so the same income/expense color
-// mapping is used everywhere on this screen. No Y-axis: every bar carries its own
-// value label instead, so the scale never needs a separate reference line/legend.
-function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both' }) {
-    const [hovered, setHovered] = useState(null); // { i, series } | null
-    const INCOME_COLOR = '#10b981', EXPENSE_COLOR = '#ef4444';
-    const showIncome = seriesFilter !== 'expense';
-    const showExpense = seriesFilter !== 'income';
-    const width = 340, height = 190;
-    const padding = { top: 20, right: 10, bottom: 22, left: 6 };
-    const plotWidth = width - padding.left - padding.right;
-    const plotHeight = height - padding.top - padding.bottom;
-    const visibleValues = months.flatMap(m => [showIncome ? m.income : null, showExpense ? m.expense : null]).filter(v => v !== null);
-    const rawMax = Math.max(1, ...visibleValues);
-    const groupWidth = plotWidth / months.length;
-    const singleSeries = !(showIncome && showExpense);
-    const barWidth = singleSeries ? Math.min(28, groupWidth - 10) : Math.min(20, groupWidth / 2 - 6);
-    const barGap = 3;
-    const yFor = (v) => padding.top + plotHeight - (v / rawMax) * plotHeight;
-    // Past ~6 months the bars get too narrow for their value labels, which start
-    // overlapping neighbors. Drop the always-on labels there and rely on the existing
-    // hover/tap tooltip (below) instead, rather than adding a horizontal-scroll chart.
-    const showLabels = months.length <= 6;
-
-    return (
-        <div style={{ position: 'relative' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
-                {showIncome && <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><span style={{ width: 10, height: 10, borderRadius: 2, background: INCOME_COLOR, display: 'inline-block' }}></span>Income</span>}
-                {showExpense && <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><span style={{ width: 10, height: 10, borderRadius: 2, background: EXPENSE_COLOR, display: 'inline-block' }}></span>Expense</span>}
-            </div>
-            <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}>
-                {months.map((m, i) => {
-                    const groupX = padding.left + i * groupWidth;
-                    const incomeX = singleSeries ? groupX + groupWidth / 2 - barWidth / 2 : groupX + groupWidth / 2 - barWidth - barGap / 2;
-                    const expenseX = singleSeries ? groupX + groupWidth / 2 - barWidth / 2 : groupX + groupWidth / 2 + barGap / 2;
-                    const incomeHovered = hovered && hovered.i === i && hovered.series === 'income';
-                    const expenseHovered = hovered && hovered.i === i && hovered.series === 'expense';
-                    return (
-                        <g key={i}>
-                            {showIncome && (
-                                <>
-                                    <path d={verticalBarPath(incomeX, yFor(m.income), barWidth, plotHeight - (yFor(m.income) - padding.top), 4)}
-                                        fill={INCOME_COLOR} opacity={incomeHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
-                                        onMouseEnter={() => setHovered({ i, series: 'income' })} onMouseLeave={() => setHovered(null)}
-                                        onFocus={() => setHovered({ i, series: 'income' })} onBlur={() => setHovered(null)} />
-                                    {showLabels && <text x={incomeX + barWidth / 2} y={yFor(m.income) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.income, defaultCurrency)}</text>}
-                                </>
-                            )}
-                            {showExpense && (
-                                <>
-                                    <path d={verticalBarPath(expenseX, yFor(m.expense), barWidth, plotHeight - (yFor(m.expense) - padding.top), 4)}
-                                        fill={EXPENSE_COLOR} opacity={expenseHovered ? 1 : 0.9} style={{ cursor: 'pointer' }} tabIndex={0}
-                                        onMouseEnter={() => setHovered({ i, series: 'expense' })} onMouseLeave={() => setHovered(null)}
-                                        onFocus={() => setHovered({ i, series: 'expense' })} onBlur={() => setHovered(null)} />
-                                    {showLabels && <text x={expenseX + barWidth / 2} y={yFor(m.expense) - 4} textAnchor="middle" fontSize="7.5" fill="#1f2937" fontWeight="600">{formatCompactAmount(m.expense, defaultCurrency)}</text>}
-                                </>
-                            )}
-                            <text x={groupX + groupWidth / 2} y={height - padding.bottom + 13} textAnchor="middle" fontSize="9" fill="#6b7280">{m.label}</text>
-                        </g>
-                    );
-                })}
-            </svg>
-            {hovered && (() => {
-                const m = months[hovered.i];
-                const val = hovered.series === 'income' ? m.income : m.expense;
-                const groupX = padding.left + hovered.i * groupWidth;
-                const leftPct = ((groupX + groupWidth / 2) / width) * 100;
-                const topPct = (yFor(val) / height) * 100;
-                return (
-                    <div style={{ position: 'absolute', left: leftPct + '%', top: topPct + '%', transform: 'translate(-50%, -110%)', background: '#1f2937', color: '#fff', padding: '0.3rem 0.55rem', borderRadius: '6px', fontSize: '0.72rem', pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 5 }}>
-                        <strong>{ValidationUtils.formatCurrency(val, defaultCurrency)}</strong> · {hovered.series === 'income' ? 'Income' : 'Expense'} · {m.label}
-                    </div>
-                );
-            })()}
-        </div>
-    );
-}
-
-
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 // Summary (home) helpers. Month keys are 'YYYY-MM' strings, compared as text.
 const spPerfColor = (pct) => pct > 110 ? '#e11d48' : pct > 100 ? '#f59e0b' : '#10b981';
@@ -6124,33 +5991,37 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
     );
 }
 
-function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled, onDisplayNameChange, categories, onUpdate }) {
+// Settings content shown under the More tiles (redesign Phase 11): default currency, active view +
+// people, then the Notifications / Storage & Back Up / Data & Privacy / Support accordion. Every save
+// path below is the one the old Settings screen used; only the layout changed.
+function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStoragePickerOpen, syncStatus, lastSyncTime, storagePreference: storagePref, onSyncNow, onReconnect, onViewHistory, activeView, onActiveViewChange, scrollTarget, onScrollTargetHandled, onUpdate }) {
     const activeViewSectionRef = React.useRef(null);
-    // Each section is collapsed by default; opening one closes any other (accordion,
-    // not independent toggles) so the screen doesn't grow unbounded again as sections
-    // are added — the whole point of this collapsing in the first place.
+    const storageSectionRef = React.useRef(null);
+    // One accordion section open at a time.
     const [expandedSection, setExpandedSection] = useState(null);
     const toggleSection = (id) => setExpandedSection(prev => prev === id ? null : id);
-    const renderSectionHeader = (id, iconClass, title, color) => (
-        <div onClick={() => toggleSection(id)} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer'}}>
-            <h5 style={{marginBottom: 0, color: color || '#4a6cf7'}}>
-                <i className={iconClass + ' me-2'}></i>{title}
-            </h5>
-            <i className={'fas fa-chevron-' + (expandedSection === id ? 'up' : 'down')} style={{color: '#adb5bd', fontSize: '0.85rem'}}></i>
-        </div>
-    );
-    // Delayed slightly so this fires after this screen's own async effects (people,
-    // backup history, settings) have settled, since scrolling before they load targets
-    // a position that content loading afterward could shift.
     useEffect(() => {
-        if (scrollTarget !== 'activeView') return;
-        setExpandedSection('activeView');
+        if (scrollTarget !== 'activeView' && scrollTarget !== 'storage') return;
+        if (scrollTarget === 'storage') setExpandedSection('storage');
         const timer = setTimeout(() => {
-            if (activeViewSectionRef.current) activeViewSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const el = scrollTarget === 'storage' ? storageSectionRef.current : activeViewSectionRef.current;
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
             if (onScrollTargetHandled) onScrollTargetHandled();
         }, 200);
         return () => clearTimeout(timer);
     }, [scrollTarget]);
+
+    const [notice, setNotice] = useState(null); // { tone, text }
+    const flash = (text, tone = 'ok') => { setNotice({ tone, text }); setTimeout(() => setNotice(null), 2500); };
+
+    // ---- People + active view
+    const [people, setPeople] = useState([]);
+    const [personSheet, setPersonSheet] = useState(null); // 'new' | person
+    const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
+    const [personError, setPersonError] = useState('');
+    const [deletePerson, setDeletePerson] = useState(null);
+    useEffect(() => { DataService.initialize().then(() => setPeople(DataService.getPeople())); }, []);
+
     const handleToggleActiveViewPerson = (key) => {
         const isSelected = activeView.includes(key);
         let next;
@@ -6162,660 +6033,68 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
         }
         if (onActiveViewChange) onActiveViewChange(next);
     };
-    const [saveMessage, setSaveMessage] = useState('');
-    const [people, setPeople] = useState([]);
-    const [personForm, setPersonForm] = useState({ name: '', relationship: '', isDefault: false });
-    const [editingPerson, setEditingPerson] = useState(null);
-    const [personErrors, setPersonErrors] = useState({});
-    const [showDeletePersonConfirm, setShowDeletePersonConfirm] = useState(null);
-    const [currencyForm, setCurrencyForm] = useState({ name: '', code: '' });
-    const [currencyCheck, setCurrencyCheck] = useState(null);
-    const [manualRate, setManualRate] = useState('');
-    const [currencyFormError, setCurrencyFormError] = useState('');
-    const [currencyChecking, setCurrencyChecking] = useState(false);
-    const [customCurrencies, setCustomCurrencies] = useState(() => DataService.getCustomCurrencies());
-    const [editingRateFor, setEditingRateFor] = useState(null);
-    const emptyAccountForm = { accountName: '', accountRef: '', accountType: BANK_ACCOUNT_TYPES[0], country: COUNTRIES[0], currency: 'GBP', person: 'own', openingAmount: '', isPrimary: false };
-    const [bankAccounts, setBankAccounts] = useState([]);
-    const [accountForm, setAccountForm] = useState(emptyAccountForm);
-    const [editingAccount, setEditingAccount] = useState(null);
-    const [accountErrors, setAccountErrors] = useState({});
-    const [showDeleteAccountConfirm, setShowDeleteAccountConfirm] = useState(null);
-    const [showLinkAccountsConfirm, setShowLinkAccountsConfirm] = useState(false);
-    const [filterBankAccountSyncConflict, setFilterBankAccountSyncConflict] = useState(!!FilterMemory.load('bankAccounts').syncConflict);
-    const [showAccountConflictDetail, setShowAccountConflictDetail] = useState(null);
-    const [linkCandidates, setLinkCandidates] = useState([]);
-    const [linkableExpenses, setLinkableExpenses] = useState([]);
-    const [linkableIncome, setLinkableIncome] = useState([]);
-    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: DateUtils.today(), amount: '', conversionRate: '', fee: '', toAmount: '', categoryId: '', subcategory: '', principalCategoryId: '', principalSubcategory: '', notes: '' };
-    const [showTransferForm, setShowTransferForm] = useState(false);
-    const [transferForm, setTransferForm] = useState(emptyTransferForm);
-    const [transferErrors, setTransferErrors] = useState({});
-    const [transferSubmitting, setTransferSubmitting] = useState(false);
-    const emptyReconcileForm = { accountId: '', actualBalance: '', notes: '', logAsTransaction: false, categoryId: '', subcategory: '' };
-    const [showReconcileForm, setShowReconcileForm] = useState(false);
-    const [reconcileForm, setReconcileForm] = useState(emptyReconcileForm);
-    const [reconcileErrors, setReconcileErrors] = useState({});
-    const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
-    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', feeCurrency: 'GBP', deductedAmount: '', date: DateUtils.today() };
-    const [withdrawAccount, setWithdrawAccount] = useState(null);
-    const [withdrawForm, setWithdrawForm] = useState(emptyWithdrawForm);
-    const [withdrawErrors, setWithdrawErrors] = useState({});
-    const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
-    const [liveConversionRate, setLiveConversionRate] = useState(null);
-    const [displayName, setDisplayName] = useState('');
-    const [nameError, setNameError] = useState('');
-    const [nameSaved, setNameSaved] = useState(false);
-    const [savedDisplayName, setSavedDisplayName] = useState('');
-    const [budgetAlertsEnabled, setBudgetAlertsEnabled] = useState(true);
-    const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
-    const [backupHistory, setBackupHistory] = useState([]);
-    const [lastSaveTime, setLastSaveTime] = useState('');
-    const [restoreFile, setRestoreFile] = useState(null);
-    const [restorePreview, setRestorePreview] = useState(null);
-    const [restoreError, setRestoreError] = useState('');
-    const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
-    const [restoreConfirmText, setRestoreConfirmText] = useState('');
-    const [backupDownloaded, setBackupDownloaded] = useState(false);
-    const [showClearExpensesConfirm, setShowClearExpensesConfirm] = useState(false);
-    const [clearExpensesConfirmText, setClearExpensesConfirmText] = useState('');
-    const [showClearIncomeConfirm, setShowClearIncomeConfirm] = useState(false);
-    const [clearIncomeConfirmText, setClearIncomeConfirmText] = useState('');
-    const [showContactModal, setShowContactModal] = useState(false);
-    const [cloudBackupRetention, setCloudBackupRetention] = useState('count5');
-    const [desktopNotifEnabled, setDesktopNotifEnabled] = useState(false);
-    const [notifPermission, setNotifPermission] = useState(() => ('Notification' in window ? Notification.permission : 'unsupported'));
-
-    useEffect(() => { DataService.initialize().then(async () => {
-        setPeople(DataService.getPeople());
-        setBankAccounts(DataService.getBankAccounts());
-        const [exp, inc] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
-        setLinkableExpenses(exp); setLinkableIncome(inc);
-    }); }, []);
-    const linkCandidatesAll = React.useMemo(
-        () => computeLinkCandidates(bankAccounts, linkableExpenses, linkableIncome),
-        [bankAccounts, linkableExpenses, linkableIncome]
-    );
-    const bankAccountSyncConflicts = useMemo(() => SyncConflicts.read('bankAccounts'), [bankAccounts]);
-    useEffect(() => { FilterMemory.save('bankAccounts', { syncConflict: filterBankAccountSyncConflict }); }, [filterBankAccountSyncConflict]);
-    // balance is derived (DataService.computeBankAccountBalance), never stored — excluded
-    // from the diff entirely so it never shows up as noise.
-    const bankAccountConflictFieldLabels = { accountName: 'Account Name', accountRef: 'Account ID', accountType: 'Type', country: 'Country', currency: 'Currency', person: 'Person', openingAmount: 'Opening Amount', isPrimary: 'Primary' };
-    const formatBankAccountConflictValue = (key, value) => {
-        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-        return value === undefined || value === null || value === '' ? '—' : String(value);
+    const openPersonSheet = (person) => {
+        setPersonSheet(person || 'new');
+        setPersonForm(person ? { name: person.name, relationship: person.relationship || '', isDefault: !!person.isDefault } : { name: '', relationship: '', isDefault: false });
+        setPersonError('');
     };
-    const conflictAccount = showAccountConflictDetail ? bankAccounts.find(a => a.id === showAccountConflictDetail) : null;
-    const accountConflictSnapshot = showAccountConflictDetail ? bankAccountSyncConflicts[String(showAccountConflictDetail)] : null;
-    const handleResolveAccountConflict = (useCloud) => {
-        const accountId = showAccountConflictDetail;
-        const updates = useCloud && accountConflictSnapshot ? accountConflictSnapshot.cloudSnapshot : {};
-        DataService.updateBankAccount(accountId, updates);
-        SyncConflicts.dismiss('bankAccounts', accountId);
-        setShowAccountConflictDetail(null);
-        setBankAccounts(DataService.getBankAccounts());
-    };
-    useEffect(() => {
-        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
-        setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
-        setDesktopNotifEnabled(!!notifSettings.desktopNotificationsEnabled && notifPermission === 'granted');
-    }, []);
-
-    useEffect(() => {
-        DataService.getSettings().then(s => {
-            setAutoBackupEnabled(s.autoBackupEnabled !== false);
-            setCloudBackupRetention(s.cloudBackupRetention || 'count5');
-        });
-        setBackupHistory(DataService.getBackupHistory());
-        setLastSaveTime(localStorage.getItem('financeApp_lastSaveTime') || '');
-    }, []);
-
-    const handleToggleBudgetAlerts = (enabled) => {
-        setBudgetAlertsEnabled(enabled);
-        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
-        notifSettings.budgetAlertsEnabled = enabled;
-        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
-    };
-
-    const handleToggleDesktopNotif = async (enabled) => {
-        if (enabled) {
-            let perm = Notification.permission;
-            if (perm === 'default') { perm = await Notification.requestPermission(); setNotifPermission(perm); }
-            if (perm !== 'granted') { setDesktopNotifEnabled(false); return; }
-        }
-        setDesktopNotifEnabled(enabled);
-        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
-        notifSettings.desktopNotificationsEnabled = enabled;
-        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
-    };
-
-    const handleToggleAutoBackup = async (enabled) => {
-        setAutoBackupEnabled(enabled);
-        await DataService.updateSettings({ autoBackupEnabled: enabled });
-    };
-
-    const handleChangeBackupRetention = async (value) => {
-        setCloudBackupRetention(value);
-        await DataService.updateSettings({ cloudBackupRetention: value });
-    };
-
-    const handleDownloadBackup = () => {
-        DataService.downloadBackup();
-        setBackupHistory(DataService.getBackupHistory());
-        setBackupDownloaded(true);
-        setTimeout(() => setBackupDownloaded(false), 2000);
-    };
-
-    const handleRestoreFileChange = (e) => {
-        setRestoreError(''); setRestorePreview(null); setRestoreFile(null);
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-            try {
-                const parsed = JSON.parse(evt.target.result);
-                if (!parsed.version || !parsed.data) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); return; }
-                setRestoreFile(parsed);
-                setRestorePreview({ date: parsed.createdAt, expenses: (parsed.data.expenses || []).length, income: (parsed.data.income || []).length });
-            } catch (err) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); }
-        };
-        reader.readAsText(file);
-    };
-
-    const handleConfirmRestore = () => {
+    const handleSavePerson = (e) => {
+        if (e) e.preventDefault();
+        setPersonError('');
         try {
-            DataService.restoreBackup(restoreFile);
-            localStorage.setItem('financeApp_skipCloudRestoreCheck', 'true');
-            window.location.reload();
-        }
-        catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); setRestoreConfirmText(''); }
-    };
-
-    const handleConfirmClearExpenses = () => {
-        DataService.clearAllExpenses();
-        setShowClearExpensesConfirm(false);
-        setClearExpensesConfirmText('');
-        onUpdate();
-    };
-
-    const handleConfirmClearIncome = () => {
-        DataService.clearAllIncome();
-        setShowClearIncomeConfirm(false);
-        setClearIncomeConfirmText('');
-        onUpdate();
-    };
-
-    useEffect(() => {
-        DataService.getSettings().then(s => {
-            // financeApp_settings.displayName is only ever written when this field is
-            // explicitly saved here (or via Profile) — social sign-in (Google/Facebook)
-            // never seeds it, only currentUser.displayName. Fall back to that so the field
-            // shows the name the app already picked up at sign-in instead of appearing blank.
-            const name = s.displayName || (currentUser && currentUser.displayName) || '';
-            setDisplayName(name);
-            setSavedDisplayName(name);
-        });
-    }, []);
-
-    const handleSaveDisplayName = async () => {
-        setNameError('');
-        const newName = displayName.trim();
-        if (!newName || newName.length < 2) { setNameError('Name must be at least 2 characters'); return; }
-        if (newName.length > 50) { setNameError('Name must be 50 characters or fewer'); return; }
-        if (!/^[a-zA-Z\s\-']+$/.test(newName)) { setNameError("Only letters, spaces, hyphens and apostrophes are allowed"); return; }
-        const settings = await DataService.getSettings();
-        const oldName = settings.displayName || '';
-        await DataService.updateSettings({ displayName: newName });
-        if (oldName && oldName !== newName) DataService.migratePersonName(oldName, newName);
-        try {
-            const allPeople = DataService.getPeople();
-            const systemPerson = allPeople.find(p => p.systemManaged === true);
-            if (systemPerson) {
-                DataService.updatePerson(systemPerson.id, { name: newName });
-            } else {
-                DataService.addPerson({ name: newName, isDefault: true, systemManaged: true });
-            }
-            setPeople(DataService.getPeople());
-        } catch (e) { /* name conflict — still save display name */ }
-        // Keep financeApp_currentUser (and App's currentUser state, via the callback) in
-        // sync too — this save path previously only touched financeApp_settings and the
-        // systemManaged person record, leaving the header's name pill showing the stale
-        // pre-edit name until the next full login/reload.
-        if (currentUser) {
-            localStorage.setItem('financeApp_currentUser', JSON.stringify({ ...currentUser, displayName: newName }));
-        }
-        if (onDisplayNameChange) onDisplayNameChange(newName);
-        setSavedDisplayName(newName);
-        setNameSaved(true);
-        setTimeout(() => setNameSaved(false), 2000);
-    };
-
-    const handleAddPerson = (e) => {
-        e.preventDefault();
-        setPersonErrors({});
-        try {
-            if (editingPerson) {
-                DataService.updatePerson(editingPerson.id, { name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
-                // A rename also rewrites the stored Active View (migratePersonName); App keeps its
-                // own copy in React state, so push the new value up or it would keep filtering by
-                // the old name and every screen would look empty.
+            if (personSheet !== 'new') {
+                DataService.updatePerson(personSheet.id, { name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
+                // A rename also rewrites the stored Active View (migratePersonName); push it up so
+                // App stops filtering by the old name.
                 const storedView = getActiveView();
                 if (onActiveViewChange && JSON.stringify(storedView) !== JSON.stringify(activeView)) onActiveViewChange(storedView);
             } else {
                 DataService.addPerson({ name: personForm.name, relationship: personForm.relationship, isDefault: personForm.isDefault });
             }
             setPeople(DataService.getPeople());
-            setPersonForm({ name: '', relationship: '', isDefault: false });
-            setEditingPerson(null);
+            setPersonSheet(null);
         } catch (error) {
-            setPersonErrors({ name: error.message });
+            setPersonError(error.message);
         }
-    };
-    const handleEditPerson = (person) => {
-        setEditingPerson(person);
-        setPersonForm({ name: person.name, relationship: person.relationship || '', isDefault: person.isDefault || false });
-        setPersonErrors({});
-    };
-    const handleCancelEditPerson = () => {
-        setEditingPerson(null);
-        setPersonForm({ name: '', relationship: '', isDefault: false });
-        setPersonErrors({});
     };
     const handleDeletePerson = (id) => {
         DataService.deletePerson(id);
         setPeople(DataService.getPeople());
-        setShowDeletePersonConfirm(null);
+        setDeletePerson(null);
     };
 
-    const handleAddAccount = (e) => {
-        e.preventDefault();
-        setAccountErrors({});
-        try {
-            if (editingAccount) {
-                DataService.updateBankAccount(editingAccount.id, accountForm);
-            } else {
-                DataService.addBankAccount(accountForm);
-            }
-            setBankAccounts(DataService.getBankAccounts());
-            setAccountForm(emptyAccountForm);
-            setEditingAccount(null);
-        } catch (error) {
-            setAccountErrors({ accountName: error.message });
-        }
-    };
-    const handleEditAccount = (account) => {
-        setEditingAccount(account);
-        setAccountForm({ accountName: account.accountName, accountRef: account.accountRef || '', accountType: account.accountType, country: account.country, currency: account.currency, person: account.person, openingAmount: String(account.openingAmount), isPrimary: !!account.isPrimary });
-        setAccountErrors({});
-    };
-    const handleCancelEditAccount = () => {
-        setEditingAccount(null);
-        setAccountForm(emptyAccountForm);
-        setAccountErrors({});
-    };
-    const handleDeleteAccount = (id) => {
-        DataService.deleteBankAccount(id);
-        setBankAccounts(DataService.getBankAccounts());
-        setShowDeleteAccountConfirm(null);
-    };
-    const handleOpenLinkAccounts = (personFilter = null) => {
-        const candidates = linkCandidatesAll
-            .filter(c => c.expenseCount + c.incomeCount > 0)
-            .filter(c => !personFilter || c.person === personFilter)
-            .map(c => ({ ...c, selected: true }));
-        setLinkCandidates(candidates);
-        setShowLinkAccountsConfirm(true);
-    };
-    const handleToggleLinkCandidate = (person) => {
-        setLinkCandidates(prev => prev.map(c => c.person === person ? { ...c, selected: !c.selected } : c));
-    };
-    const handleConfirmLinkAccounts = async () => {
-        const selected = linkCandidates.filter(c => c.selected).map(c => c.person);
-        if (selected.length > 0) {
-            await DataService.bulkLinkAccounts(selected);
-            const [exp, inc] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
-            setLinkableExpenses(exp); setLinkableIncome(inc);
-        }
-        setShowLinkAccountsConfirm(false);
-        setLinkCandidates([]);
-    };
-
-    const transferFromAccount = bankAccounts.find(a => a.id === parseInt(transferForm.fromAccountId));
-    const transferToAccount = bankAccounts.find(a => a.id === parseInt(transferForm.toAccountId));
-    const isOverseasTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.currency !== transferToAccount.currency);
-    const isCrossPersonTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.person !== transferToAccount.person);
-    const transferFeeCategory = categories.find(c => c.id === parseInt(transferForm.categoryId));
-    const transferPrincipalCategory = categories.find(c => c.id === parseInt(transferForm.principalCategoryId));
-    const reconcileAccount = bankAccounts.find(a => a.id === parseInt(reconcileForm.accountId));
-    const reconcileCategory = categories.find(c => c.id === parseInt(reconcileForm.categoryId));
-
-    // Pre-fills the "today's rate" placeholder for an overseas transfer whenever both
-    // accounts (and therefore both currencies) are chosen — live-fetch-capable, falls
-    // back gracefully inside CurrencyService itself if the network call fails.
-    useEffect(() => {
-        if (!isOverseasTransfer) { setLiveConversionRate(null); return; }
-        let cancelled = false;
-        CurrencyService.getConversionRate(transferFromAccount.currency, transferToAccount.currency).then(rate => {
-            if (!cancelled) setLiveConversionRate(rate);
-        });
-        return () => { cancelled = true; };
-    }, [transferFromAccount && transferFromAccount.currency, transferToAccount && transferToAccount.currency, isOverseasTransfer]);
-
-    // Recomputes the suggested Transferred Amount whenever its source inputs change, but
-    // deliberately excludes transferForm.toAmount from its own deps so a manual override
-    // isn't immediately clobbered — it's only refreshed when amount/fee/rate change again.
-    useEffect(() => {
-        if (!isOverseasTransfer) return;
-        const amount = parseFloat(transferForm.amount) || 0;
-        const fee = parseFloat(transferForm.fee) || 0;
-        const rate = parseFloat(transferForm.conversionRate) || liveConversionRate;
-        if (!amount || !rate) return;
-        const computed = Math.round((amount - fee) * rate * 100) / 100;
-        setTransferForm(prev => ({ ...prev, toAmount: String(computed) }));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [transferForm.amount, transferForm.fee, transferForm.conversionRate, liveConversionRate, isOverseasTransfer]);
-
-    const handleTransferFieldChange = (field, value) => {
-        setTransferForm(prev => {
-            const next = { ...prev, [field]: value };
-            if (field === 'categoryId') next.subcategory = '';
-            if (field === 'principalCategoryId') next.principalSubcategory = '';
-            if (field === 'fromAccountId' && value === prev.toAccountId) next.toAccountId = '';
-            return next;
-        });
-        if (transferErrors[field]) setTransferErrors(prev => ({ ...prev, [field]: '' }));
-    };
-
-    const handleCancelTransfer = () => {
-        setShowTransferForm(false);
-        setTransferForm(emptyTransferForm);
-        setTransferErrors({});
-    };
-
-    const transferFormRef = React.useRef(null);
-    const handleQuickTransfer = (account) => {
-        setTransferForm({ ...emptyTransferForm, fromAccountId: String(account.id) });
-        setTransferErrors({});
-        setShowTransferForm(true);
-        setTimeout(() => { if (transferFormRef.current) transferFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
-    };
-
-    const handleReconcileFieldChange = (field, value) => {
-        setReconcileForm(prev => {
-            const next = { ...prev, [field]: value };
-            if (field === 'categoryId') next.subcategory = '';
-            return next;
-        });
-        if (reconcileErrors[field]) setReconcileErrors(prev => ({ ...prev, [field]: '' }));
-    };
-
-    const handleCancelReconcile = () => {
-        setShowReconcileForm(false);
-        setReconcileForm(emptyReconcileForm);
-        setReconcileErrors({});
-    };
-
-    const reconcileFormRef = React.useRef(null);
-    const handleQuickReconcile = (account) => {
-        setReconcileForm({ ...emptyReconcileForm, accountId: String(account.id) });
-        setReconcileErrors({});
-        setShowReconcileForm(true);
-        setTimeout(() => { if (reconcileFormRef.current) reconcileFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
-    };
-
-    const handleSubmitReconcile = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        if (!reconcileForm.accountId) errors.accountId = 'Choose an account';
-        const actualBalance = parseFloat(reconcileForm.actualBalance);
-        if (reconcileForm.actualBalance === '' || isNaN(actualBalance)) errors.actualBalance = 'Enter the actual balance';
-        if (Object.keys(errors).length > 0) { setReconcileErrors(errors); return; }
-
-        setReconcileSubmitting(true);
-        try {
-            const balanceBefore = DataService.computeBankAccountBalance(reconcileAccount);
-            const delta = Math.round((actualBalance - balanceBefore) * 100) / 100;
-            if (delta === 0) {
-                setReconcileErrors({ general: 'Already matches — no adjustment needed.' });
-                return;
-            }
-            const isLiability = DataService.LIABILITY_ACCOUNT_TYPES.includes(reconcileAccount.accountType);
-            const asExpense = isLiability ? delta > 0 : delta < 0;
-            const today = DateUtils.today();
-            const description = `Balance reconciliation: ${reconcileAccount.accountName}` + (reconcileForm.notes ? ` — ${reconcileForm.notes}` : '');
-
-            if (reconcileForm.logAsTransaction && asExpense) {
-                const catErrors = {};
-                if (!reconcileForm.categoryId) catErrors.categoryId = 'Category is required';
-                if (reconcileCategory && reconcileCategory.subcategories.length > 0 && !reconcileForm.subcategory) catErrors.subcategory = 'Subcategory is required';
-                if (Object.keys(catErrors).length > 0) { setReconcileErrors(catErrors); return; }
-            }
-
-            let transactionId = null;
-            let transactionType = null;
-            if (reconcileForm.logAsTransaction) {
-                if (asExpense) {
-                    const created = await DataService.addExpense({
-                        amount: Math.abs(delta),
-                        currency: reconcileAccount.currency,
-                        date: today,
-                        description,
-                        categoryId: parseInt(reconcileForm.categoryId),
-                        subcategory: reconcileForm.subcategory || '',
-                        paidBy: reconcileAccount.person === 'own' ? '' : reconcileAccount.person,
-                        accountId: reconcileAccount.id,
-                        tags: ['balance-adjustment']
-                    });
-                    transactionId = created.id;
-                    transactionType = 'expense';
-                } else {
-                    const created = await DataService.addIncome({
-                        amount: Math.abs(delta),
-                        currency: reconcileAccount.currency,
-                        date: today,
-                        source: description,
-                        description,
-                        paidBy: reconcileAccount.person === 'own' ? '' : reconcileAccount.person,
-                        accountId: reconcileAccount.id,
-                        tags: ['balance-adjustment']
-                    });
-                    transactionId = created.id;
-                    transactionType = 'income';
-                }
-            }
-
-            DataService.addReconciliation({
-                accountId: reconcileAccount.id,
-                person: reconcileAccount.person,
-                date: today,
-                balanceBefore,
-                delta,
-                balanceAfter: actualBalance,
-                notes: reconcileForm.notes || '',
-                loggedAsTransaction: !!reconcileForm.logAsTransaction,
-                transactionType,
-                transactionId
-            });
-
-            setShowReconcileForm(false);
-            setReconcileForm(emptyReconcileForm);
-            setReconcileErrors({});
-            if (onUpdate) onUpdate();
-        } finally {
-            setReconcileSubmitting(false);
-        }
-    };
-
-    const handleOpenWithdraw = (account) => {
-        setWithdrawAccount(account);
-        setWithdrawForm({ ...emptyWithdrawForm, currency: account.currency, feeCurrency: account.currency });
-        setWithdrawErrors({});
-    };
-
-    const handleCancelWithdraw = () => {
-        setWithdrawAccount(null);
-        setWithdrawForm(emptyWithdrawForm);
-        setWithdrawErrors({});
-    };
-
-    // Auto-fills "Deducted from Account" as convert(amount) + convert(fee), both converted
-    // independently into the account's own currency (the fee's currency no longer has to
-    // match the withdrawal currency) — deliberately excludes deductedAmount from its own deps
-    // (same trick as Transfer's toAmount effect above) so a manual edit isn't clobbered.
-    useEffect(() => {
-        if (!withdrawAccount) return;
-        const amount = parseFloat(withdrawForm.amount) || 0;
-        const fee = parseFloat(withdrawForm.fee) || 0;
-        if (!amount && !fee) return;
-        const converted = CurrencyService.convertToDefaultSync(amount, withdrawForm.currency, withdrawAccount.currency);
-        const convertedFee = CurrencyService.convertToDefaultSync(fee, withdrawForm.feeCurrency, withdrawAccount.currency);
-        const computed = Math.round((converted + convertedFee) * 100) / 100;
-        setWithdrawForm(prev => ({ ...prev, deductedAmount: String(computed) }));
-    }, [withdrawForm.amount, withdrawForm.fee, withdrawForm.currency, withdrawForm.feeCurrency, withdrawAccount]);
-
-    const handleSubmitWithdraw = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        const amount = parseFloat(withdrawForm.amount);
-        const deductedAmount = parseFloat(withdrawForm.deductedAmount);
-        if (!withdrawForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
-        if (!withdrawForm.deductedAmount || deductedAmount <= 0) errors.deductedAmount = 'Deducted amount must be greater than 0';
-        if (!withdrawForm.date) errors.date = 'Date is required';
-        if (Object.keys(errors).length > 0) { setWithdrawErrors(errors); return; }
-
-        setWithdrawSubmitting(true);
-        try {
-            DataService.withdrawCash({
-                accountId: withdrawAccount.id,
-                currency: withdrawForm.currency,
-                amount, fee: parseFloat(withdrawForm.fee) || 0, feeCurrency: withdrawForm.feeCurrency,
-                deductedAmount, date: withdrawForm.date
-            });
-            setWithdrawAccount(null);
-            setWithdrawForm(emptyWithdrawForm);
-            setWithdrawErrors({});
-            if (onUpdate) await onUpdate();
-        } finally {
-            setWithdrawSubmitting(false);
-        }
-    };
-
-    const handleSubmitTransfer = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        const amount = parseFloat(transferForm.amount);
-        if (!transferForm.fromAccountId) errors.fromAccountId = 'Choose a source account';
-        if (!transferForm.toAccountId) errors.toAccountId = 'Choose a target account';
-        if (transferForm.fromAccountId && transferForm.fromAccountId === transferForm.toAccountId) errors.toAccountId = 'Must differ from the source account';
-        if (!amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
-        const feeAmount = parseFloat(transferForm.fee) || 0;
-        if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
-            if (!transferForm.categoryId) errors.categoryId = 'Category is required for a fee';
-            if (transferFeeCategory && transferFeeCategory.subcategories.length > 0 && !transferForm.subcategory) errors.subcategory = 'Subcategory is required for a fee';
-        }
-        if (isCrossPersonTransfer) {
-            if (!transferForm.principalCategoryId) errors.principalCategoryId = 'Category is required';
-            if (transferPrincipalCategory && transferPrincipalCategory.subcategories.length > 0 && !transferForm.principalSubcategory) errors.principalSubcategory = 'Subcategory is required';
-        }
-        if (Object.keys(errors).length > 0) { setTransferErrors(errors); return; }
-
-        setTransferSubmitting(true);
-        try {
-            const rate = isOverseasTransfer
-                ? (parseFloat(transferForm.conversionRate) || liveConversionRate || await CurrencyService.getConversionRate(transferFromAccount.currency, transferToAccount.currency))
-                : 1;
-            const toAmount = isOverseasTransfer
-                ? (parseFloat(transferForm.toAmount) || Math.round((amount - feeAmount) * rate * 100) / 100)
-                : amount;
-            let feeExpenseId = null;
-            if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
-                const feeExpense = await DataService.addExpense({
-                    amount: feeAmount,
-                    currency: transferFromAccount.currency,
-                    date: transferForm.date,
-                    description: `Transfer fee: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`,
-                    categoryId: parseInt(transferForm.categoryId),
-                    subcategory: transferForm.subcategory || '',
-                    paidBy: transferFromAccount.person === 'own' ? '' : transferFromAccount.person,
-                    accountId: transferFromAccount.id,
-                    tags: ['transfer-fee']
-                });
-                feeExpenseId = feeExpense.id;
-            }
-            let principalExpenseId = null;
-            let recipientIncomeId = null;
-            if (isCrossPersonTransfer) {
-                const toPersonLabel = transferToAccount.person === 'own' ? 'Me' : transferToAccount.person;
-                const fromPersonLabel = transferFromAccount.person === 'own' ? 'Me' : transferFromAccount.person;
-                const principalExpense = await DataService.addExpense({
-                    amount: amount + (isOverseasTransfer ? feeAmount : 0),
-                    currency: transferFromAccount.currency,
-                    date: transferForm.date,
-                    description: `Transfer to ${toPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`,
-                    categoryId: parseInt(transferForm.principalCategoryId),
-                    subcategory: transferForm.principalSubcategory || '',
-                    paidBy: transferFromAccount.person === 'own' ? '' : transferFromAccount.person,
-                    tags: ['transfer-principal']
-                });
-                principalExpenseId = principalExpense.id;
-                const recipientIncome = await DataService.addIncome({
-                    amount: toAmount,
-                    currency: transferToAccount.currency,
-                    date: transferForm.date,
-                    source: `Transfer from ${fromPersonLabel}`,
-                    description: `Transfer from ${fromPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`,
-                    paidBy: transferToAccount.person === 'own' ? '' : transferToAccount.person,
-                    tags: ['transfer-incoming']
-                });
-                recipientIncomeId = recipientIncome.id;
-            }
-            DataService.addTransfer({
-                date: transferForm.date,
-                fromAccountId: transferFromAccount.id,
-                toAccountId: transferToAccount.id,
-                fromAmount: amount,
-                toAmount,
-                isOverseas: isOverseasTransfer,
-                conversionRate: rate,
-                fee: isOverseasTransfer ? feeAmount : 0,
-                feeExpenseId,
-                principalExpenseId,
-                recipientIncomeId,
-                notes: transferForm.notes || ''
-            });
-            setShowTransferForm(false);
-            setTransferForm(emptyTransferForm);
-            setTransferErrors({});
-            if (onUpdate) onUpdate();
-        } finally {
-            setTransferSubmitting(false);
-        }
-    };
-
+    // ---- Currencies
+    const [customCurrencies, setCustomCurrencies] = useState(() => DataService.getCustomCurrencies());
+    const [currencySheet, setCurrencySheet] = useState(false);
+    const [currencyForm, setCurrencyForm] = useState({ name: '', code: '' });
+    const [currencyCheck, setCurrencyCheck] = useState(null);
+    const [manualRate, setManualRate] = useState('');
+    const [currencyFormError, setCurrencyFormError] = useState('');
+    const [currencyChecking, setCurrencyChecking] = useState(false);
+    const [editingRateFor, setEditingRateFor] = useState(null);
+    const [deleteCurrency, setDeleteCurrency] = useState(null);
     const supportedCurrencies = CurrencyService.getAllCurrencies();
+    const staleCustomCurrencies = customCurrencies.filter(c => !c.isLive && c.rateAgainst !== currentCurrency);
 
-    const handleSelectChange = async (e) => {
-        const newCurrency = e.target.value;
+    const handlePickDefault = async (code) => {
+        if (code === currentCurrency) return;
         try {
-            await DataService.updateSettings({ currency: newCurrency });
-            setSaveMessage('Currency updated successfully!');
-            setTimeout(() => setSaveMessage(''), 2000);
-            if (onCurrencyChange) onCurrencyChange(newCurrency);
+            await DataService.updateSettings({ currency: code });
+            flash('Default currency set to ' + code);
+            if (onCurrencyChange) onCurrencyChange(code);
         } catch (error) {
-            setSaveMessage('Failed to update currency');
+            flash('Failed to update currency', 'err');
         }
     };
-
-    const getCurrencySymbol = (code) => {
-        const c = supportedCurrencies.find(cur => cur.code === code);
-        return c ? c.symbol : code;
+    const openAddCurrency = () => {
+        setCurrencySheet(true); setCurrencyForm({ name: '', code: '' }); setCurrencyCheck(null);
+        setManualRate(''); setCurrencyFormError(''); setEditingRateFor(null);
     };
-
-    const staleCustomCurrencies = customCurrencies.filter(c => !c.isLive && c.rateAgainst !== currentCurrency);
-    const builtInCurrencyList = Object.entries(CurrencyService.supportedCurrencies).map(([code, v]) => ({ code, name: v.name, symbol: v.symbol }));
-
+    const closeCurrencySheet = () => {
+        setCurrencySheet(false); setCurrencyCheck(null); setManualRate(''); setCurrencyFormError(''); setEditingRateFor(null);
+    };
     const handleCheckCurrency = async (e) => {
-        e.preventDefault();
+        if (e) e.preventDefault();
         setCurrencyFormError('');
         const name = currencyForm.name.trim();
         const code = currencyForm.code.trim().toUpperCase();
@@ -6831,656 +6110,450 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             setCurrencyChecking(false);
         }
     };
-
     const handleConfirmAddCurrency = () => {
         const { name, code, rate } = currencyCheck;
         DataService.addCustomCurrency({ code, name, symbol: CurrencyService.deriveSymbol(code), rate, rateAgainst: currentCurrency, isLive: true });
         setCustomCurrencies(DataService.getCustomCurrencies());
-        setCurrencyForm({ name: '', code: '' });
-        setCurrencyCheck(null);
+        closeCurrencySheet();
+        flash(code + ' added');
     };
-
     const handleSaveManualRate = (e) => {
-        e.preventDefault();
+        if (e) e.preventDefault();
         const rate = parseFloat(manualRate);
-        if (!manualRate || rate <= 0) { setCurrencyFormError('Enter a conversion rate greater than 0'); return; }
+        if (!manualRate || !(rate > 0)) { setCurrencyFormError('Enter a conversion rate greater than 0'); return; }
         if (editingRateFor) {
             DataService.updateCustomCurrencyRate(editingRateFor.id, { rate, rateAgainst: currentCurrency, isLive: false });
-            setEditingRateFor(null);
+            flash(editingRateFor.code + ' rate updated');
         } else {
             const { name, code } = currencyCheck;
             DataService.addCustomCurrency({ code, name, symbol: CurrencyService.deriveSymbol(code), rate, rateAgainst: currentCurrency, isLive: false });
+            flash(code + ' added');
         }
         setCustomCurrencies(DataService.getCustomCurrencies());
-        setCurrencyForm({ name: '', code: '' });
-        setCurrencyCheck(null);
-        setManualRate('');
-        setCurrencyFormError('');
+        closeCurrencySheet();
     };
-
-    const handleCancelCurrencyAdd = () => {
-        setCurrencyCheck(null);
-        setManualRate('');
-        setCurrencyFormError('');
-        setEditingRateFor(null);
-    };
-
-    const handleDeleteCustomCurrency = (id) => {
-        DataService.deleteCustomCurrency(id);
-        setCustomCurrencies(DataService.getCustomCurrencies());
-    };
-
     const openUpdateRate = (currency) => {
-        setEditingRateFor(currency);
-        setManualRate('');
+        setEditingRateFor(currency); setCurrencySheet(true);
+        setManualRate(currency.rateAgainst === currentCurrency ? String(currency.rate) : '');
         setCurrencyFormError('');
     };
+    // Register #13: an added currency can only be deleted while nothing uses it.
+    const openDeleteCurrency = (c) => setDeleteCurrency({ ...c, uses: DataService.countCurrencyUsage(c.code), isDefault: c.code === currentCurrency });
+    const handleDeleteCustomCurrency = () => {
+        DataService.deleteCustomCurrency(deleteCurrency.id);
+        setCustomCurrencies(DataService.getCustomCurrencies());
+        flash(deleteCurrency.code + ' deleted');
+        setDeleteCurrency(null);
+    };
+
+    // ---- Notifications
+    const [budgetAlertsEnabled, setBudgetAlertsEnabled] = useState(true);
+    const [desktopNotifEnabled, setDesktopNotifEnabled] = useState(false);
+    const [notifPermission, setNotifPermission] = useState(() => ('Notification' in window ? Notification.permission : 'unsupported'));
+    useEffect(() => {
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        setBudgetAlertsEnabled(notifSettings.budgetAlertsEnabled !== false);
+        setDesktopNotifEnabled(!!notifSettings.desktopNotificationsEnabled && notifPermission === 'granted');
+    }, []);
+    const handleToggleBudgetAlerts = (enabled) => {
+        setBudgetAlertsEnabled(enabled);
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        notifSettings.budgetAlertsEnabled = enabled;
+        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
+    };
+    const handleToggleDesktopNotif = async (enabled) => {
+        if (enabled) {
+            let perm = Notification.permission;
+            if (perm === 'default') { perm = await Notification.requestPermission(); setNotifPermission(perm); }
+            if (perm !== 'granted') { setDesktopNotifEnabled(false); return; }
+        }
+        setDesktopNotifEnabled(enabled);
+        const notifSettings = JSON.parse(localStorage.getItem('financeApp_notifSettings') || '{}');
+        notifSettings.desktopNotificationsEnabled = enabled;
+        localStorage.setItem('financeApp_notifSettings', JSON.stringify(notifSettings));
+    };
+
+    // ---- Storage & back up
+    const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
+    const [cloudBackupRetention, setCloudBackupRetention] = useState('count5');
+    const [backupHistory, setBackupHistory] = useState([]);
+    const [backupDownloaded, setBackupDownloaded] = useState(false);
+    const [restoreOpen, setRestoreOpen] = useState(false);
+    const [restoreFile, setRestoreFile] = useState(null);
+    const [restorePreview, setRestorePreview] = useState(null);
+    const [restoreError, setRestoreError] = useState('');
+    const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+    const [restoreConfirmText, setRestoreConfirmText] = useState('');
+    useEffect(() => {
+        DataService.getSettings().then(s => {
+            setAutoBackupEnabled(s.autoBackupEnabled !== false);
+            setCloudBackupRetention(s.cloudBackupRetention || 'count5');
+        });
+        setBackupHistory(DataService.getBackupHistory());
+    }, []);
+    const handleToggleAutoBackup = async (enabled) => {
+        setAutoBackupEnabled(enabled);
+        await DataService.updateSettings({ autoBackupEnabled: enabled });
+    };
+    const handleChangeBackupRetention = async (value) => {
+        setCloudBackupRetention(value);
+        await DataService.updateSettings({ cloudBackupRetention: value });
+    };
+    const handleDownloadBackup = () => {
+        DataService.downloadBackup();
+        setBackupHistory(DataService.getBackupHistory());
+        setBackupDownloaded(true);
+        setTimeout(() => setBackupDownloaded(false), 2000);
+    };
+    const handleRestoreFileChange = (e) => {
+        setRestoreError(''); setRestorePreview(null); setRestoreFile(null);
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            try {
+                const parsed = JSON.parse(evt.target.result);
+                if (!parsed.version || !parsed.data) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); return; }
+                setRestoreFile(parsed);
+                setRestorePreview({ date: parsed.createdAt, expenses: (parsed.data.expenses || []).length, income: (parsed.data.income || []).length });
+            } catch (err) { setRestoreError('Invalid backup file. Please select a valid FinanceTracker backup.'); }
+        };
+        reader.readAsText(file);
+    };
+    const handleConfirmRestore = () => {
+        try {
+            DataService.restoreBackup(restoreFile);
+            localStorage.setItem('financeApp_skipCloudRestoreCheck', 'true');
+            window.location.reload();
+        }
+        catch (err) { setRestoreError('Restore failed: ' + err.message); setShowRestoreConfirm(false); setRestoreConfirmText(''); }
+    };
+
+    // ---- Data & privacy
+    const [clearWhat, setClearWhat] = useState(null); // 'expenses' | 'income'
+    const [clearConfirmText, setClearConfirmText] = useState('');
+    const handleConfirmClear = () => {
+        if (clearWhat === 'expenses') DataService.clearAllExpenses(); else DataService.clearAllIncome();
+        flash('All ' + (clearWhat === 'expenses' ? 'expenses' : 'income') + ' deleted');
+        setClearWhat(null);
+        setClearConfirmText('');
+        onUpdate();
+    };
+
+    // ---- Support
+    const [showContact, setShowContact] = useState(false);
+
+    const pref = storagePref || localStorage.getItem('financeApp_storagePreference') || 'local';
+    const isCloud = pref === 'gdrive' || pref === 'onedrive';
+    const storageInfo = {
+        gdrive: { icon: 'fab fa-google-drive', label: 'Google Drive', tint: '#dcfce7', ink: '#16a34a' },
+        onedrive: { icon: 'fab fa-microsoft', label: 'OneDrive', tint: '#dbeafe', ink: '#0078d4' },
+        local: { icon: 'fas fa-mobile-screen', label: 'This device only', tint: '#f1f5f9', ink: '#475569' }
+    }[pref] || { icon: 'fas fa-mobile-screen', label: 'This device only', tint: '#f1f5f9', ink: '#475569' };
+    const isSyncing = syncStatus === 'syncing';
+    const isReconnectNeeded = syncStatus === 'reconnect-needed';
+    const isConnected = isCloud && syncStatus !== 'reconnect-needed' && syncStatus !== 'error';
+    const fmtStamp = (iso) => iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).replace(/\bSept\b/, 'Sep') : '—';
+    const lastBackup = backupHistory.length ? backupHistory[0].createdAt : null;
+    const others = people.filter(p => !p.systemManaged);
+    const myName = (currentUser && currentUser.displayName) || 'Me';
+    const expenseCount = DataService.data.expenses.length;
+    const incomeCount = DataService.data.income.length;
+
+    const section = (id, icon, tint, ink, title, body, ref) => (
+        <div className={'sp-setsec' + (expandedSection === id ? ' is-open' : '')} ref={ref}>
+            <button type="button" className="sp-setsec-head" onClick={() => toggleSection(id)} aria-expanded={expandedSection === id}>
+                <span className="sp-tile" style={{background: tint, color: ink, width: '40px', height: '40px', fontSize: '15px'}}><i className={icon}></i></span>
+                <span className="sp-setsec-title">{title}</span>
+                <i className={'fas fa-chevron-' + (expandedSection === id ? 'up' : 'down') + ' sp-setsec-chev'}></i>
+            </button>
+            {expandedSection === id && <div className="sp-setsec-body">{body}</div>}
+        </div>
+    );
 
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2>Settings</h2>
-            </div>
+        <div className="sp-settings">
+            {notice && <div className={'sp-alert sp-alert-' + notice.tone} style={{marginTop: '12px'}}><i className={'fas ' + (notice.tone === 'err' ? 'fa-circle-exclamation' : 'fa-circle-check')}></i><span>{notice.text}</span></div>}
 
-            <div className="settings-section" style={{marginBottom: '1.5rem'}}>
-                {renderSectionHeader('yourName', 'fas fa-user', 'Your Name')}
-                {expandedSection === 'yourName' && (<React.Fragment>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '0.75rem', marginTop: '0.75rem'}}>
-                    Used as your identity when tracking "paid by"
-                </p>
-                <input type="text" className="form-control" placeholder="Enter your display name (2–50 characters)" value={displayName} onChange={e => { setDisplayName(e.target.value); setNameError(''); }} />
-                <div style={{display: 'flex', gap: '0.5rem', marginTop: '0.5rem'}}>
-                    <button className="btn btn-primary" onClick={handleSaveDisplayName}>Save Name</button>
-                    <button className="btn btn-outline-secondary" onClick={() => { setDisplayName(savedDisplayName); setNameError(''); }}>Cancel</button>
-                </div>
-                {nameError && <div className="text-danger mt-1" style={{fontSize: '0.875rem'}}>{nameError}</div>}
-                {nameSaved && <div className="text-success mt-1" style={{fontSize: '0.875rem'}}><i className="fas fa-check me-1"></i>Name saved!</div>}
-                </React.Fragment>)}
+            <div className="sp-section-label">Default currency</div>
+            <div className="sp-curgrid">
+                {supportedCurrencies.map(c => (
+                    <button key={c.code} type="button" className={'sp-curchip' + (c.code === currentCurrency ? ' is-on' : '')} onClick={() => handlePickDefault(c.code)} title={c.name}>
+                        <span className="sp-curchip-sym">{c.symbol}</span><span className="sp-curchip-code">{c.code}</span>
+                    </button>
+                ))}
+                <button type="button" className="sp-curchip is-add" onClick={openAddCurrency}><span className="sp-curchip-sym"><i className="fas fa-plus"></i></span><span className="sp-curchip-code">Add</span></button>
             </div>
-
-            <hr style={{margin: '1rem 0 1.5rem'}} />
-
-            <div style={{marginBottom: '1.5rem'}}>
-                {renderSectionHeader('currency', 'fas fa-coins', 'Currency')}
-            </div>
-            {expandedSection === 'currency' && (<React.Fragment>
-            <div style={{marginBottom: '1.5rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Choose your default currency for budgets and summaries
-                </p>
-            </div>
-            <div style={{marginBottom: '1.5rem'}}>
-                <label htmlFor="currency-select" style={{fontWeight: '600', marginBottom: '0.5rem', display: 'block'}}>
-                    Select Currency:
-                </label>
-                <select
-                    id="currency-select"
-                    className="form-select"
-                    value={currentCurrency}
-                    onChange={handleSelectChange}
-                    style={{fontSize: '1.1rem', padding: '0.75rem'}}
-                >
-                    {supportedCurrencies.map(currency => (
-                        <option key={currency.code} value={currency.code}>
-                            {currency.symbol} {currency.code} - {currency.name}
-                        </option>
-                    ))}
-                </select>
-            </div>
-            {saveMessage && (
-                <div className={'alert ' + (saveMessage.includes('Failed') ? 'alert-danger' : 'alert-success')}>
-                    {saveMessage}
-                </div>
-            )}
-            <div style={{
-                background: '#f8f9fa',
-                borderRadius: '12px',
-                padding: '1.25rem',
-                textAlign: 'center',
-                border: '2px solid #e9ecef'
-            }}>
-                <div style={{fontSize: '2rem', marginBottom: '0.5rem'}}>
-                    {getCurrencySymbol(currentCurrency)}
-                </div>
-                <div style={{fontWeight: '600', fontSize: '1.1rem'}}>
-                    Current Default: {currentCurrency}
-                </div>
-                <div style={{color: '#6c757d', fontSize: '0.85rem', marginTop: '0.25rem'}}>
-                    {supportedCurrencies.find(c => c.code === currentCurrency) ? supportedCurrencies.find(c => c.code === currentCurrency).name : ''}
-                </div>
-            </div>
-
-            <div style={{marginTop: '1.5rem', marginBottom: '1rem'}}>
-                <h5 style={{marginBottom: '0.5rem', color: '#4a6cf7'}}>
-                    <i className="fas fa-plus-circle"></i> Add Currency
-                </h5>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Add a currency not in the list above. It'll become available everywhere you can pick a currency.
-                </p>
-            </div>
-
             {staleCustomCurrencies.length > 0 && (
-                <div className="alert alert-warning" style={{fontSize: '0.85rem'}}>
-                    <i className="fas fa-exclamation-triangle me-1"></i>
-                    These currencies need an updated rate for {currentCurrency}:{' '}
-                    {staleCustomCurrencies.map((c, i) => (
-                        <React.Fragment key={c.id}>
-                            {i > 0 && ', '}
-                            <a href="#" onClick={e => { e.preventDefault(); openUpdateRate(c); }}>{c.name}</a>
-                        </React.Fragment>
-                    ))}.
+                <div className="sp-alert sp-alert-warn" style={{marginTop: '10px'}}>
+                    <i className="fas fa-triangle-exclamation"></i>
+                    <span>These currencies need an updated rate for {currentCurrency}: {staleCustomCurrencies.map((c, i) => (
+                        <React.Fragment key={c.id}>{i > 0 && ', '}<a href="#" onClick={e => { e.preventDefault(); openUpdateRate(c); }}>{c.name}</a></React.Fragment>
+                    ))}.</span>
+                </div>
+            )}
+            {customCurrencies.length > 0 && (
+                <div className="sp-rowcard" style={{marginTop: '10px'}}>
+                    {customCurrencies.map(c => (
+                        <div key={c.id} className="sp-row sp-currow">
+                            <span className="sp-tile" style={{background: '#f1f5f9', color: '#0f172a', fontWeight: 800}}>{c.symbol || c.code}</span>
+                            <div className="sp-row-main">
+                                <div className="sp-row-title">{c.code} · {c.name}</div>
+                                <div className="sp-row-sub">{c.isLive ? 'Live rate' : 'Fixed rate · 1 ' + c.code + ' = ' + c.rate + ' ' + c.rateAgainst}</div>
+                            </div>
+                            {!c.isLive && <button type="button" className="sp-mini-btn" onClick={() => openUpdateRate(c)} title="Edit rate"><i className="fas fa-pen"></i></button>}
+                            <button type="button" className="sp-mini-btn is-danger" onClick={() => openDeleteCurrency(c)} title="Delete"><i className="fas fa-trash"></i></button>
+                        </div>
+                    ))}
                 </div>
             )}
 
-            {editingRateFor ? (
-                <form onSubmit={handleSaveManualRate} style={{marginBottom: '1rem'}}>
-                    <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>
-                        1 {editingRateFor.code} = ___ {currentCurrency}
-                    </label>
-                    <input type="number" step="0.0001" min="0" className={'form-control' + (currencyFormError ? ' is-invalid' : '')} value={manualRate} onChange={e => setManualRate(e.target.value)} placeholder="Conversion rate" autoFocus />
-                    {currencyFormError && <div className="invalid-feedback">{currencyFormError}</div>}
-                    <div className="alert alert-warning py-2" style={{fontSize: '0.8rem', marginTop: '0.5rem'}}>
-                        <i className="fas fa-exclamation-triangle me-1"></i>This rate won't update automatically — it'll be used for offline conversion until you update it again.
-                    </div>
-                    <div style={{display: 'flex', gap: '0.5rem'}}>
-                        <button type="submit" className="btn btn-primary btn-sm">Save Rate</button>
-                        <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
-                    </div>
-                </form>
-            ) : currencyCheck ? (
-                currencyCheck.needsManual ? (
-                    <form onSubmit={handleSaveManualRate} style={{marginBottom: '1rem'}}>
-                        <p style={{fontSize: '0.9rem'}}>No live conversion rate found for <strong>{currencyCheck.code}</strong>.</p>
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>
-                            1 {currencyCheck.code} = ___ {currentCurrency}
-                        </label>
-                        <input type="number" step="0.0001" min="0" className={'form-control' + (currencyFormError ? ' is-invalid' : '')} value={manualRate} onChange={e => setManualRate(e.target.value)} placeholder="Conversion rate" autoFocus />
-                        {currencyFormError && <div className="invalid-feedback">{currencyFormError}</div>}
-                        <div className="alert alert-warning py-2" style={{fontSize: '0.8rem', marginTop: '0.5rem'}}>
-                            <i className="fas fa-exclamation-triangle me-1"></i>No live rate is available for this currency. This rate won't update automatically — it'll be used for offline conversion until you update it.
-                        </div>
-                        <div style={{display: 'flex', gap: '0.5rem'}}>
-                            <button type="submit" className="btn btn-primary btn-sm">Add Currency</button>
-                            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
-                        </div>
-                    </form>
-                ) : (
-                    <div style={{marginBottom: '1rem'}}>
-                        <p style={{fontSize: '0.9rem'}}>
-                            1 {currencyCheck.code} = {currencyCheck.rate} {currentCurrency} (today's rate). Add <strong>{currencyCheck.name}</strong>?
-                        </p>
-                        <div style={{display: 'flex', gap: '0.5rem'}}>
-                            <button type="button" className="btn btn-primary btn-sm" onClick={handleConfirmAddCurrency}>Confirm & Add</button>
-                            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelCurrencyAdd}>Cancel</button>
-                        </div>
-                    </div>
-                )
-            ) : (
-                <form onSubmit={handleCheckCurrency} style={{marginBottom: '1rem'}}>
-                    <div className="row g-2 align-items-end">
-                        <div className="col">
-                            <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Currency Name *</label>
-                            <input type="text" className="form-control" value={currencyForm.name} onChange={e => setCurrencyForm(f => ({...f, name: e.target.value}))} placeholder="e.g., Japanese Yen" />
-                        </div>
-                        <div className="col-auto" style={{width: '110px'}}>
-                            <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Code *</label>
-                            <input type="text" className="form-control" value={currencyForm.code} maxLength={3} onChange={e => setCurrencyForm(f => ({...f, code: e.target.value.toUpperCase()}))} placeholder="JPY" />
-                        </div>
-                        <div className="col-auto">
-                            <button type="submit" className="btn btn-primary btn-sm" disabled={currencyChecking}>
-                                {currencyChecking ? <><span className="spinner-border spinner-border-sm me-1"></span>Checking…</> : 'Check Rate'}
-                            </button>
-                        </div>
-                    </div>
-                    {currencyFormError && <div className="text-danger mt-1" style={{fontSize: '0.875rem'}}>{currencyFormError}</div>}
-                </form>
-            )}
-
-            <div>
-                {builtInCurrencyList.map(c => (
-                    <div key={c.code} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef'}}>
-                        <div>
-                            <span style={{fontWeight: '600'}}>{c.symbol} {c.code} - {c.name}</span>
-                            <span className="badge bg-primary ms-2" style={{fontSize: '0.65rem'}}>Default</span>
-                        </div>
-                    </div>
-                ))}
-                {customCurrencies.map(c => (
-                    <div key={c.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef'}}>
-                        <div>
-                            <span style={{fontWeight: '600'}}>{c.symbol} {c.code} - {c.name}</span>
-                            {c.isLive ? (
-                                <span className="badge bg-success ms-2" style={{fontSize: '0.65rem'}}>Live rate</span>
-                            ) : (
-                                <span className="badge bg-secondary ms-2" style={{fontSize: '0.65rem'}}>Manual: 1 {c.code} = {c.rate} {c.rateAgainst}</span>
-                            )}
-                        </div>
-                        <div style={{display: 'flex', gap: '0.25rem'}}>
-                            <button className="btn btn-sm btn-outline-primary" onClick={() => openUpdateRate(c)} title="Update rate"><i className="fas fa-pencil-alt"></i></button>
-                            <button className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteCustomCurrency(c.id)} title="Delete"><i className="fas fa-trash"></i></button>
-                        </div>
-                    </div>
-                ))}
-            </div>
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-
-            <div style={{marginBottom: '1.5rem'}}>
-                {renderSectionHeader('people', 'fas fa-users', 'People')}
-            </div>
-            {expandedSection === 'people' && (<React.Fragment>
-            <div style={{marginBottom: '1.5rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Manage people for expense and income tracking
-                </p>
-            </div>
-
-            <form onSubmit={handleAddPerson} style={{marginBottom: '1rem'}}>
-                <div className="row g-2 align-items-end">
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Name *</label>
-                        <input type="text" className={'form-control ' + (personErrors.name ? 'is-invalid' : '')} value={personForm.name} onChange={(e) => { setPersonForm(prev => ({ ...prev, name: e.target.value })); if (personErrors.name) setPersonErrors({}); }} placeholder="Person name" />
-                        {personErrors.name && <div className="invalid-feedback">{personErrors.name}</div>}
-                    </div>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Relationship</label>
-                        <input type="text" className="form-control" value={personForm.relationship} onChange={(e) => setPersonForm(prev => ({ ...prev, relationship: e.target.value }))} placeholder="e.g., Spouse" />
-                    </div>
-                    <div className="col-auto d-flex align-items-center" style={{paddingBottom: personErrors.name ? '1.5rem' : '0'}}>
-                        <div className="form-check">
-                            <input className="form-check-input" type="checkbox" id="isDefault" checked={personForm.isDefault} onChange={(e) => setPersonForm(prev => ({ ...prev, isDefault: e.target.checked }))} />
-                            <label className="form-check-label" htmlFor="isDefault" style={{fontSize: '0.85rem'}}>Default</label>
-                        </div>
-                    </div>
+            <div className="sp-section-label" ref={activeViewSectionRef}>Active view</div>
+            <div className="sp-rowcard sp-peoplecard">
+                <div className="sp-row">
+                    <span className="sp-tile" style={{background: '#dcfce7', color: '#15803d', fontWeight: 800}}>{getInitials(myName)}</span>
+                    <div className="sp-row-main"><div className="sp-row-title">{myName} (you)</div></div>
+                    <SpSwitch on={activeView.includes('own')} onToggle={() => handleToggleActiveViewPerson('own')} label={'Show ' + myName} />
                 </div>
-                <div style={{marginTop: '0.5rem', display: 'flex', gap: '0.5rem'}}>
-                    <button type="submit" className="btn btn-primary btn-sm">
-                        <i className={'fas fa-' + (editingPerson ? 'save' : 'plus') + ' me-1'}></i>{editingPerson ? 'Save' : 'Add'}
-                    </button>
-                    {editingPerson && (
-                        <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelEditPerson}>Cancel</button>
-                    )}
-                </div>
-            </form>
-
-            <div>
-                {people.length === 0 ? (
-                    <div className="text-muted text-center" style={{padding: '1rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                        <i className="fas fa-user-plus fa-2x" style={{marginBottom: '0.5rem', display: 'block', opacity: 0.5}}></i>
-                        No people added yet. Add people to quickly assign expenses and income.
-                    </div>
-                ) : (
-                    people.map(person => (
-                        <div key={person.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: person.isDefault ? '#fff3cd' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (person.isDefault ? '#ffc107' : '#e9ecef')}}>
-                            <div>
-                                <span style={{fontWeight: '600'}}>{person.name}</span>
-                                {person.isDefault && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Default">★</span>}
-                                {person.relationship && <span style={{marginLeft: '0.5rem', color: '#6c757d', fontSize: '0.85rem'}}>({person.relationship})</span>}
-                            </div>
-                            <div style={{display: 'flex', gap: '0.25rem'}}>
-                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditPerson(person)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
-                                <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeletePersonConfirm(person)} title="Delete"><i className="fas fa-trash"></i></button>
-                            </div>
-                        </div>
-                    ))
-                )}
-            </div>
-
-            {showDeletePersonConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Remove Person</h5></div>
-                            <div className="modal-body"><p>Remove <strong>{showDeletePersonConfirm.name}</strong> from the people list? Existing records will not be affected.</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeletePersonConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => handleDeletePerson(showDeletePersonConfirm.id)}>Remove</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            </React.Fragment>)}
-
-            {/* Bank accounts moved to their own Accounts screen (More → Accounts). */}
-            <hr style={{margin: '1.5rem 0'}} />
-            <div ref={activeViewSectionRef} style={{marginBottom: '1.5rem'}}>
-                {renderSectionHeader('activeView', 'fas fa-user', 'Active View')}
-            </div>
-            {expandedSection === 'activeView' && (<React.Fragment>
-            <div style={{marginBottom: '1.5rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Choose whose data you want to see across the app. Select more than one to compare.
-                </p>
-                <div className="d-flex align-items-center justify-content-between" style={{padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: activeView.includes('own') ? '#eef2ff' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (activeView.includes('own') ? '#c7d2fe' : '#e9ecef')}}>
-                    <div className="form-check mb-0">
-                        <input className="form-check-input" type="checkbox" id="activeViewOwn" checked={activeView.includes('own')} onChange={() => handleToggleActiveViewPerson('own')} style={{cursor: 'pointer'}} />
-                        <label className="form-check-label" htmlFor="activeViewOwn" style={{cursor: 'pointer'}}>Me / My Own{currentUser && currentUser.displayName ? ` (${currentUser.displayName})` : ''}</label>
-                    </div>
-                </div>
-                {/* The systemManaged person record represents the logged-in user themselves
-                    (kept in sync with their display name for use elsewhere, e.g. split-expense
-                    participant pickers) — it's already shown above as "Me / My Own", so it's
-                    excluded here to avoid listing the same identity twice. */}
-                {people.filter(person => !person.systemManaged).map(person => (
-                    <div key={person.id} className="d-flex align-items-center justify-content-between" style={{padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: activeView.includes(person.name) ? '#eef2ff' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (activeView.includes(person.name) ? '#c7d2fe' : '#e9ecef')}}>
-                        <div className="form-check mb-0">
-                            <input className="form-check-input" type="checkbox" id={'activeView-' + person.id} checked={activeView.includes(person.name)} onChange={() => handleToggleActiveViewPerson(person.name)} style={{cursor: 'pointer'}} />
-                            <label className="form-check-label" htmlFor={'activeView-' + person.id} style={{cursor: 'pointer'}}>{person.name}{person.relationship ? ` (${person.relationship})` : ''}</label>
-                        </div>
-                    </div>
-                ))}
-            </div>
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-            <div style={{marginBottom: '1rem'}}>
-                {renderSectionHeader('notifications', 'fas fa-bell', 'Notifications')}
-            </div>
-            {expandedSection === 'notifications' && (<React.Fragment>
-            <div style={{marginBottom: '1rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Control spending alerts and notifications
-                </p>
-                <div className="d-flex justify-content-between align-items-center" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                    <div>
-                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Budget Alerts</div>
-                        <div className="text-muted" style={{fontSize: '0.82rem'}}>Warn when spending reaches 80% or over budget</div>
-                    </div>
-                    <div className="form-check form-switch mb-0">
-                        <input className="form-check-input" type="checkbox" id="budgetAlertsToggle" checked={budgetAlertsEnabled} onChange={e => handleToggleBudgetAlerts(e.target.checked)} style={{cursor: 'pointer'}} />
-                    </div>
-                </div>
-                <div className="d-flex justify-content-between align-items-center mt-2" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                    <div>
-                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Desktop Notifications</div>
-                        <div className="text-muted" style={{fontSize: '0.82rem'}}>
-                            {notifPermission === 'denied'
-                                ? 'Blocked — enable notifications for this site in your browser settings.'
-                                : notifPermission === 'unsupported'
-                                ? 'Not supported in this browser.'
-                                : 'Show a browser notification when a new alert appears while this app is open'}
-                        </div>
-                    </div>
-                    <div className="form-check form-switch mb-0">
-                        <input className="form-check-input" type="checkbox" id="desktopNotifToggle" checked={desktopNotifEnabled} disabled={notifPermission === 'denied' || notifPermission === 'unsupported'} onChange={e => handleToggleDesktopNotif(e.target.checked)} style={{cursor: 'pointer'}} />
-                    </div>
-                </div>
-            </div>
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-            <div style={{marginBottom: '1rem'}}>
-                {renderSectionHeader('backup', 'fas fa-database', 'Backup & Restore')}
-            </div>
-            {expandedSection === 'backup' && (<React.Fragment>
-            <div style={{marginBottom: '1rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>Download your data or restore from a previous backup.</p>
-                <div className="d-flex justify-content-between align-items-center mb-3" style={{padding: '0.75rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                    <div>
-                        <div style={{fontWeight: '600', fontSize: '0.95rem'}}>Auto-backup daily</div>
-                        <div className="text-muted" style={{fontSize: '0.82rem'}}>Automatically download a backup each day when the app opens</div>
-                    </div>
-                    <div className="form-check form-switch mb-0">
-                        <input className="form-check-input" type="checkbox" id="autoBackupToggle" checked={autoBackupEnabled} onChange={e => handleToggleAutoBackup(e.target.checked)} style={{cursor: 'pointer'}} />
-                    </div>
-                </div>
-                <button className={'btn w-100 mb-2 ' + (backupDownloaded ? 'btn-success' : 'btn-primary')} onClick={handleDownloadBackup}>
-                    {backupDownloaded ? <><i className="fas fa-check me-2"></i>Downloaded!</> : <><i className="fas fa-download me-2"></i>Download Backup Now</>}
-                </button>
-                {lastSaveTime && (
-                    <div className="small text-muted text-center mb-2">
-                        <i className="fas fa-shield-alt me-1 text-success"></i>
-                        Last auto-saved: <strong>{new Date(lastSaveTime).toLocaleString()}</strong>
-                    </div>
-                )}
-                {backupHistory.length > 0 && (
-                    <div className="mb-3">
-                        <div className="small fw-semibold text-muted mb-1">Recent backups:</div>
-                        {backupHistory.map((h, i) => (
-                            <div key={i} className="small text-muted d-flex justify-content-between py-1" style={{borderBottom: '1px solid #f0f0f0'}}>
-                                <span style={{wordBreak: 'break-all'}}>{h.filename}</span>
-                                <span className="ms-2 text-nowrap">{new Date(h.createdAt).toLocaleDateString()}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-                <hr style={{margin: '1rem 0'}} />
-                <h6 className="fw-semibold mb-2">Restore from Backup</h6>
-                <div className="alert alert-warning d-flex gap-2 py-2 mb-3" style={{fontSize: '0.85rem'}}>
-                    <i className="fas fa-exclamation-triangle mt-1 flex-shrink-0"></i>
-                    <span>Restoring a backup will replace ALL current app data. This cannot be undone.</span>
-                </div>
-                <input type="file" accept=".json" className="form-control mb-2" onChange={handleRestoreFileChange} />
-                {restoreError && <div className="alert alert-danger py-2 small mb-2">{restoreError}</div>}
-                {restorePreview && (
-                    <div className="alert alert-info py-2 small mb-2">
-                        Backup from <strong>{new Date(restorePreview.date).toLocaleString()}</strong>, contains <strong>{restorePreview.expenses}</strong> expenses and <strong>{restorePreview.income}</strong> income records.
-                    </div>
-                )}
-                {restorePreview && (
-                    <button className="btn btn-danger w-100" onClick={() => { setShowRestoreConfirm(true); setRestoreConfirmText(''); }}>
-                        <i className="fas fa-upload me-2"></i>Restore Backup
-                    </button>
-                )}
-            </div>
-
-            {showRestoreConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title"><i className="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Restore</h5></div>
-                            <div className="modal-body">
-                                <p>Are you sure? This will <strong>replace all your current data</strong> with the selected backup. This cannot be undone.</p>
-                                <label className="form-label small fw-semibold mb-1">Type <strong>RESTORE</strong> to confirm</label>
-                                <input type="text" className="form-control" value={restoreConfirmText} onChange={e => setRestoreConfirmText(e.target.value)} autoFocus />
-                            </div>
-                            <div className="modal-footer">
-                                <button className="btn btn-secondary" onClick={() => setShowRestoreConfirm(false)}>Cancel</button>
-                                <button className="btn btn-danger" onClick={handleConfirmRestore} disabled={restoreConfirmText.trim().toUpperCase() !== 'RESTORE'}><i className="fas fa-upload me-2"></i>Yes, Restore Now</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-            <div style={{marginBottom: '1rem'}}>
-                {renderSectionHeader('dangerZone', 'fas fa-exclamation-triangle', 'Danger Zone', '#dc3545')}
-            </div>
-            {expandedSection === 'dangerZone' && (<React.Fragment>
-            <div style={{marginBottom: '1rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>Permanently delete all records of a given type. This cannot be undone — consider downloading a backup first.</p>
-                <button className="btn btn-outline-danger w-100 mb-2" onClick={() => { setClearExpensesConfirmText(''); setShowClearExpensesConfirm(true); }}>
-                    <i className="fas fa-trash-alt me-2"></i>Clear All Expenses
-                </button>
-                <button className="btn btn-outline-danger w-100" onClick={() => { setClearIncomeConfirmText(''); setShowClearIncomeConfirm(true); }}>
-                    <i className="fas fa-trash-alt me-2"></i>Clear All Income
-                </button>
-            </div>
-
-            {showClearExpensesConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header border-danger">
-                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Expenses?</h5>
-                            </div>
-                            <div className="modal-body">
-                                <p>You are about to permanently delete <strong>all {DataService.data.expenses.length} expense{DataService.data.expenses.length !== 1 ? 's' : ''}</strong>.</p>
-                                <p className="text-danger mb-2"><strong>This cannot be undone.</strong></p>
-                                <label className="form-label small fw-semibold mb-1">Type <strong>DELETE</strong> to confirm</label>
-                                <input type="text" className="form-control" value={clearExpensesConfirmText} onChange={e => setClearExpensesConfirmText(e.target.value)} autoFocus />
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearExpensesConfirm(false)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={handleConfirmClearExpenses} disabled={clearExpensesConfirmText.trim().toUpperCase() !== 'DELETE'}>
-                                    <i className="fas fa-trash-alt me-1"></i>Delete All
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showClearIncomeConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header border-danger">
-                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All Income?</h5>
-                            </div>
-                            <div className="modal-body">
-                                <p>You are about to permanently delete <strong>all {DataService.data.income.length} income record{DataService.data.income.length !== 1 ? 's' : ''}</strong>.</p>
-                                <p className="text-danger mb-2"><strong>This cannot be undone.</strong></p>
-                                <label className="form-label small fw-semibold mb-1">Type <strong>DELETE</strong> to confirm</label>
-                                <input type="text" className="form-control" value={clearIncomeConfirmText} onChange={e => setClearIncomeConfirmText(e.target.value)} autoFocus />
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearIncomeConfirm(false)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={handleConfirmClearIncome} disabled={clearIncomeConfirmText.trim().toUpperCase() !== 'DELETE'}>
-                                    <i className="fas fa-trash-alt me-1"></i>Delete All
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-            <div style={{marginBottom: '1rem'}}>
-                {renderSectionHeader('storage', 'fas fa-cloud', 'Storage')}
-            </div>
-            {expandedSection === 'storage' && (<React.Fragment>
-            <div style={{marginBottom: '1rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Where your financial data is backed up
-                </p>
-                {(() => {
-                    const pref = storagePref || localStorage.getItem('financeApp_storagePreference') || 'local';
-                    const isCloud = pref === 'gdrive' || pref === 'onedrive';
-                    const info = {
-                        gdrive:   { icon: 'fab fa-google-drive', label: 'Google Drive', sub: 'Syncing to Google Drive',  color: '#4285F4' },
-                        onedrive: { icon: 'fab fa-microsoft',    label: 'OneDrive',      sub: 'Syncing to OneDrive',      color: '#0078D4' },
-                        local:    { icon: 'fas fa-mobile-alt',   label: 'Local only',    sub: 'Data stored on this device only', color: '#6c757d' }
-                    }[pref] || { icon: 'fas fa-mobile-alt', label: 'Local only', sub: 'Data stored on this device only', color: '#6c757d' };
-                    const isSyncing = syncStatus === 'syncing';
-                    const isReconnectNeeded = syncStatus === 'reconnect-needed';
-                    const isConnected = isCloud && syncStatus !== 'reconnect-needed' && syncStatus !== 'error';
-                    const formatRelativeTime = (isoString) => {
-                        if (!isoString) return null;
-                        const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
-                        if (diff < 10) return 'just now';
-                        if (diff < 60) return diff + ' seconds ago';
-                        if (diff < 3600) { const m = Math.floor(diff / 60); return m + ' minute' + (m !== 1 ? 's' : '') + ' ago'; }
-                        if (diff < 86400) { const h = Math.floor(diff / 3600); return h + ' hour' + (h !== 1 ? 's' : '') + ' ago'; }
-                        const d = Math.floor(diff / 86400);
-                        return d + ' day' + (d !== 1 ? 's' : '') + ' ago';
-                    };
-                    const relativeSync = formatRelativeTime(lastSyncTime);
+                {others.map(p => {
+                    const [bg, fg] = spPersonColor(p.name, people);
                     return (
-                        <div>
-                            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0.75rem 1rem',background:'#f8f9fa',borderRadius:'10px',border:'1px solid #e9ecef',marginBottom: isCloud ? '0.75rem' : '0'}}>
-                                <div className="d-flex align-items-center gap-3">
-                                    <i className={info.icon} style={{fontSize:'1.5rem',color:info.color,width:'24px',textAlign:'center'}}></i>
-                                    <div>
-                                        <div className="d-flex align-items-center gap-2" style={{fontWeight:'600',fontSize:'0.95rem'}}>
-                                            {info.label}
-                                            {isCloud && (
-                                                <span style={{
-                                                    display:'inline-flex',alignItems:'center',gap:'4px',
-                                                    fontSize:'0.7rem',fontWeight:'600',padding:'1px 7px',borderRadius:'20px',
-                                                    background: isReconnectNeeded ? '#fff3cd' : isSyncing ? '#cfe2ff' : syncStatus === 'error' ? '#f8d7da' : '#d1e7dd',
-                                                    color: isReconnectNeeded ? '#856404' : isSyncing ? '#084298' : syncStatus === 'error' ? '#842029' : '#0a6640'
-                                                }}>
-                                                    {isSyncing && <i className="fas fa-spinner fa-spin" style={{fontSize:'0.65rem'}}></i>}
-                                                    {!isSyncing && <i className={isReconnectNeeded || syncStatus === 'error' ? 'fas fa-circle-xmark' : 'fas fa-circle-check'} style={{fontSize:'0.65rem'}}></i>}
-                                                    {isSyncing ? 'Syncing…' : isReconnectNeeded ? 'Disconnected' : syncStatus === 'error' ? 'Error' : 'Connected'}
-                                                </span>
-                                            )}
-                                        </div>
-                                        {isCloud && relativeSync && !isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>
-                                                Last synced {relativeSync}
-                                            </div>
-                                        )}
-                                        {isCloud && !relativeSync && !isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>{info.sub}</div>
-                                        )}
-                                        {isReconnectNeeded && (
-                                            <div style={{fontSize:'0.78rem',color:'#dc3545',fontWeight:'500',marginTop:'1px'}}>
-                                                <i className="fas fa-exclamation-triangle me-1"></i>Session expired — re-connect to resume syncing
-                                            </div>
-                                        )}
-                                        {!isCloud && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d',marginTop:'1px'}}>{info.sub}</div>
-                                        )}
-                                    </div>
-                                </div>
-                                <button className="btn btn-sm btn-outline-primary" onClick={() => onStoragePickerOpen && onStoragePickerOpen()}>
-                                    Switch
-                                </button>
+                        <div key={p.id} className="sp-row">
+                            <span className="sp-tile" style={{background: bg, color: fg, fontWeight: 800}}>{getInitials(p.name)}</span>
+                            <div className="sp-row-main">
+                                <div className="sp-row-title">{p.name}{p.isDefault && <i className="fas fa-star" style={{color: '#f59e0b', fontSize: '11px', marginLeft: '6px'}} title="Default"></i>}</div>
+                                {p.relationship && <div className="sp-row-sub">{p.relationship}</div>}
                             </div>
-                            {isCloud && (
-                                <div className="d-flex gap-2">
-                                    {isReconnectNeeded ? (
-                                        <button className="btn btn-sm btn-warning flex-grow-1" onClick={() => onReconnect && onReconnect()}>
-                                            <i className="fas fa-plug me-1"></i>Re-connect {pref === 'gdrive' ? 'Google Drive' : 'OneDrive'}
-                                        </button>
-                                    ) : (
-                                        <button className="btn btn-sm btn-outline-secondary flex-grow-1" onClick={() => onSyncNow && onSyncNow()} disabled={isSyncing}>
-                                            {isSyncing
-                                                ? <><i className="fas fa-spinner fa-spin me-1"></i>Syncing…</>
-                                                : <><i className="fas fa-sync-alt me-1"></i>Sync now</>
-                                            }
-                                        </button>
-                                    )}
-                                    {isConnected && (
-                                        <button className="btn btn-sm btn-outline-secondary" title="Version history" onClick={() => onViewHistory && onViewHistory()} style={{flexShrink:0}}>
-                                            <i className="fas fa-history"></i>
-                                        </button>
-                                    )}
-                                </div>
-                            )}
+                            <button type="button" className="sp-mini-btn" onClick={() => openPersonSheet(p)} title={'Edit ' + p.name}><i className="fas fa-pen"></i></button>
+                            <button type="button" className="sp-mini-btn is-danger" onClick={() => setDeletePerson(p)} title={'Remove ' + p.name}><i className="fas fa-trash"></i></button>
+                            <SpSwitch on={activeView.includes(p.name)} onToggle={() => handleToggleActiveViewPerson(p.name)} label={'Show ' + p.name} />
                         </div>
                     );
-                })()}
-                {(storagePref === 'gdrive' || storagePref === 'onedrive') && (
-                    <div style={{marginTop: '0.85rem'}}>
-                        <label className="form-label small fw-semibold mb-1">Backup retention</label>
-                        <select className="form-select form-select-sm" value={cloudBackupRetention} onChange={e => handleChangeBackupRetention(e.target.value)}>
-                            <option value="count5">Keep last 5 backups</option>
-                            <option value="7d">Keep backups for 7 days</option>
-                            <option value="30d">Keep backups for 30 days</option>
-                            <option value="90d">Keep backups for 90 days</option>
-                        </select>
-                        <div className="text-muted" style={{fontSize: '0.78rem', marginTop: '0.25rem'}}>
-                            The most recent backup is always kept, even if it's older than this window.
-                        </div>
-                    </div>
-                )}
-            </div>
-            </React.Fragment>)}
-
-            <hr style={{margin: '1.5rem 0'}} />
-            <div style={{marginBottom: '1rem'}}>
-                {renderSectionHeader('contactUs', 'fas fa-envelope', 'Contact Us')}
-            </div>
-            {expandedSection === 'contactUs' && (<React.Fragment>
-            <div style={{marginBottom: '1rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Have a question or found a problem? Send us a message.
-                </p>
-                <button className="btn btn-outline-primary w-100" onClick={() => setShowContactModal(true)}>
-                    <i className="fas fa-paper-plane me-2"></i>Contact Support
+                })}
+                <button type="button" className="sp-row sp-addrow" onClick={() => openPersonSheet(null)}>
+                    <span className="sp-addrow-tile"><i className="fas fa-plus"></i></span>
+                    <span className="sp-addrow-label">Add person</span>
                 </button>
             </div>
-            {showContactModal && (
-                <ContactUsModal onClose={() => setShowContactModal(false)} defaultReplyTo={currentUser ? currentUser.email : ''} />
+
+            <div className="sp-section-label">Settings</div>
+            {section('notifications', 'fas fa-bell', '#fef3c7', '#d97706', 'Notifications', (
+                <div className="sp-rowcard">
+                    <div className="sp-row">
+                        <span className="sp-tile" style={{background: '#fef3c7', color: '#d97706'}}><i className="fas fa-chart-pie"></i></span>
+                        <div className="sp-row-main"><div className="sp-row-title">Budget alerts</div><div className="sp-row-sub">When a category reaches its notify %</div></div>
+                        <SpSwitch on={budgetAlertsEnabled} onToggle={() => handleToggleBudgetAlerts(!budgetAlertsEnabled)} label="Budget alerts" />
+                    </div>
+                    <div className="sp-row">
+                        <span className="sp-tile" style={{background: '#eef2ff', color: '#6366f1'}}><i className="fas fa-bell"></i></span>
+                        <div className="sp-row-main"><div className="sp-row-title">Desktop notifications</div><div className="sp-row-sub">{notifPermission === 'denied' ? 'Blocked. Allow notifications for this site in your browser settings.' : notifPermission === 'unsupported' ? 'Not supported in this browser.' : 'Bill reminders and alerts on this device while the app is open'}</div></div>
+                        {notifPermission === 'denied' || notifPermission === 'unsupported'
+                            ? <span className="sp-switch" style={{opacity: .45, cursor: 'default'}} aria-disabled="true"><span></span></span>
+                            : <SpSwitch on={desktopNotifEnabled} onToggle={() => handleToggleDesktopNotif(!desktopNotifEnabled)} label="Desktop notifications" />}
+                    </div>
+                </div>
+            ))}
+            {section('storage', 'fas fa-cloud', '#dcfce7', '#16a34a', 'Storage & Back Up', (
+                <>
+                    <div className="sp-section-label" style={{marginTop: 0}}>Storage</div>
+                    <div className="sp-rowcard">
+                        <div className="sp-row">
+                            <span className="sp-tile" style={{background: storageInfo.tint, color: storageInfo.ink, width: '40px', height: '40px', fontSize: '16px'}}><i className={storageInfo.icon}></i></span>
+                            <div className="sp-row-main"><div className="sp-row-sub">Current storage</div><div className="sp-row-title">{storageInfo.label}</div></div>
+                            <button type="button" className="sp-soft-btn" onClick={() => onStoragePickerOpen && onStoragePickerOpen()}>Change</button>
+                        </div>
+                        {isCloud && (
+                            <div className="sp-row">
+                                <div className="sp-row-main">
+                                    <div className="sp-row-sub">{isReconnectNeeded ? 'Disconnected' : syncStatus === 'error' ? 'Sync error' : 'Last synced'}</div>
+                                    <div className="sp-row-title" style={{color: isReconnectNeeded || syncStatus === 'error' ? 'var(--sp-rose)' : undefined}}>{isReconnectNeeded ? 'Session expired' : fmtStamp(lastSyncTime)}</div>
+                                </div>
+                                {isReconnectNeeded
+                                    ? <button type="button" className="sp-dark-btn" onClick={() => onReconnect && onReconnect()}><i className="fas fa-plug"></i>Re-connect</button>
+                                    : <button type="button" className="sp-dark-btn" onClick={() => onSyncNow && onSyncNow()} disabled={isSyncing}><i className={'fas fa-rotate' + (isSyncing ? ' fa-spin' : '')}></i>{isSyncing ? 'Syncing…' : 'Sync now'}</button>}
+                            </div>
+                        )}
+                        {isConnected && (
+                            <button type="button" className="sp-row" style={{width: '100%', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left'}} onClick={() => onViewHistory && onViewHistory()}>
+                                <span className="sp-tile" style={{background: '#eef2ff', color: '#6366f1'}}><i className="fas fa-clock-rotate-left"></i></span>
+                                <div className="sp-row-main"><div className="sp-row-title">Version history</div><div className="sp-row-sub">Restore an earlier cloud backup</div></div>
+                                <i className="fas fa-chevron-right" style={{color: '#cbd5e1', fontSize: '12px'}}></i>
+                            </button>
+                        )}
+                        {isCloud && (
+                            <div className="sp-row" style={{flexDirection: 'column', alignItems: 'stretch', gap: '8px'}}>
+                                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline'}}><span className="sp-row-title">Keep backups</span><span className="sp-row-sub">Newest always kept</span></div>
+                                <div className="sp-keepchips">
+                                    {[['count5', 'Last 5'], ['7d', '7 days'], ['30d', '30 days'], ['90d', '90 days']].map(([v, l]) => (
+                                        <button key={v} type="button" className={cloudBackupRetention === v ? 'is-on' : ''} onClick={() => handleChangeBackupRetention(v)}>{l}</button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="sp-section-label">Back up</div>
+                    <div className="sp-rowcard">
+                        <div className="sp-row">
+                            <div className="sp-row-main"><div className="sp-row-title">Auto back up daily</div><div className="sp-row-sub">Downloads a backup file each day when the app opens</div></div>
+                            <SpSwitch on={autoBackupEnabled} onToggle={() => handleToggleAutoBackup(!autoBackupEnabled)} label="Auto back up daily" />
+                        </div>
+                        <div className="sp-row">
+                            <div className="sp-row-main"><div className="sp-row-sub">Last back up</div><div className="sp-row-title">{fmtStamp(lastBackup)}</div></div>
+                            <button type="button" className="sp-soft-btn" onClick={handleDownloadBackup}>{backupDownloaded ? <><i className="fas fa-check"></i>Downloaded</> : 'Back up now'}</button>
+                        </div>
+                        <button type="button" className="sp-row" style={{width: '100%', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left'}} onClick={() => setRestoreOpen(o => !o)} aria-expanded={restoreOpen}>
+                            <span className="sp-tile" style={{background: '#fef3c7', color: '#b45309'}}><i className="fas fa-clock-rotate-left"></i></span>
+                            <div className="sp-row-main"><div className="sp-row-title">Restore from a backup</div></div>
+                            <i className={'fas fa-chevron-' + (restoreOpen ? 'up' : 'down')} style={{color: '#cbd5e1', fontSize: '12px'}}></i>
+                        </button>
+                        {restoreOpen && (
+                            <div className="sp-restore">
+                                <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>Restoring replaces ALL current app data. This can't be undone.</span></div>
+                                <label className="sp-filepick">
+                                    <input type="file" accept=".json" onChange={handleRestoreFileChange} />
+                                    <i className="fas fa-file-arrow-up"></i><span>Choose a backup file (.json)</span>
+                                </label>
+                                {restoreError && <div className="sp-alert sp-alert-err" style={{marginTop: '8px'}}><i className="fas fa-circle-exclamation"></i><span>{restoreError}</span></div>}
+                                {restorePreview && (
+                                    <>
+                                        <div className="sp-alert sp-alert-info" style={{marginTop: '8px'}}><i className="fas fa-circle-info"></i><span>Backup from <b>{new Date(restorePreview.date).toLocaleString()}</b> with <b>{restorePreview.expenses}</b> expenses and <b>{restorePreview.income}</b> income records.</span></div>
+                                        <button type="button" className="sp-btn sp-btn-danger" onClick={() => { setShowRestoreConfirm(true); setRestoreConfirmText(''); }}><i className="fas fa-upload"></i>Restore this backup</button>
+                                    </>
+                                )}
+                                {backupHistory.length > 0 && (
+                                    <div className="sp-backlist">
+                                        <div className="sp-row-sub" style={{fontWeight: 800, marginBottom: '4px'}}>Recent downloads</div>
+                                        {backupHistory.map((h, i) => (
+                                            <div key={i} className="sp-backlist-row"><span>{h.filename}</span><span>{new Date(h.createdAt).toLocaleDateString('en-GB')}</span></div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </>
+            ), storageSectionRef)}
+            {section('data', 'fas fa-database', '#fee2e2', '#e11d48', 'Data & Privacy', (
+                <div className="sp-rowcard">
+                    {[['expenses', 'Clear all expenses', expenseCount, 'fas fa-receipt'], ['income', 'Clear all income', incomeCount, 'fas fa-arrow-down']].map(([k, label, n, icon]) => (
+                        <div key={k} className="sp-row">
+                            <span className="sp-tile" style={{background: '#fee2e2', color: '#e11d48'}}><i className={icon}></i></span>
+                            <div className="sp-row-main"><div className="sp-row-title">{label}</div><div className="sp-row-sub">{n} {n === 1 ? 'entry' : 'entries'}</div></div>
+                            <button type="button" className="sp-soft-btn is-danger" onClick={() => { setClearWhat(k); setClearConfirmText(''); }} disabled={n === 0}>Clear</button>
+                        </div>
+                    ))}
+                </div>
+            ))}
+            {section('support', 'fas fa-life-ring', '#f1f5f9', '#0f172a', 'Support', (
+                <button type="button" className="sp-btn sp-btn-dark" onClick={() => setShowContact(true)}><i className="fas fa-envelope"></i>Contact us</button>
+            ))}
+
+            {currencySheet && (
+                <Sheet onClose={closeCurrencySheet}>
+                    <SpSheetHead icon="fas fa-coins" tint="#dbeafe" ink="#2563eb" title={editingRateFor ? 'Edit ' + editingRateFor.code + ' rate' : 'Add currency'} sub={'Converted against ' + currentCurrency + ' (your default)'} />
+                    {currencyFormError && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{currencyFormError}</span></div>}
+                    {editingRateFor || (currencyCheck && currencyCheck.needsManual) ? (
+                        <form onSubmit={handleSaveManualRate} noValidate>
+                            {!editingRateFor && <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>No live rate was found for {currencyCheck.code}. Enter a fixed rate.</span></div>}
+                            <div className="sp-rowcard"><div className="sp-formrow"><span>1 {editingRateFor ? editingRateFor.code : currencyCheck.code} =</span><input type="number" step="0.0001" min="0" inputMode="decimal" value={manualRate} onChange={e => { setManualRate(e.target.value); setCurrencyFormError(''); }} placeholder={'Rate in ' + currentCurrency} autoFocus /></div></div>
+                            <div className="sp-ex-note" style={{margin: '0 4px 12px'}}>This rate won't update automatically. It's used for conversion until you change it.</div>
+                            <div className="sp-sheet-foot">
+                                <button type="button" className="sp-btn sp-btn-cancel" onClick={closeCurrencySheet}>Cancel</button>
+                                <button type="submit" className="sp-btn sp-btn-dark sp-btn-grow"><i className="fas fa-check"></i>{editingRateFor ? 'Save rate' : 'Add currency'}</button>
+                            </div>
+                        </form>
+                    ) : currencyCheck ? (
+                        <>
+                            <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>1 {currencyCheck.code} = {currencyCheck.rate} {currentCurrency} (today's rate). Add <b>{currencyCheck.name}</b>?</span></div>
+                            <div className="sp-sheet-foot">
+                                <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setCurrencyCheck(null)}>Back</button>
+                                <button type="button" className="sp-btn sp-btn-dark sp-btn-grow" onClick={handleConfirmAddCurrency}><i className="fas fa-check"></i>Add currency</button>
+                            </div>
+                        </>
+                    ) : (
+                        <form onSubmit={handleCheckCurrency} noValidate>
+                            <div className="sp-rowcard">
+                                <div className="sp-formrow"><span>Currency name</span><input type="text" value={currencyForm.name} onChange={e => { setCurrencyForm(f => ({ ...f, name: e.target.value })); setCurrencyFormError(''); }} placeholder="e.g. Japanese Yen" /></div>
+                                <div className="sp-formrow"><span>3-letter code</span><input type="text" value={currencyForm.code} maxLength={3} onChange={e => { setCurrencyForm(f => ({ ...f, code: e.target.value.toUpperCase() })); setCurrencyFormError(''); }} placeholder="JPY" /></div>
+                            </div>
+                            <button type="submit" className="sp-btn sp-btn-dark" disabled={currencyChecking}><i className={currencyChecking ? 'fas fa-spinner fa-spin' : 'fas fa-magnifying-glass-dollar'}></i>{currencyChecking ? 'Checking…' : 'Check conversion rate'}</button>
+                        </form>
+                    )}
+                </Sheet>
             )}
-            </React.Fragment>)}
+
+            {deleteCurrency && (
+                <Sheet onClose={() => setDeleteCurrency(null)} danger>
+                    <SpSheetHead icon="fas fa-trash" tint="#fee2e2" ink="#e11d48" title={'Delete ' + deleteCurrency.code + '?'} sub={deleteCurrency.name} />
+                    {deleteCurrency.isDefault || deleteCurrency.uses > 0 ? (
+                        <>
+                            <div className="sp-alert sp-alert-warn"><i className="fas fa-lock"></i><span>{deleteCurrency.isDefault ? deleteCurrency.code + ' is your default currency. Pick another default first.' : deleteCurrency.code + ' is used by ' + deleteCurrency.uses + ' record' + (deleteCurrency.uses === 1 ? '' : 's') + ' (expenses, income, accounts, assets, liabilities, goals, bills, repeats or debts). Change or delete them first.'}</span></div>
+                            <div className="sp-sheet-foot"><button type="button" className="sp-btn sp-btn-dark sp-btn-grow" onClick={() => setDeleteCurrency(null)}>OK</button></div>
+                        </>
+                    ) : (
+                        <>
+                            <div className="sp-ex-note" style={{margin: '0 4px 12px'}}>Nothing uses this currency, so it can be removed. You can add it again later.</div>
+                            <div className="sp-sheet-foot">
+                                <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setDeleteCurrency(null)}>Keep</button>
+                                <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" onClick={handleDeleteCustomCurrency}><i className="fas fa-trash"></i>Delete</button>
+                            </div>
+                        </>
+                    )}
+                </Sheet>
+            )}
+
+            {personSheet && (
+                <Sheet onClose={() => setPersonSheet(null)}>
+                    <SpSheetHead icon="fas fa-user-plus" tint="#dbeafe" ink="#2563eb" title={personSheet === 'new' ? 'Add person' : 'Edit ' + personSheet.name} sub="People you track money for or with" />
+                    <form onSubmit={handleSavePerson} noValidate>
+                        {personError && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{personError}</span></div>}
+                        <div className="sp-rowcard">
+                            <div className="sp-formrow"><span>Name</span><input type="text" value={personForm.name} onChange={e => { setPersonForm(f => ({ ...f, name: e.target.value })); setPersonError(''); }} placeholder="Person name" autoFocus /></div>
+                            <div className="sp-formrow"><span>Relationship</span><input type="text" value={personForm.relationship} onChange={e => setPersonForm(f => ({ ...f, relationship: e.target.value }))} placeholder="e.g. Partner" /></div>
+                            <div className="sp-formrow"><span>Default person</span><div style={{marginLeft: 'auto'}}><SpSwitch on={personForm.isDefault} onToggle={() => setPersonForm(f => ({ ...f, isDefault: !f.isDefault }))} label="Default person" /></div></div>
+                        </div>
+                        <div className="sp-sheet-foot">
+                            <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setPersonSheet(null)}>Cancel</button>
+                            <button type="submit" className="sp-btn sp-btn-dark sp-btn-grow"><i className="fas fa-check"></i>{personSheet === 'new' ? 'Add person' : 'Save'}</button>
+                        </div>
+                    </form>
+                </Sheet>
+            )}
+
+            {deletePerson && (
+                <Sheet onClose={() => setDeletePerson(null)} danger>
+                    <SpSheetHead icon="fas fa-user-minus" tint="#fee2e2" ink="#e11d48" title={'Remove ' + deletePerson.name + '?'} sub="Their existing records are not changed or deleted." />
+                    <div className="sp-sheet-foot">
+                        <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setDeletePerson(null)}>Keep</button>
+                        <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" onClick={() => handleDeletePerson(deletePerson.id)}><i className="fas fa-user-minus"></i>Remove</button>
+                    </div>
+                </Sheet>
+            )}
+
+            {showRestoreConfirm && (
+                <Sheet onClose={() => setShowRestoreConfirm(false)} danger>
+                    <SpSheetHead icon="fas fa-triangle-exclamation" tint="#fee2e2" ink="#e11d48" title="Replace all data?" sub="This replaces everything in the app with the selected backup. It can't be undone." />
+                    <div className="sp-rowcard"><div className="sp-formrow"><span>Type RESTORE</span><input type="text" value={restoreConfirmText} onChange={e => setRestoreConfirmText(e.target.value)} placeholder="RESTORE" autoFocus /></div></div>
+                    <div className="sp-sheet-foot">
+                        <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setShowRestoreConfirm(false)}>Cancel</button>
+                        <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" onClick={handleConfirmRestore} disabled={restoreConfirmText.trim().toUpperCase() !== 'RESTORE'}><i className="fas fa-upload"></i>Restore now</button>
+                    </div>
+                </Sheet>
+            )}
+
+            {clearWhat && (
+                <Sheet onClose={() => setClearWhat(null)} danger>
+                    <SpSheetHead icon="fas fa-trash" tint="#fee2e2" ink="#e11d48" title={'Delete all ' + (clearWhat === 'expenses' ? 'expenses' : 'income') + '?'} sub={'This permanently deletes ' + (clearWhat === 'expenses' ? expenseCount + ' expense' + (expenseCount === 1 ? '' : 's') : incomeCount + ' income record' + (incomeCount === 1 ? '' : 's')) + ' for everyone. It can’t be undone, so consider backing up first.'} />
+                    <div className="sp-rowcard"><div className="sp-formrow"><span>Type DELETE</span><input type="text" value={clearConfirmText} onChange={e => setClearConfirmText(e.target.value)} placeholder="DELETE" autoFocus /></div></div>
+                    <div className="sp-sheet-foot">
+                        <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setClearWhat(null)}>Cancel</button>
+                        <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" onClick={handleConfirmClear} disabled={clearConfirmText.trim().toUpperCase() !== 'DELETE'}><i className="fas fa-trash"></i>Delete all</button>
+                    </div>
+                </Sheet>
+            )}
+
+            {showContact && <ContactUsModal onClose={() => setShowContact(false)} defaultReplyTo={currentUser ? currentUser.email : ''} />}
         </div>
     );
 }
@@ -9139,7 +8212,7 @@ function StoragePickerModal({ currentUser, initialPreference, onConfirm, onSkip 
     const busyLabel = oauthStep === 'connecting' ? 'Connecting…' : oauthStep === 'downloading' ? 'Checking backup…' : oauthStep === 'uploading' ? 'Backing up…' : 'Saving…';
 
     return (
-        <AuthShell icon="fas fa-cloud-arrow-up" title="Where should your backup live?" tagline="Choose where your financial data is backed up. You can change this later in Settings."
+        <AuthShell icon="fas fa-cloud-arrow-up" title="Where should your backup live?" tagline="Choose where your financial data is backed up. You can change this later in More → Storage & Back Up."
             footer={onSkip ? (
                 <div className="sp-auth-foot">
                     <button type="button" className="sp-auth-foot-link" onClick={onSkip} disabled={saving}>Maybe later — <strong>remind me next time</strong></button>
@@ -9686,27 +8759,18 @@ function ContactForm({ defaultReplyTo, onSent, onCancel, hideCancel }) {
     );
 }
 
-// Settings → Support opens this. Modal chrome unchanged until the Settings phase restyles it.
+// More → Support opens this.
 function ContactUsModal({ onClose, defaultReplyTo }) {
     const [sent, setSent] = useState(false);
     return (
-        <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9999}}>
-            <div className="modal-dialog modal-dialog-centered">
-                <div className="modal-content" style={{borderRadius: '16px', border: 'none'}}>
-                    <div className="modal-header border-0 pb-1">
-                        <h5 className="modal-title fw-semibold"><i className="fas fa-envelope me-2 text-primary"></i>Contact Us</h5>
-                        <button type="button" className="btn-close" onClick={onClose}></button>
-                    </div>
-                    <div className="modal-body pt-1">
-                        {sent ? (
-                            <div className="alert alert-success py-2 small mb-0">Message sent — we'll get back to you soon.</div>
-                        ) : (
-                            <ContactForm defaultReplyTo={defaultReplyTo} onCancel={onClose} onSent={() => { setSent(true); setTimeout(onClose, 1800); }} />
-                        )}
-                    </div>
-                </div>
-            </div>
-        </div>
+        <Sheet onClose={onClose}>
+            <SpSheetHead icon="fas fa-envelope" tint="#f1f5f9" ink="#0f172a" title="Contact us" sub="We usually reply within 1 working day" />
+            {sent ? (
+                <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>Message sent. We'll get back to you soon.</span></div>
+            ) : (
+                <ContactForm defaultReplyTo={defaultReplyTo} onCancel={onClose} onSent={() => { setSent(true); setTimeout(onClose, 1800); }} />
+            )}
+        </Sheet>
     );
 }
 
@@ -10111,348 +9175,6 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange, o
                     keepLabel="Cancel" cta="Sign out" busy={loggingOut}
                     onKeep={() => setShowLogoutConfirm(false)}
                     onConfirm={async () => { setLoggingOut(true); try { await handleLogoutConfirm(); } finally { setLoggingOut(false); } }} />
-            )}
-        </div>
-    );
-}
-
-function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthSelect }) {
-    const [timeWindow, setTimeWindow] = useState(() => sessionStorage.getItem('trends_timeWindow') || '6m');
-    const [selectedCategory, setSelectedCategory] = useState(() => sessionStorage.getItem('trends_category') || '');
-    const [chartSeriesFilter, setChartSeriesFilter] = useState('both'); // 'both' | 'income' | 'expense'
-    const [expanded, setExpanded] = useState({});
-    // Custom time period: month+year only (no day-level picker), same shape as Summary's.
-    const [customFromMonth, setCustomFromMonth] = useState(() => { const v = sessionStorage.getItem('trends_customFromMonth'); return v !== null ? parseInt(v) : new Date().getMonth(); });
-    const [customFromYear, setCustomFromYear] = useState(() => { const v = sessionStorage.getItem('trends_customFromYear'); return v !== null ? parseInt(v) : new Date().getFullYear(); });
-    const [customToMonth, setCustomToMonth] = useState(() => { const v = sessionStorage.getItem('trends_customToMonth'); return v !== null ? parseInt(v) : new Date().getMonth(); });
-    const [customToYear, setCustomToYear] = useState(() => { const v = sessionStorage.getItem('trends_customToYear'); return v !== null ? parseInt(v) : new Date().getFullYear(); });
-
-    const setTw = (v) => { setTimeWindow(v); sessionStorage.setItem('trends_timeWindow', v); };
-    const setCat = (v) => { setSelectedCategory(v); sessionStorage.setItem('trends_category', v); };
-    const setCustomFrom = (m, y) => { setCustomFromMonth(m); setCustomFromYear(y); sessionStorage.setItem('trends_customFromMonth', m); sessionStorage.setItem('trends_customFromYear', y); };
-    const setCustomTo = (m, y) => { setCustomToMonth(m); setCustomToYear(y); sessionStorage.setItem('trends_customToMonth', m); sessionStorage.setItem('trends_customToYear', y); };
-
-    const toggle = (key) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
-
-    const convertSync = (amount, from, to) => {
-        if (!from || !to || from === to) return amount;
-        return Math.round(CurrencyService.convertToDefaultSync(amount, from, to) * 100) / 100;
-    };
-    const fmt = (n) => ValidationUtils.formatCurrency(n, defaultCurrency);
-
-    const getMonths = () => {
-        const now = new Date();
-        const months = [];
-        if (timeWindow === 'year') {
-            for (let m = 0; m <= now.getMonth(); m++) months.push({ year: now.getFullYear(), month: m });
-        } else if (timeWindow === 'custom') {
-            const fromKey = customFromYear * 12 + customFromMonth, toKey = customToYear * 12 + customToMonth;
-            const [sY, sM, eY, eM] = fromKey <= toKey ? [customFromYear, customFromMonth, customToYear, customToMonth] : [customToYear, customToMonth, customFromYear, customFromMonth];
-            let cursor = new Date(sY, sM, 1);
-            const end = new Date(eY, eM, 1);
-            let guard = 0;
-            // Safety cap only — not meant to be reachable via the UI. The From/To year
-            // selects offer up to 8 years back (96 months apart at most), so this used to
-            // silently truncate at 60 months (a 6+ year range would cut off mid-range,
-            // e.g. Aug 2020–Aug 2026 stopping at Jul 2025) well before that's possible.
-            while (cursor <= end && guard < 240) { months.push({ year: cursor.getFullYear(), month: cursor.getMonth() }); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
-        } else {
-            const count = timeWindow === '3m' ? 3 : timeWindow === '12m' ? 12 : 6;
-            for (let i = count - 1; i >= 0; i--) {
-                const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-                months.push({ year: d.getFullYear(), month: d.getMonth() });
-            }
-        }
-        return months;
-    };
-
-    const months = getMonths();
-    const now = new Date();
-    const curYear = now.getFullYear(), curMonth = now.getMonth();
-    // Person scoping now comes entirely from the global Active View — expenses/income
-    // arrive already filtered by it; this screen only adds its own category filter.
-    const filteredExpenses = selectedCategory ? expenses.filter(e => e.categoryId === parseInt(selectedCategory)) : expenses;
-    const filteredIncome = income;
-
-    // A custom range over 2 years (>24 monthly rows) is too dense to browse as individual
-    // months — fold it down to one row per year instead (same threshold as Summary's own
-    // custom-range chart). Each "period" below is either a single month (the normal case,
-    // monthsIncluded.length === 1) or every month of that year that falls inside the
-    // selected range (yearly grouping) — the aggregation code beneath is identical either
-    // way, just summed over more months' worth of prefixes.
-    const useYearlyGrouping = timeWindow === 'custom' && months.length > 24;
-    const periods = useYearlyGrouping
-        ? (() => {
-            const yearGroups = {};
-            months.forEach(({ year, month }) => { (yearGroups[year] = yearGroups[year] || []).push(month); });
-            return Object.keys(yearGroups).sort((a, b) => a - b).map(y => ({ year: parseInt(y), monthsIncluded: yearGroups[y] }));
-        })()
-        : months.map(({ year, month }) => ({ year, monthsIncluded: [month] }));
-
-    const monthData = periods.map(({ year, monthsIncluded }) => {
-        const prefixes = monthsIncluded.map(m => `${year}-${String(m + 1).padStart(2, '0')}`);
-        const me = filteredExpenses.filter(e => prefixes.some(p => (e.date || '').startsWith(p)));
-        const mi = filteredIncome.filter(i => prefixes.some(p => (i.date || '').startsWith(p)));
-        const totalExp = me.reduce((s, e) => s + convertSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
-        const totalInc = mi.reduce((s, i) => s + convertSync(i.amount, i.currency || 'GBP', defaultCurrency), 0);
-        const net = totalInc - totalExp;
-        const savingsRate = totalInc > 0 ? ((totalInc - totalExp) / totalInc) * 100 : null;
-        const minMonth = Math.min(...monthsIncluded), maxMonth = Math.max(...monthsIncluded);
-        const isCurrent = useYearlyGrouping ? year === curYear : (year === curYear && minMonth === curMonth);
-        const lastDay = new Date(year, maxMonth + 1, 0).getDate();
-        const from = `${year}-${String(minMonth + 1).padStart(2, '0')}-01`;
-        const to = `${year}-${String(maxMonth + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-        const prefix = useYearlyGrouping ? String(year) : prefixes[0];
-        const label = useYearlyGrouping ? String(year) : new Date(year, minMonth, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
-        const shortLabel = useYearlyGrouping ? String(year) : new Date(year, minMonth, 1).toLocaleDateString('en-GB', { month: 'short' });
-
-        const catBreakdown = {};
-        categories.forEach(cat => {
-            const catExps = me.filter(e => e.categoryId === cat.id);
-            if (catExps.length === 0) return;
-            const total = catExps.reduce((s, e) => s + convertSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
-            const subBreakdown = {};
-            catExps.forEach(e => { if (e.subcategory) subBreakdown[e.subcategory] = (subBreakdown[e.subcategory] || 0) + convertSync(e.amount, e.currency || 'GBP', defaultCurrency); });
-            catBreakdown[cat.id] = { total, subBreakdown, catName: cat.name };
-        });
-
-        const incomeBreakdown = {};
-        mi.forEach(i => { const src = i.source || 'Other'; incomeBreakdown[src] = (incomeBreakdown[src] || 0) + convertSync(i.amount, i.currency || 'GBP', defaultCurrency); });
-
-        return { year, month: monthsIncluded.length === 1 ? monthsIncluded[0] : null, prefix, label, shortLabel, totalExp, totalInc, net, savingsRate, isCurrent, from, to, catBreakdown, incomeBreakdown };
-    });
-
-    // A category filter turns this into "how much did I spend on X, month by month"
-    // rather than a multi-month income/expense/net/savings-rate comparison — a single
-    // month of spend (including the still-in-progress current month) is meaningful on
-    // its own, so it doesn't need the 2-complete-month bar the general trend view uses.
-    const completeMonths = selectedCategory
-        ? monthData.filter(m => m.totalExp > 0)
-        : monthData.filter(m => !m.isCurrent && (m.totalExp > 0 || m.totalInc > 0));
-    const minMonthsNeeded = selectedCategory ? 1 : 2;
-
-    // Chart series: a category filter means "no income data makes sense here", so it
-    // always forces expense-only and hides the Both/Income/Expense toggle.
-    const effectiveSeriesFilter = selectedCategory ? 'expense' : chartSeriesFilter;
-    const chartMonths = monthData.map(m => ({ label: m.shortLabel, income: m.totalInc, expense: m.totalExp }));
-    const totalIncomeAll = monthData.reduce((s, m) => s + m.totalInc, 0);
-    const totalExpAll = monthData.reduce((s, m) => s + m.totalExp, 0);
-    const totalNetAll = totalIncomeAll - totalExpAll;
-    const totalSavingsPctAll = totalIncomeAll > 0 ? ((totalIncomeAll - totalExpAll) / totalIncomeAll) * 100 : null;
-    // Table columns collapse to Month/Expenses only under a category filter, since
-    // Income/Net/Savings% all depend on income data that isn't shown in that mode.
-    // Fixed px widths computed once from the actual data, shared verbatim by the header,
-    // every period row, and the Total row (all reference this same gridCols string) —
-    // CSS max-content sizes each row's own grid independently (rows with different-width
-    // numbers, e.g. a small month next to a large yearly total, drift out of alignment
-    // with each other), and 'ch' units resolve relative to each element's OWN font-size —
-    // the header row here is deliberately smaller (0.7rem) than the body rows (0.8rem), so
-    // the same "9.5ch" was actually a different pixel width in each, which is exactly what
-    // broke alignment between the header and the data rows even though ch kept data rows
-    // aligned with each other. Measuring with a canvas at the data rows' (larger, bold)
-    // font gives one true pixel width that's correct in every context, header included.
-    // The Year/Month label column stays a flexible minmax(40px,1fr) so it's the one that
-    // yields space first if the screen is narrow — it already truncates gracefully via its
-    // own ellipsis handling below.
-    const measureCtx = document.createElement('canvas').getContext('2d');
-    const bodyFontFamily = getComputedStyle(document.body).fontFamily;
-    const textWidthPx = (str, remSize, weight) => {
-        measureCtx.font = `${weight} ${remSize * 16}px ${bodyFontFamily}`;
-        return measureCtx.measureText(str).width;
-    };
-    const colWidthPx = (strings, remSize, weight, minPx) => Math.ceil(Math.max(minPx, ...strings.map(s => textWidthPx(s, remSize, weight))) + 14);
-    const expWidth = colWidthPx([...monthData.map(m => fmt(m.totalExp)), fmt(totalExpAll), 'Expenses'], 0.8, 700, 40);
-    let gridCols;
-    if (selectedCategory) {
-        gridCols = `minmax(40px, 1fr) ${expWidth}px`;
-    } else {
-        const incWidth = colWidthPx([...monthData.map(m => fmt(m.totalInc)), fmt(totalIncomeAll), 'Income'], 0.8, 700, 40);
-        const netWidth = colWidthPx([...monthData.map(m => fmt(m.net)), fmt(totalNetAll), 'Net'], 0.8, 700, 30);
-        const savStrings = [...monthData.map(m => m.savingsRate !== null ? m.savingsRate.toFixed(0) + '%' : 'N/A'), totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0) + '%' : 'N/A', 'Savings%'];
-        const savWidth = colWidthPx(savStrings, 0.78, 700, 40);
-        gridCols = `minmax(40px, 1fr) ${incWidth}px ${expWidth}px ${netWidth}px ${savWidth}px`;
-    }
-
-    return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2><i className="fas fa-chart-line me-2"></i>Monthly Trends</h2>
-                <div className="summary-filters">
-                    <div className="filter-group">
-                        <label className="filter-label">Time Period:</label>
-                        <select className="form-select form-select-sm" value={timeWindow} onChange={(e) => setTw(e.target.value)}>
-                            <option value="3m">Last 3 Months</option>
-                            <option value="6m">Last 6 Months</option>
-                            <option value="12m">Last 12 Months</option>
-                            <option value="year">This Year</option>
-                            <option value="custom">Custom</option>
-                        </select>
-                    </div>
-                    {timeWindow === 'custom' && (
-                        <div className="filter-group" style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                            <div>
-                                <label className="filter-label">From:</label>
-                                <div style={{display: 'flex', gap: '0.25rem'}}>
-                                    <select className="form-select form-select-sm" value={customFromMonth} onChange={e => setCustomFrom(parseInt(e.target.value), customFromYear)}>
-                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
-                                    </select>
-                                    <select className="form-select form-select-sm" value={customFromYear} onChange={e => setCustomFrom(customFromMonth, parseInt(e.target.value))}>
-                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
-                                    </select>
-                                </div>
-                            </div>
-                            <div>
-                                <label className="filter-label">To:</label>
-                                <div style={{display: 'flex', gap: '0.25rem'}}>
-                                    <select className="form-select form-select-sm" value={customToMonth} onChange={e => setCustomTo(parseInt(e.target.value), customToYear)}>
-                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
-                                    </select>
-                                    <select className="form-select form-select-sm" value={customToYear} onChange={e => setCustomTo(customToMonth, parseInt(e.target.value))}>
-                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                    <div className="filter-group">
-                        <label className="filter-label">Category:</label>
-                        <select className="form-select form-select-sm" value={selectedCategory} onChange={e => setCat(e.target.value)}>
-                            <option value="">All Categories</option>
-                            {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
-                        </select>
-                    </div>
-                </div>
-            </div>
-
-            {completeMonths.length < minMonthsNeeded ? (
-                <div style={{textAlign:'center',padding:'3rem 1rem'}}>
-                    <i className="fas fa-chart-line fa-3x text-muted" style={{display:'block',marginBottom:'1rem'}}></i>
-                    <h5 className="text-muted">Not enough data yet</h5>
-                    <p className="text-muted small">{selectedCategory ? 'Add an expense in this category to see trends.' : `Add expenses over at least 2 ${useYearlyGrouping ? 'years' : 'months'} to see trends.`}</p>
-                </div>
-            ) : (
-                <React.Fragment>
-                    <div style={{padding:'0 1rem 1rem'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem'}}>
-                            <h5 style={{margin: 0}}><i className="fas fa-chart-bar me-2"></i>Income vs Expense</h5>
-                            {!selectedCategory && (
-                                <div className="btn-group btn-group-sm" role="group" aria-label="Chart series">
-                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'both' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('both')}>Both</button>
-                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'income' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('income')}>Income</button>
-                                    <button type="button" className={'btn ' + (chartSeriesFilter === 'expense' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('expense')}>Expense</button>
-                                </div>
-                            )}
-                        </div>
-                        <IncomeExpenseTrendChart months={chartMonths} defaultCurrency={defaultCurrency} seriesFilter={effectiveSeriesFilter} />
-                    </div>
-
-                    <div style={{padding:'0 1rem 1rem'}}>
-                        <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',padding:'0 10px 0.3rem',alignItems:'center',fontSize:'0.7rem',color:'#6c757d',fontWeight:600}}>
-                            <span>{useYearlyGrouping ? 'Year' : 'Month'}</span>
-                            {!selectedCategory && <span style={{textAlign:'right',color:'#198754'}}>Income</span>}
-                            <span style={{textAlign:'right',color:'#fd7e14'}}>Expenses</span>
-                            {!selectedCategory && <span style={{textAlign:'right'}}>Net</span>}
-                            {!selectedCategory && <span style={{textAlign:'right'}}>Savings%</span>}
-                        </div>
-
-                        {monthData.map(m => {
-                            const expKey = `${m.prefix}:exp`;
-                            const incKey = `${m.prefix}:inc`;
-                            const hasCat = Object.keys(m.catBreakdown).length > 0;
-                            const hasInc = !selectedCategory && Object.keys(m.incomeBreakdown).length > 0;
-                            return (
-                                <div key={m.prefix} style={{marginBottom:'6px',border:'1px solid',borderColor:m.isCurrent?'#adb5bd':'#dee2e6',borderStyle:m.isCurrent?'dashed':'solid',borderRadius:'8px',overflow:'hidden'}}>
-                                    <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',background:m.isCurrent?'#f8f9fa':'#fff'}}>
-                                        <div style={{minWidth:0}}>
-                                            <div style={{fontWeight:600,fontSize:'0.75rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{m.label}</div>
-                                            {m.isCurrent && <span className="badge bg-secondary" style={{fontSize:'0.55rem',marginTop:'2px',display:'inline-block'}}>current</span>}
-                                        </div>
-                                        {!selectedCategory && <div style={{fontSize:'0.8rem',color:'#198754',textAlign:'right',whiteSpace:'nowrap'}}>{m.totalInc > 0 ? fmt(m.totalInc) : <span style={{color:'#adb5bd'}}>—</span>}</div>}
-                                        <div style={{fontSize:'0.8rem',color:'#fd7e14',textAlign:'right',whiteSpace:'nowrap',cursor:m.totalExp>0?'pointer':'default',textDecoration:m.totalExp>0?'underline':'none',textDecorationColor:'#fd7e14',textUnderlineOffset:'2px'}}
-                                            onClick={() => m.totalExp > 0 && onMonthSelect(m.from, m.to)}
-                                            title={m.totalExp > 0 ? `View ${m.label} expenses` : undefined}>
-                                            {m.totalExp > 0 ? fmt(m.totalExp) : <span style={{color:'#adb5bd'}}>—</span>}
-                                        </div>
-                                        {!selectedCategory && (
-                                            <div style={{fontSize:'0.8rem',fontWeight:600,textAlign:'right',whiteSpace:'nowrap',color:(m.totalInc>0||m.totalExp>0)?(m.net>=0?'#198754':'#dc3545'):'#adb5bd'}}>
-                                                {(m.totalInc > 0 || m.totalExp > 0) ? fmt(m.net) : '—'}
-                                            </div>
-                                        )}
-                                        {!selectedCategory && (
-                                            <div style={{fontSize:'0.78rem',color:'#6c757d',textAlign:'right',whiteSpace:'nowrap'}}>
-                                                {m.savingsRate !== null ? m.savingsRate.toFixed(0)+'%' : 'N/A'}
-                                            </div>
-                                        )}
-                                    </div>
-                                    {(hasCat || hasInc) && (
-                                        <div style={{display:'flex',gap:'4px',padding:'3px 10px 5px',borderTop:'1px solid #f0f0f0',background:'#fafafa'}}>
-                                            {hasCat && (
-                                                <button type="button" className={'btn btn-sm ' + (expanded[expKey] ? 'btn-warning' : 'btn-outline-secondary')}
-                                                    style={{fontSize:'0.7rem',padding:'1px 8px'}}
-                                                    onClick={e => { e.stopPropagation(); toggle(expKey); }}>
-                                                    <i className={'fas fa-' + (expanded[expKey] ? 'minus' : 'plus') + ' me-1'}></i>Expenses
-                                                </button>
-                                            )}
-                                            {hasInc && (
-                                                <button type="button" className={'btn btn-sm ' + (expanded[incKey] ? 'btn-success' : 'btn-outline-secondary')}
-                                                    style={{fontSize:'0.7rem',padding:'1px 8px'}}
-                                                    onClick={e => { e.stopPropagation(); toggle(incKey); }}>
-                                                    <i className={'fas fa-' + (expanded[incKey] ? 'minus' : 'plus') + ' me-1'}></i>Income
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-                                    {expanded[expKey] && hasCat && (
-                                        <div style={{borderTop:'1px solid #f0f0f0'}}>
-                                            {Object.entries(m.catBreakdown).sort((a,b) => b[1].total - a[1].total).map(([catId, data]) => {
-                                                const catKey = `${m.prefix}:cat:${catId}`;
-                                                const hasSubs = Object.keys(data.subBreakdown).length > 0;
-                                                return (
-                                                    <div key={catId}>
-                                                        <div style={{display:'flex',alignItems:'center',padding:'5px 10px 5px 18px',gap:'6px',background:'#fff9f0'}}>
-                                                            {hasSubs
-                                                                ? <button type="button" className="btn btn-sm btn-outline-secondary" style={{fontSize:'0.65rem',padding:'0 5px',lineHeight:'1.4',minWidth:'20px'}} onClick={e => { e.stopPropagation(); toggle(catKey); }}>
-                                                                    <i className={'fas fa-' + (expanded[catKey] ? 'minus' : 'plus')}></i>
-                                                                  </button>
-                                                                : <span style={{width:'22px',display:'inline-block'}}></span>
-                                                            }
-                                                            <span style={{flex:1,fontSize:'0.8rem',fontWeight:500}}>{data.catName}</span>
-                                                            <span style={{fontSize:'0.8rem',color:'#fd7e14',fontWeight:600}}>{fmt(data.total)}</span>
-                                                        </div>
-                                                        {expanded[catKey] && hasSubs && Object.entries(data.subBreakdown).sort((a,b) => b[1]-a[1]).map(([sub, amt]) => (
-                                                            <div key={sub} style={{display:'flex',padding:'3px 10px 3px 46px',fontSize:'0.77rem',color:'#6c757d',background:'#fffdf8'}}>
-                                                                <span style={{flex:1}}>{sub}</span>
-                                                                <span>{fmt(amt)}</span>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
-                                    {expanded[incKey] && hasInc && (
-                                        <div style={{borderTop:'1px solid #f0f0f0'}}>
-                                            {Object.entries(m.incomeBreakdown).sort((a,b) => b[1]-a[1]).map(([src, amt]) => (
-                                                <div key={src} style={{display:'flex',padding:'5px 10px 5px 18px',fontSize:'0.8rem',background:'#f0fff4'}}>
-                                                    <span style={{flex:1,color:'#495057'}}><i className="fas fa-arrow-circle-down me-1 text-success"></i>{src}</span>
-                                                    <span style={{color:'#198754',fontWeight:600}}>{fmt(amt)}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
-
-                        <div style={{display:'grid',gridTemplateColumns:gridCols,gap:'4px',alignItems:'center',padding:'8px 10px',marginTop:'2px',borderTop:'2px solid #adb5bd'}}>
-                            <div style={{fontWeight:700,fontSize:'0.85rem',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>Total</div>
-                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,color:'#198754',textAlign:'right',whiteSpace:'nowrap'}}>{fmt(totalIncomeAll)}</div>}
-                            <div style={{fontSize:'0.8rem',fontWeight:700,color:'#fd7e14',textAlign:'right',whiteSpace:'nowrap'}}>{fmt(totalExpAll)}</div>
-                            {!selectedCategory && <div style={{fontSize:'0.8rem',fontWeight:700,textAlign:'right',whiteSpace:'nowrap',color:totalNetAll>=0?'#198754':'#dc3545'}}>{fmt(totalNetAll)}</div>}
-                            {!selectedCategory && <div style={{fontSize:'0.78rem',fontWeight:700,color:'#6c757d',textAlign:'right',whiteSpace:'nowrap'}}>{totalSavingsPctAll !== null ? totalSavingsPctAll.toFixed(0)+'%' : 'N/A'}</div>}
-                        </div>
-                    </div>
-                </React.Fragment>
             )}
         </div>
     );
@@ -11591,7 +10313,7 @@ function ActiveViewSheet({ activeView, currentUser, people, onChange, onClose, o
                     );
                 })}
             </div>
-            <button type="button" className="sp-link" onClick={onManagePeople}><i className="fas fa-user-plus" style={{marginRight: '6px'}}></i>Add or edit people in Settings</button>
+            <button type="button" className="sp-link" onClick={onManagePeople}><i className="fas fa-user-plus" style={{marginRight: '6px'}}></i>Add or edit people in More</button>
         </Sheet>
     );
 }
@@ -11683,7 +10405,7 @@ function QuickAddSheet({ onClose, onPick }) {
 }
 
 // "More" tab. Trends is now part of Summary; Accounts has its own screen.
-function MoreScreen({ onNavigate }) {
+function MoreScreen({ onNavigate, settings }) {
     const tiles = [
         ['categories', 'Categories', 'fas fa-tags', '#dcfce7', '#16a34a'],
         ['income', 'Income', 'fas fa-wallet', '#dbeafe', '#2563eb'],
@@ -11691,11 +10413,10 @@ function MoreScreen({ onNavigate }) {
         ['networth', 'Net Worth', 'fas fa-scale-balanced', '#eef2ff', '#6366f1'],
         ['accounts', 'Accounts', 'fas fa-building-columns', '#dbeafe', '#2563eb'],
         ['bulk-upload', 'Upload', 'fas fa-upload', '#fee2e2', '#e11d48'],
-        ['export', 'Export', 'fas fa-file-export', '#f1f5f9', '#0f172a'],
-        ['settings', 'Settings', 'fas fa-sliders', '#f1f5f9', '#475569']
+        ['export', 'Export', 'fas fa-file-export', '#f1f5f9', '#0f172a']
     ];
     return (
-        <div className="sp-page">
+        <div className="sp-page sp-morepage">
             <div className="sp-page-kicker">Account &amp; tools</div>
             <h2 className="sp-page-title">More</h2>
             <div className="sp-tiles">
@@ -11706,6 +10427,7 @@ function MoreScreen({ onNavigate }) {
                     </button>
                 ))}
             </div>
+            {settings && <SettingsScreen {...settings} />}
         </div>
     );
 }
@@ -12444,7 +11166,6 @@ function App() {
     const renderScreen = () => {
         switch (currentScreen) {
             case 'expenses': return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} initialDateFrom={expensesInitDateFrom} initialDateTo={expensesInitDateTo} activeView={activeView} defaultCurrency={defaultCurrency} />;
-            case 'trends': return <MonthlyTrends expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} onMonthSelect={(from, to) => { setExpensesInitDateFrom(from); setExpensesInitDateTo(to); setCurrentScreen('expenses'); }} />;
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} autoOpenForm={incomeAutoOpen} onFormOpened={() => setIncomeAutoOpen(false)} />;
@@ -12455,10 +11176,9 @@ function App() {
             case 'bulk-upload': return <BulkUpload categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'accounts': return <AccountsScreen categories={categories} activeView={activeView} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} />;
-            case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} netWorthItems={netWorthItems} assetCategories={assetCategories} liabilityCategories={liabilityCategories} defaultCurrency={defaultCurrency} activeView={activeView} onNavigate={setCurrentScreen} />;
             // Profile now opens as a sheet from the header avatar; 'profile' falls back to More.
-            case 'more': case 'profile': return <MoreScreen onNavigate={navigate} />;
+            case 'settings': case 'more': case 'profile': return <MoreScreen onNavigate={navigate} settings={{ currentCurrency: defaultCurrency, onCurrencyChange: handleCurrencyChange, currentUser, onStoragePickerOpen: handleOpenStoragePicker, syncStatus, lastSyncTime, storagePreference, onSyncNow: handleSyncNow, onReconnect: handleReconnect, onViewHistory: () => setShowCloudHistory(true), activeView, onActiveViewChange: handleActiveViewChange, scrollTarget: settingsScrollTarget, onScrollTargetHandled: () => setSettingsScrollTarget(null), onUpdate: handleDataUpdate }} />;
             default: return <ExpenseList expenses={expenses} categories={categories} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} />;
         }
     };
@@ -12564,7 +11284,7 @@ function App() {
                     <SpToast tone="warn" icon="fas fa-cloud-arrow-up" title="Changes not backed up" text={'Pending since ' + new Date(pendingSyncSince).toLocaleString() + ". We'll retry automatically."} action="Sync now" onAction={handleSyncNow} onClose={() => setPendingSyncBannerDismissed(true)} />
                 )}
                 {showLocalDeviceBanner && (
-                    <SpToast tone="warn" icon="fas fa-triangle-exclamation" title="Your data is stored on another device" text="Import a backup to restore it here, or switch your storage in Settings." action="Import a backup" onAction={() => navigate('settings')} onClose={() => { localStorage.setItem('financeApp_localBannerDismissed', DateUtils.today()); setLocalDeviceBannerDismissed(true); }} />
+                    <SpToast tone="warn" icon="fas fa-triangle-exclamation" title="Your data is stored on another device" text="Import a backup to restore it here, or switch your storage in More → Storage & Back Up." action="Import a backup" onAction={() => { setSettingsScrollTarget('storage'); navigate('more'); }} onClose={() => { localStorage.setItem('financeApp_localBannerDismissed', DateUtils.today()); setLocalDeviceBannerDismissed(true); }} />
                 )}
             </div>
             {!isPrimaryScreen && currentScreen !== 'add-expense' && (
@@ -12579,13 +11299,13 @@ function App() {
             {shellSheet === 'view' && (
                 <ActiveViewSheet activeView={activeView} currentUser={currentUser} people={peopleList} onChange={handleActiveViewChange}
                     onClose={() => setShellSheet(null)}
-                    onManagePeople={() => { setShellSheet(null); navigate('settings'); }} />
+                    onManagePeople={() => { setShellSheet(null); setSettingsScrollTarget('activeView'); navigate('more'); }} />
             )}
             {shellSheet === 'sync' && (
                 <SyncSheet view={syncView} providerLabel={storageLabel} lastSyncTime={lastSyncTime} pendingSince={pendingSyncSince} conflictGroups={conflictGroups} isCloud={isCloudStorage}
                     onClose={() => setShellSheet(null)}
                     onOpenConflicts={(screen) => navigate(screen)}
-                    onStorageSettings={() => navigate('settings')}
+                    onStorageSettings={() => { setSettingsScrollTarget('storage'); navigate('more'); }}
                     onViewHistory={() => { setShellSheet(null); setShowCloudHistory(true); }} />
             )}
             {shellSheet === 'profile' && (
