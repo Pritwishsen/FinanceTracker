@@ -4982,15 +4982,592 @@ function IncomeExpenseTrendChart({ months, defaultCurrency, seriesFilter = 'both
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-function Summary({ expenses, income, categories, defaultCurrency, activeView, onUpdate }) {
+// Summary (home) helpers. Month keys are 'YYYY-MM' strings, compared as text.
+const spPerfColor = (pct) => pct > 110 ? '#e11d48' : pct > 100 ? '#f59e0b' : '#10b981';
+const SP_PERF_INK = { '#10b981': '#047857', '#f59e0b': '#b45309', '#e11d48': '#be123c' };
+const spMonthKey = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+const spShiftMonth = (k, n) => spMonthKey(new Date(+k.slice(0, 4), +k.slice(5, 7) - 1 + n, 1));
+const spMonthLabel = (k, opts) => new Date(+k.slice(0, 4), +k.slice(5, 7) - 1, 1).toLocaleDateString('en-GB', opts).replace(/\bSept\b/, 'Sep');
+const spMonthDiff = (a, b) => (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7)) + 1;
+const spMonthRange = (fromK, toK) => {
+    const out = [];
+    for (let k = fromK; k && k <= toK && out.length < 600; k = spShiftMonth(k, 1)) out.push(k);
+    return out;
+};
+
+function SummaryRangeSheet({ from, to, onApply, onClose }) {
+    const nowK = spMonthKey(new Date());
+    const nowY = new Date().getFullYear();
+    const [d, setD] = useState(() => {
+        const f = from || spShiftMonth(nowK, -2);
+        return { from: f, to: to || nowK, target: 'from', year: +f.slice(0, 4) };
+    });
+    const upd = (p) => setD(prev => ({ ...prev, ...p }));
+    const pick = (k) => {
+        if (d.target === 'from') upd({ from: k, to: d.to < k ? k : d.to, target: 'to' });
+        else if (k < d.from) upd({ from: k, target: 'to' });
+        else upd({ to: k });
+    };
+    const n = spMonthDiff(d.from, d.to);
+    return (
+        <Sheet onClose={onClose} title="Custom range" sub="Pick a start and end month.">
+            <div className="sp-rangepresets">
+                {[3, 6, 12].map(p => {
+                    const fk = spShiftMonth(nowK, -(p - 1));
+                    return <button key={p} type="button" className={d.from === fk && d.to === nowK ? 'is-active' : ''} onClick={() => upd({ from: fk, to: nowK, target: 'to', year: nowY })}>Last {p} mo</button>;
+                })}
+            </div>
+            <div className="sp-rangeends">
+                {[['from', 'FROM', d.from], ['to', 'TO', d.to]].map(([k, kicker, v]) => (
+                    <button key={k} type="button" className={d.target === k ? 'is-active' : ''} onClick={() => upd({ target: k, year: +v.slice(0, 4) })}>
+                        <span>{kicker}</span>{spMonthLabel(v, { month: 'short', year: 'numeric' })}
+                    </button>
+                ))}
+            </div>
+            <div className="sp-rangecal">
+                <div className="sp-rangecal-head">
+                    <button type="button" onClick={() => upd({ year: d.year - 1 })} aria-label="Previous year"><i className="fas fa-chevron-left"></i></button>
+                    <span>{d.year}</span>
+                    <button type="button" disabled={d.year >= nowY} onClick={() => upd({ year: d.year + 1 })} aria-label="Next year"><i className="fas fa-chevron-right"></i></button>
+                </div>
+                <div className="sp-rangecal-grid">
+                    {Array.from({ length: 12 }, (_, i) => {
+                        const k = d.year + '-' + String(i + 1).padStart(2, '0');
+                        const cls = k === d.from || k === d.to ? 'is-edge' : k > d.from && k < d.to ? 'is-inside' : '';
+                        return <button key={k} type="button" disabled={k > nowK} className={cls} onClick={() => pick(k)}>{spMonthLabel(k, { month: 'short' })}</button>;
+                    })}
+                </div>
+            </div>
+            <div className="sp-rangesum">{n} month{n === 1 ? '' : 's'} selected · tap {d.target === 'from' ? 'a start' : 'an end'} month</div>
+            <button type="button" className="sp-btn sp-btn-primary" style={{marginTop: '10px'}} onClick={() => onApply(d.from, d.to)}>Apply range</button>
+        </Sheet>
+    );
+}
+
+function Summary({ expenses, income, categories, defaultCurrency, activeView, onUpdate, currentUser, notifications = [], onNavigate }) {
     const _f0 = FilterMemory.load('summary'); // restore last session's filters (see FilterMemory)
-    const [timeRange, setTimeRange] = useState(_f0.timeRange || 'month');
-    const [selectedCategory, setSelectedCategory] = useState(_f0.category || '');
-    const [selectedPaidBy, setSelectedPaidBy] = useState(_f0.paidBy || '');
-    const [budgetData, setBudgetData] = useState([]);
-    const [convertedExpenses, setConvertedExpenses] = useState([]);
+    // Filters saved by the previous Summary screen (timeRange etc.) map onto the new periods.
+    const _init = (() => {
+        const nowK = spMonthKey(new Date());
+        if (['month', 'last', 'year', 'custom'].includes(_f0.period)) return { period: _f0.period, from: _f0.from || '', to: _f0.to || '' };
+        const legacyMonths = { threeMonths: 3, sixMonths: 6 }[_f0.timeRange];
+        if (legacyMonths) return { period: 'custom', from: spShiftMonth(nowK, -(legacyMonths - 1)), to: nowK };
+        if (_f0.timeRange === 'custom' && _f0.customFromYear != null && _f0.customToYear != null) {
+            const a = spMonthKey(new Date(_f0.customFromYear, _f0.customFromMonth, 1)), b = spMonthKey(new Date(_f0.customToYear, _f0.customToMonth, 1));
+            return { period: 'custom', from: a <= b ? a : b, to: a <= b ? b : a };
+        }
+        return { period: _f0.timeRange === 'year' ? 'year' : 'month', from: '', to: '' };
+    })();
+    const [period, setPeriod] = useState(_init.period === 'custom' && !(_init.from && _init.to) ? 'month' : _init.period);
+    const [rangeFrom, setRangeFrom] = useState(_init.from);
+    const [rangeTo, setRangeTo] = useState(_init.to);
+    const [sumCats, setSumCats] = useState(() => Array.isArray(_f0.cats) ? _f0.cats : _f0.category ? [parseInt(_f0.category)] : []);
     const [chartSeriesFilter, setChartSeriesFilter] = useState(_f0.chartSeries || 'both'); // 'both' | 'income' | 'expense'
-    const [expandedBudgetItems, setExpandedBudgetItems] = useState({});
+    const [showRangeSheet, setShowRangeSheet] = useState(false);
+    const [showCatSheet, setShowCatSheet] = useState(false);
+    const [openBuckets, setOpenBuckets] = useState({});
+    const [openCats, setOpenCats] = useState({});
+    const [showMovements, setShowMovements] = useState(false);
+    const [convertedExpenses, setConvertedExpenses] = useState([]);
+    const [convertedIncome, setConvertedIncome] = useState([]);
+    const [monthBudgets, setMonthBudgets] = useState({}); // { 'YYYY-MM': { [categoryId]: { amount, subs: { [name]: amount } } } }
+    // Drop categories that no longer exist (deleted elsewhere) from the filter.
+    const validCats = sumCats.filter(id => categories.some(c => c.id === id));
+
+    // Persist filters for the session (see FilterMemory) so navigating away keeps them.
+    useEffect(() => {
+        FilterMemory.save('summary', { period, from: rangeFrom, to: rangeTo, cats: sumCats, chartSeries: chartSeriesFilter });
+    }, [period, rangeFrom, rangeTo, sumCats, chartSeriesFilter]);
+
+    const convertAmountSync = (amount, fromCurrency, toCurrency) => {
+        if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
+        return Math.round(CurrencyService.convertToDefaultSync(amount, fromCurrency, toCurrency) * 100) / 100;
+    };
+
+    useEffect(() => {
+        const convertAll = async () => {
+            const newExpenses = await Promise.all(expenses.map(async (exp) => {
+                const expCurrency = exp.currency || 'GBP';
+                if (expCurrency === defaultCurrency) return exp;
+                try {
+                    const converted = await CurrencyService.convertCurrency(exp.amount, expCurrency, defaultCurrency);
+                    return { ...exp, amount: converted, currency: defaultCurrency, originalDisplayAmount: exp.amount, originalDisplayCurrency: expCurrency };
+                } catch (e) {
+                    return { ...exp, amount: convertAmountSync(exp.amount, expCurrency, defaultCurrency), currency: defaultCurrency };
+                }
+            }));
+            const newIncome = await Promise.all(income.map(async (inc) => {
+                const incCurrency = inc.currency || 'GBP';
+                if (incCurrency === defaultCurrency) return inc;
+                try {
+                    const converted = await CurrencyService.convertCurrency(inc.amount, incCurrency, defaultCurrency);
+                    return { ...inc, amount: converted, currency: defaultCurrency };
+                } catch (e) {
+                    return { ...inc, amount: convertAmountSync(inc.amount, incCurrency, defaultCurrency), currency: defaultCurrency };
+                }
+            }));
+            setConvertedExpenses(newExpenses);
+            setConvertedIncome(newIncome);
+        };
+        convertAll();
+    }, [expenses, income, defaultCurrency]);
+
+    // `now` picks which month's mid-month budget reset (budgetHistory) applies.
+    const getEffectiveBudget = (category, now, person) => {
+        const pb = (category.personBudgets && category.personBudgets[person]) || {};
+        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        if (pb.budgetHistory && pb.budgetHistory.length > 0) {
+            const midMonthReset = pb.budgetHistory.find(h => {
+                const endDate = DateUtils.parseDateStr(h.endDate);
+                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
+            });
+            if (midMonthReset) {
+                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
+            }
+        }
+        if (pb.useSubcategoryBudgets && pb.subcategoryBudgets) {
+            const total = Object.values(pb.subcategoryBudgets).reduce((sum, v) => sum + (v || 0), 0);
+            const currency = pb.budgetCurrency || (pb.subcategoryBudgetCurrencies ? Object.values(pb.subcategoryBudgetCurrencies)[0] : null) || defaultCurrency;
+            return { amount: total, currency: currency };
+        }
+        return { amount: pb.monthlyBudget || 0, currency: pb.budgetCurrency || defaultCurrency };
+    };
+    const getEffectiveSubcategoryBudget = (category, subcatName, now, person) => {
+        const pb = (category.personBudgets && category.personBudgets[person]) || {};
+        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        if (pb.subcategoryBudgetHistory && pb.subcategoryBudgetHistory[subcatName]) {
+            const midMonthReset = pb.subcategoryBudgetHistory[subcatName].find(h => {
+                const endDate = DateUtils.parseDateStr(h.endDate);
+                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
+            });
+            if (midMonthReset) {
+                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
+            }
+        }
+        const amount = (pb.subcategoryBudgets && pb.subcategoryBudgets[subcatName]) || 0;
+        const currency = (pb.subcategoryBudgetCurrencies && pb.subcategoryBudgetCurrencies[subcatName]) || defaultCurrency;
+        return { amount, currency };
+    };
+    const convertBudgetAmount = async (amount, fromCurrency) => {
+        if (!fromCurrency || fromCurrency === defaultCurrency || amount <= 0) return amount;
+        try { return await CurrencyService.convertCurrency(amount, fromCurrency, defaultCurrency); }
+        catch (e) { return convertAmountSync(amount, fromCurrency, defaultCurrency); }
+    };
+
+    const today = DateUtils.today();
+    const curKey = today.slice(0, 7);
+    const monthKeys = period === 'month' ? [curKey]
+        : period === 'last' ? [spShiftMonth(curKey, -1)]
+        : period === 'year' ? spMonthRange(curKey.slice(0, 4) + '-01', curKey)
+        : spMonthRange(rangeFrom, rangeTo);
+    const monthKeysSig = monthKeys.join(',');
+
+    // Budgets per month in the period, pooled across every active person (the same rules the
+    // old Monthly Budget Overview used for the current month). Sub-category budgets only come
+    // from people who budget this category by sub-category. The current month is always included
+    // for the Needs attention amounts.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const out = {};
+            for (const key of monthKeys.includes(curKey) ? monthKeys : [...monthKeys, curKey]) {
+                const at = new Date(+key.slice(0, 4), +key.slice(5, 7) - 1, 15);
+                const byCat = {};
+                for (const category of categories) {
+                    let amount = 0;
+                    for (const person of activeView) {
+                        const eff = getEffectiveBudget(category, at, person);
+                        amount += await convertBudgetAmount(eff.amount, eff.currency);
+                    }
+                    const subs = {};
+                    const subPeople = activeView.filter(p => category.personBudgets && category.personBudgets[p] && category.personBudgets[p].useSubcategoryBudgets);
+                    for (const sub of (subPeople.length ? (category.subcategories || []) : [])) {
+                        let subAmount = 0;
+                        for (const person of subPeople) {
+                            const eff = getEffectiveSubcategoryBudget(category, sub, at, person);
+                            subAmount += await convertBudgetAmount(eff.amount, eff.currency);
+                        }
+                        subs[sub] = subAmount;
+                    }
+                    byCat[category.id] = { amount, subs };
+                }
+                out[key] = byCat;
+            }
+            if (!cancelled) setMonthBudgets(out);
+        })();
+        return () => { cancelled = true; };
+    }, [monthKeysSig, categories, activeView, defaultCurrency]);
+
+    const sym = ValidationUtils.getCurrencySymbol(defaultCurrency);
+    const numLocale = defaultCurrency === 'INR' ? 'en-IN' : 'en-GB';
+    const fmt0 = (v) => (v < 0 ? '−' : '') + sym + Math.round(Math.abs(v)).toLocaleString(numLocale);
+    const kLabel = (v) => v <= 0 ? '' : v >= 1000 ? sym + (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : sym + Math.round(v);
+
+    // Whole months, including records dated later this month — the same basis as the budget
+    // alerts in Needs attention and the old Monthly Budget Overview.
+    const keySet = new Set(monthKeys);
+    const inPeriod = (d) => !!d && keySet.has(d.slice(0, 7));
+    const catOk = (e) => !validCats.length || validCats.includes(e.categoryId);
+    const pExp = convertedExpenses.filter(e => inPeriod(e.date) && catOk(e));
+    const pInc = convertedIncome.filter(i => inPeriod(i.date));
+    const totalExpenses = pExp.reduce((s, e) => s + e.amount, 0);
+    const totalIncome = pInc.reduce((s, i) => s + i.amount, 0);
+    const net = totalIncome - totalExpenses;
+
+    // "vs" pill: This month → same days of last month; Last month → the month before;
+    // Year → last year to the same date; Custom → the same number of months just before.
+    const prevOk = (() => {
+        if (period === 'month') { const k = spShiftMonth(curKey, -1), dd = today.slice(8, 10); return (d) => d.slice(0, 7) === k && d.slice(8, 10) <= dd; }
+        if (period === 'last') { const k = spShiftMonth(curKey, -2); return (d) => d.slice(0, 7) === k; }
+        if (period === 'custom') { const n = monthKeys.length, a = spShiftMonth(rangeFrom, -n), b = spShiftMonth(rangeFrom, -1); return (d) => d.slice(0, 7) >= a && d.slice(0, 7) <= b; }
+        const y = String(+today.slice(0, 4) - 1), md = today.slice(5); return (d) => d.slice(0, 4) === y && d.slice(5) <= md;
+    })();
+    const prevExp = convertedExpenses.filter(e => e.date && prevOk(e.date) && catOk(e)).reduce((s, e) => s + e.amount, 0);
+    // Periods that run to today compare only what's dated up to today on both sides.
+    const cmpExp = period === 'last' ? totalExpenses : pExp.filter(e => e.date <= today).reduce((s, e) => s + e.amount, 0);
+    const vsPct = prevExp > 0 ? Math.round(((cmpExp - prevExp) / prevExp) * 100) : null;
+    const vsWord = { month: 'vs last month', last: 'vs month before', year: 'vs last year', custom: 'vs prior period' }[period];
+
+    const periodStart = DateUtils.parseDateStr(monthKeys[0] + '-01');
+    const lastKey = monthKeys[monthKeys.length - 1];
+    const periodEndStr = lastKey === curKey ? today : DateUtils.addToDateStr(spShiftMonth(lastKey, 1) + '-01', { days: -1 });
+    const periodDays = Math.max(1, Math.round((DateUtils.parseDateStr(periodEndStr) - periodStart) / 86400000) + 1);
+
+    const catsList = validCats.length ? categories.filter(c => validCats.includes(c.id)) : categories;
+    const budgetOf = (keys, cat) => keys.reduce((s, k) => s + ((monthBudgets[k] && monthBudgets[k][cat.id] && monthBudgets[k][cat.id].amount) || 0), 0);
+    const subBudgetOf = (keys, cat, sub) => keys.reduce((s, k) => s + ((monthBudgets[k] && monthBudgets[k][cat.id] && monthBudgets[k][cat.id].subs[sub]) || 0), 0);
+    const budgetFor = (keys) => catsList.reduce((s, c) => s + budgetOf(keys, c), 0);
+    const periodBudget = budgetFor(monthKeys);
+
+    const catLocked = validCats.length > 0;
+    const effSeries = catLocked ? 'expense' : chartSeriesFilter;
+    const showIncome = effSeries !== 'expense', showExpense = effSeries !== 'income';
+    const incBy = {}, expBy = {};
+    pInc.forEach(i => { const k = i.date.slice(0, 7); incBy[k] = (incBy[k] || 0) + i.amount; });
+    pExp.forEach(e => { const k = e.date.slice(0, 7); expBy[k] = (expBy[k] || 0) + e.amount; });
+    const sumK = (map, ks) => ks.reduce((t, k) => t + (map[k] || 0), 0);
+    const mShort = (k) => spMonthLabel(k, { month: 'short' }).slice(0, 3);
+
+    // More than 12 months folds into one bar per year.
+    const byYear = monthKeys.length > 12;
+    let buckets;
+    if (byYear) {
+        const g = {};
+        monthKeys.forEach(k => { (g[k.slice(0, 4)] = g[k.slice(0, 4)] || []).push(k); });
+        buckets = Object.keys(g).sort().map(y => {
+            const ks = g[y];
+            const sub = ks.length === 12 ? '(Jan–Dec)' : ks.length === 1 ? '(' + mShort(ks[0]) + ')' : '(' + mShort(ks[0]) + '–' + mShort(ks[ks.length - 1]) + ')';
+            return { label: y, sub, keys: ks };
+        });
+    } else {
+        buckets = monthKeys.map(k => ({ label: mShort(k), sub: '', keys: [k] }));
+    }
+    const nB = buckets.length;
+    const customLabel = !rangeFrom ? 'Custom' : rangeFrom === rangeTo ? spMonthLabel(rangeFrom, { month: 'short', year: 'numeric' })
+        : rangeFrom.slice(0, 4) === rangeTo.slice(0, 4) ? spMonthLabel(rangeFrom, { month: 'short' }) + ' – ' + spMonthLabel(rangeTo, { month: 'short', year: 'numeric' })
+        : spMonthLabel(rangeFrom, { month: 'short', year: 'numeric' }) + ' – ' + spMonthLabel(rangeTo, { month: 'short', year: 'numeric' });
+    const periodName = { month: 'This month', last: 'Last month', year: 'Jan – ' + mShort(curKey) + ' ' + curKey.slice(0, 4) }[period] || customLabel;
+    const chartRangeLabel = periodName + (byYear ? ' · by year' : '') + (catLocked ? ' · ' + validCats.length + ' categor' + (validCats.length === 1 ? 'y' : 'ies') : '');
+    const maxIE = Math.max(1, ...buckets.map(bk => Math.max(showIncome ? sumK(incBy, bk.keys) : 0, showExpense ? sumK(expBy, bk.keys) : 0)));
+    const both = showIncome && showExpense;
+    const dense = nB > 6;
+    const vertLabels = dense || (both && nB > 4);
+    const barW = nB <= 2 ? (both ? 34 : 52) : nB <= 4 ? (both ? 20 : 34) : dense ? (both ? 7 : 14) : (both ? 11 : 18);
+
+    const buildTree = (keys, bid) => catsList.map((c) => {
+        const look = spCategoryLook(c, categories.indexOf(c));
+        const catExp = pExp.filter(e => e.categoryId === c.id && keys.includes(e.date.slice(0, 7)));
+        const spent = catExp.reduce((s, e) => s + e.amount, 0);
+        const budget = budgetOf(keys, c);
+        const pct = budget > 0 ? (spent / budget) * 100 : 0;
+        const subs = (c.subcategories || []).map(sub => {
+            const sp = catExp.filter(e => e.subcategory === sub).reduce((s, e) => s + e.amount, 0);
+            const sb = subBudgetOf(keys, c, sub);
+            return { name: sub, spent: sp, budget: sb, pct: sb > 0 ? (sp / sb) * 100 : 0 };
+        });
+        return { cat: c, look, spent, budget, pct, color: budget > 0 ? spPerfColor(pct) : '#94a3b8', subs, ck: bid + ':' + c.id };
+    }).filter(t => t.spent > 0 || t.budget > 0);
+
+    const periodCards = [...buckets].reverse().map((bk, idx) => {
+        const bid = bk.keys[0] + '_' + bk.keys[bk.keys.length - 1];
+        const inc = sumK(incBy, bk.keys), ex = sumK(expBy, bk.keys), bNet = inc - ex;
+        const bud = budgetFor(bk.keys);
+        const pct = bud > 0 ? (ex / bud) * 100 : 0;
+        const outColor = bud > 0 ? spPerfColor(pct) : '#94a3b8';
+        const isOpen = openBuckets[bid] === undefined ? idx === 0 : openBuckets[bid];
+        const title = byYear ? bk.label : spMonthLabel(bk.keys[0], { month: 'long', year: 'numeric' });
+        return { bid, bk, inc, ex, bNet, bud, pct, outColor, isOpen, title };
+    });
+    const periodListTitle = byYear ? 'Year by year' : nB === 1 ? 'This period' : 'Month by month';
+
+    // Same alerts the old notifications bell listed (budget thresholds + bill reminders).
+    // Chip amounts use this screen's converted figures for the current month (the alert only says which category).
+    const billsById = new Map(DataService.getBills().map(b => [String(b.id), b]));
+    const alertAmount = (key) => {
+        const cat = categories.find(c => 'budget:' + c.id === key);
+        const budget = cat && monthBudgets[curKey] && monthBudgets[curKey][cat.id] ? monthBudgets[curKey][cat.id].amount : 0;
+        if (!budget) return null;
+        const spent = convertedExpenses.filter(e => e.categoryId === cat.id && e.date && e.date.slice(0, 7) === curKey).reduce((s, e) => s + e.amount, 0);
+        return { spent, budget, pct: (spent / budget) * 100 };
+    };
+    const attentionItems = notifications.map(n => {
+        const amt = n.type !== 'bill' ? alertAmount(n.key) : null;
+        const bill = n.type === 'bill';
+        const over = n.type === 'budget-over';
+        const b = bill ? billsById.get(String(n.key).slice(5)) : null;
+        const due = b ? Math.round((DateUtils.parseDateStr(b.nextDueDate) - DateUtils.parseDateStr(today)) / 86400000) : null;
+        return {
+            key: n.key || n.id, screen: n.screen,
+            title: b ? b.name + ' ' + ValidationUtils.getCurrencySymbol(b.currency || defaultCurrency) + Math.round(b.amount).toLocaleString(numLocale)
+                : (n.title || '').replace(/: (over budget|approaching budget|due soon)$/, ''),
+            sub: b ? (due < 0 ? 'Overdue' : due === 0 ? 'Due today' : due === 1 ? 'Due tomorrow' : 'Due in ' + due + ' days')
+                : amt ? (amt.spent > amt.budget ? fmt0(amt.spent - amt.budget) + ' over budget' : fmt0(amt.budget - amt.spent) + ' left · ' + Math.round(amt.pct) + '% used')
+                : over ? 'Over budget · ' + n.message : n.message,
+            icon: bill ? 'fas fa-bell' : 'fas fa-triangle-exclamation',
+            tone: over ? 'is-over' : 'is-warn'
+        };
+    });
+
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+    const firstName = ((currentUser && currentUser.displayName) || '').trim().split(' ')[0];
+    const pageTitle = { month: 'Your Month', last: 'Last Month', year: 'Your Year', custom: 'Your Range' }[period];
+    const toggleCat = (id) => setSumCats(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+    const hasData = pExp.length > 0 || pInc.length > 0;
+    const rangeStartDate = periodStart;
+    const rangeEndDate = new Date(DateUtils.parseDateStr(periodEndStr).getTime() + 86399999);
+
+    return (
+        <div className="sp-page">
+            <div className="sp-page-kicker">{greeting}{firstName ? ', ' + firstName : ''}</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>{pageTitle}</h2>
+
+            <div className="sp-periodbar">
+                <div className="sp-seg is-light sp-periodseg">
+                    {[['month', 'This mo'], ['last', 'Last mo'], ['year', 'Year']].map(([k, l]) => (
+                        <button key={k} type="button" className={period === k ? 'is-active' : ''} onClick={() => setPeriod(k)}>{l}</button>
+                    ))}
+                    <button type="button" className={period === 'custom' ? 'is-active' : ''} onClick={() => setShowRangeSheet(true)}>Custom</button>
+                </div>
+                <button type="button" className={'sp-sumcatbtn' + (catLocked ? ' is-active' : '')} onClick={() => setShowCatSheet(true)} title="Filter by category">
+                    <i className="fas fa-tags"></i>
+                    {catLocked && <span className="sp-filterbtn-count">{validCats.length}</span>}
+                </button>
+            </div>
+            {period === 'custom' && (
+                <button type="button" className="sp-rangechip" onClick={() => setShowRangeSheet(true)}>
+                    <i className="fas fa-calendar"></i>
+                    <span className="sp-rangechip-label">{customLabel}</span>
+                    <span className="sp-rangechip-count">{monthKeys.length} month{monthKeys.length === 1 ? '' : 's'}</span>
+                    <i className="fas fa-pen" style={{color: 'var(--sp-slate-400)', fontSize: '10px'}}></i>
+                </button>
+            )}
+            {catLocked && (
+                <div className="sp-activechips">
+                    {catsList.map(c => <button key={c.id} type="button" className="sp-activechip" onClick={() => toggleCat(c.id)}>{c.name}<i className="fas fa-xmark" style={{fontSize: '10px'}}></i></button>)}
+                    <button type="button" className="sp-clearlink" onClick={() => setSumCats([])}>Clear</button>
+                </div>
+            )}
+
+            <div className="sp-hero sp-sumhero">
+                <div className="sp-sumhero-top">
+                    <div>
+                        <div className="sp-hero-label">{net >= 0 ? 'Net surplus' : 'Net deficit'}</div>
+                        <div className="sp-hero-value">{(net >= 0 ? '+' : '−') + fmt0(Math.abs(net))}</div>
+                    </div>
+                    <div className="sp-sumhero-io">
+                        <div style={{color: '#34d399'}}>▲ {fmt0(totalIncome)} in</div>
+                        <div style={{color: '#fb7185'}}>▼ {fmt0(totalExpenses)} out</div>
+                    </div>
+                </div>
+                <div className="sp-hero-pills">
+                    {vsPct !== null && (
+                        <span className="sp-hero-pill" style={{background: vsPct > 0 ? '#e11d4826' : '#10b98122', color: vsPct > 0 ? '#fb7185' : '#34d399'}}>
+                            {(vsPct > 0 ? '▲ ' : vsPct < 0 ? '▼ ' : '') + Math.abs(vsPct) + '% spend ' + vsWord}
+                        </span>
+                    )}
+                    <span className="sp-hero-pill is-green">{totalIncome > 0 ? Math.round((net / totalIncome) * 100) + '%' : '0%'} saved</span>
+                    <span className="sp-hero-pill">{fmt0(totalExpenses / periodDays)}/day avg</span>
+                    <span className="sp-hero-pill">{periodBudget > 0 ? fmt0(totalExpenses) + ' of ' + fmt0(periodBudget) + ' budget' : 'No budget set'}</span>
+                </div>
+            </div>
+
+            {attentionItems.length > 0 && (
+                <React.Fragment>
+                    <div className="sp-group-label" style={{padding: '0 4px 6px'}}>Needs attention</div>
+                    <div className="sp-attn">
+                        {attentionItems.map(a => (
+                            <button key={a.key} type="button" className={'sp-attn-item ' + a.tone} onClick={() => a.screen && onNavigate && onNavigate(a.screen)}>
+                                <span className="sp-attn-icon"><i className={a.icon}></i></span>
+                                <span><span className="sp-attn-title">{a.title}</span><span className="sp-attn-sub">{a.sub}</span></span>
+                            </button>
+                        ))}
+                    </div>
+                </React.Fragment>
+            )}
+
+            <div className="sp-chartcard">
+                <div className="sp-chartcard-head">
+                    <div>
+                        <div className="sp-chartcard-kicker">INCOME VS EXPENSE</div>
+                        <div className="sp-chartcard-range">{chartRangeLabel}</div>
+                    </div>
+                    <div className="sp-miniseg">
+                        {[['both', 'Both'], ['income', 'In'], ['expense', 'Out']].map(([k, l]) => (
+                            <button key={k} type="button" disabled={catLocked && k !== 'expense'} className={effSeries === k ? 'is-active' : ''} onClick={() => setChartSeriesFilter(k)}>{l}</button>
+                        ))}
+                    </div>
+                </div>
+                <div className="sp-bars" style={{gap: nB > 8 ? '2px' : '6px'}}>
+                    {buckets.map(bk => {
+                        const inc = sumK(incBy, bk.keys), ex = sumK(expBy, bk.keys);
+                        const bud = budgetFor(bk.keys);
+                        const color = bud > 0 ? spPerfColor((ex / bud) * 100) : '#94a3b8';
+                        const lblStyle = vertLabels ? { writingMode: 'vertical-rl', transform: 'rotate(180deg)' } : {};
+                        return (
+                            <div key={bk.label + bk.keys[0]} className="sp-bars-col" title={bk.label + (bk.sub ? ' ' + bk.sub : '') + ' · in ' + fmt0(inc) + ' · out ' + fmt0(ex)}>
+                                <div className="sp-bars-pair" style={{gap: dense ? '1px' : '3px'}}>
+                                    {showIncome && <div className="sp-bars-bar"><span style={{...lblStyle, color: 'var(--sp-slate-600)'}}>{kLabel(inc)}</span><div style={{width: barW + 'px', background: 'var(--sp-slate-300)', height: Math.max(3, (inc / maxIE) * 88) + 'px'}}></div></div>}
+                                    {showExpense && <div className="sp-bars-bar"><span style={{...lblStyle, color: SP_PERF_INK[color] || 'var(--sp-slate-500)'}}>{kLabel(ex)}</span><div style={{width: barW + 'px', background: color, height: Math.max(3, (ex / maxIE) * 88) + 'px'}}></div></div>}
+                                </div>
+                                <span className="sp-bars-label" style={{fontSize: nB > 8 ? '9px' : '10px'}}>{bk.label}</span>
+                                {bk.sub && <span className="sp-bars-sub">{bk.sub}</span>}
+                            </div>
+                        );
+                    })}
+                </div>
+                <div className="sp-legend">
+                    <span className="sp-legend-item"><span style={{background: 'var(--sp-slate-300)'}}></span>Income</span>
+                    <span className="sp-legend-sep"></span>
+                    <span className="sp-legend-kicker">Expense vs budget:</span>
+                    <span className="sp-legend-item"><span style={{background: '#10b981'}}></span>Within</span>
+                    <span className="sp-legend-item"><span style={{background: '#f59e0b'}}></span>≤10% over</span>
+                    <span className="sp-legend-item"><span style={{background: '#e11d48'}}></span>&gt;10% over</span>
+                </div>
+                {catLocked && (
+                    <div className="sp-chartnote">
+                        <i className="fas fa-circle-info"></i>
+                        <span>Showing expenses only · income has no categories</span>
+                        <button type="button" onClick={() => setSumCats([])}>Clear filter</button>
+                    </div>
+                )}
+            </div>
+
+            {!hasData ? (
+                <div className="sp-empty" style={{marginBottom: '14px'}}><i className="fas fa-chart-column"></i>No income or expenses in this period.</div>
+            ) : (
+                <React.Fragment>
+                    <div className="sp-group-head" style={{padding: '0 4px 10px'}}>
+                        <span className="sp-group-label">{periodListTitle}</span>
+                        <span className="sp-group-total">tap for budget detail</span>
+                    </div>
+                    {periodCards.map(p => {
+                        const tree = p.isOpen ? buildTree(p.bk.keys, p.bid) : [];
+                        return (
+                            <div key={p.bid} className="sp-pcard">
+                                <button type="button" className="sp-pcard-head" onClick={() => setOpenBuckets(prev => ({ ...prev, [p.bid]: !p.isOpen }))} aria-expanded={p.isOpen}>
+                                    <div className="sp-pcard-titlerow">
+                                        <span className="sp-pcard-title">{p.title}</span>
+                                        {byYear && <span className="sp-pcard-sub">{p.bk.sub}</span>}
+                                        <i className={'fas fa-chevron-' + (p.isOpen ? 'up' : 'down')}></i>
+                                    </div>
+                                    <div className="sp-pcard-grid">
+                                        <div><div className="sp-pcard-k">IN</div><div className="sp-pcard-v">{fmt0(p.inc)}</div></div>
+                                        <div><div className="sp-pcard-k">OUT</div><div className="sp-pcard-v" style={{color: SP_PERF_INK[p.outColor] || 'var(--sp-slate-600)'}}>{fmt0(p.ex)}</div></div>
+                                        <div>
+                                            <div className="sp-pcard-k">NET SAVING</div>
+                                            <div className="sp-pcard-v" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{(p.bNet >= 0 ? '+' : '−') + fmt0(Math.abs(p.bNet))}</div>
+                                            {p.inc > 0 && <div className="sp-pcard-rate" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{Math.round((p.bNet / p.inc) * 100)}% saved</div>}
+                                        </div>
+                                    </div>
+                                    <div className="sp-pcard-budget">
+                                        <div className="sp-bar"><div style={{width: Math.min(p.pct, 100) + '%', background: p.outColor}}></div></div>
+                                        <span>{p.bud > 0 ? Math.round(p.pct) + '% of ' + fmt0(p.bud) + ' budget' : 'No budget'}</span>
+                                    </div>
+                                </button>
+                                {p.isOpen && (
+                                    <div className="sp-tree">
+                                        {tree.length === 0 && <div className="sp-tree-empty">No category spending or budgets in this period.</div>}
+                                        {tree.map(t => {
+                                            const catOpen = !!openCats[t.ck];
+                                            return (
+                                                <div key={t.ck} className="sp-tree-cat">
+                                                    <button type="button" className="sp-tree-cathead" onClick={() => setOpenCats(prev => ({ ...prev, [t.ck]: !catOpen }))} aria-expanded={catOpen}>
+                                                        <span className="sp-tree-icon" style={{background: t.look.tint, color: t.look.ink}}><i className={t.look.icon}></i></span>
+                                                        <span className="sp-tree-main">
+                                                            <span className="sp-tree-row"><span className="sp-tree-name">{t.cat.name}</span><span className="sp-tree-amt">{fmt0(t.spent)}{t.budget > 0 ? ' / ' + fmt0(t.budget) : ''}</span></span>
+                                                            {t.budget > 0 && (
+                                                                <span className="sp-tree-barrow">
+                                                                    <span className="sp-bar"><span style={{width: Math.min(t.pct, 100) + '%', background: t.color}}></span></span>
+                                                                    <span className="sp-tree-pct" style={{color: t.color}}>{Math.round(t.pct)}%</span>
+                                                                </span>
+                                                            )}
+                                                            <span className="sp-tree-left" style={{color: t.color}}>{t.budget <= 0 ? 'No budget set' : t.spent <= t.budget ? fmt0(t.budget - t.spent) + ' left' : fmt0(t.spent - t.budget) + ' over budget'}</span>
+                                                        </span>
+                                                        {t.subs.length > 0 && <i className={'fas fa-chevron-' + (catOpen ? 'up' : 'down') + ' sp-tree-chev'}></i>}
+                                                    </button>
+                                                    {catOpen && t.subs.length > 0 && (
+                                                        <div className="sp-tree-subs">
+                                                            {t.subs.map(s => {
+                                                                const sc = s.budget > 0 ? spPerfColor(s.pct) : '#94a3b8';
+                                                                return (
+                                                                    <div key={s.name} className="sp-tree-sub">
+                                                                        <div className="sp-tree-row"><span className="sp-tree-subname">{s.name}</span><span className="sp-tree-subamt">{fmt0(s.spent)}{s.budget > 0 ? ' / ' + fmt0(s.budget) : ''}</span></div>
+                                                                        {s.budget > 0 && (
+                                                                            <div className="sp-tree-barrow">
+                                                                                <span className="sp-bar is-thin"><span style={{width: Math.min(s.pct, 100) + '%', background: sc}}></span></span>
+                                                                                <span className="sp-tree-pct" style={{color: sc}}>{Math.round(s.pct)}%</span>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </React.Fragment>
+            )}
+
+            <SummaryMoneyMovements open={showMovements} onToggle={() => setShowMovements(v => !v)} activeView={activeView} defaultCurrency={defaultCurrency} onUpdate={onUpdate} startDate={rangeStartDate} endDate={rangeEndDate} />
+
+            {showRangeSheet && (
+                <SummaryRangeSheet from={rangeFrom} to={rangeTo} onClose={() => setShowRangeSheet(false)}
+                    onApply={(f, t) => { setRangeFrom(f); setRangeTo(t); setPeriod('custom'); setOpenBuckets({}); setShowRangeSheet(false); }} />
+            )}
+            {showCatSheet && (
+                <Sheet onClose={() => setShowCatSheet(false)}>
+                    <div className="sp-sheet-head">
+                        <div className="sp-sheet-title">Categories</div>
+                        <button type="button" className="sp-sheet-reset" onClick={() => setSumCats([])}>Reset</button>
+                    </div>
+                    <div className="sp-sheet-sub" style={{marginBottom: '12px'}}>Summary shows only the categories you pick.</div>
+                    <div className="sp-chipgrid" style={{display: 'flex', flexWrap: 'wrap', gap: '8px'}}>
+                        {categories.map((c, i) => {
+                            const on = validCats.includes(c.id);
+                            const look = spCategoryLook(c, i);
+                            return <button key={c.id} type="button" className={'sp-sheetchip' + (on ? ' is-active' : '')} onClick={() => toggleCat(c.id)}><i className={look.icon} style={{color: on ? '#34d399' : look.ink}}></i>{c.name}</button>;
+                        })}
+                    </div>
+                    <button type="button" className="sp-btn sp-btn-primary" style={{marginTop: '16px'}} onClick={() => setShowCatSheet(false)}>Done</button>
+                </Sheet>
+            )}
+        </div>
+    );
+}
+
+// Transfer, withdrawal and reconciliation tables that used to sit on Summary. They stay here,
+// collapsed, until the Accounts screen's Money movements list replaces them — it's still the
+// only place to edit a cash withdrawal or delete a transfer / reconciliation.
+function SummaryMoneyMovements({ open, onToggle, activeView, defaultCurrency, onUpdate, startDate, endDate }) {
     const [transfers, setTransfers] = useState(() => DataService.getTransfers());
     const bankAccountsForTransfers = React.useMemo(() => DataService.getBankAccounts(), [transfers]);
     // Deleting a transfer can also remove its linked fee Expense — refresh App's own
@@ -5097,725 +5674,282 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         setShowConflictDetail(null);
         if (onUpdate) onUpdate();
     };
-    // Custom time period: month+year only (no day-level picker), one pair for each end
-    // of the range. Defaults to the current month so opening "Custom" starts sane.
-    const [customFromMonth, setCustomFromMonth] = useState(() => _f0.customFromMonth != null ? _f0.customFromMonth : new Date().getMonth());
-    const [customFromYear, setCustomFromYear] = useState(() => _f0.customFromYear != null ? _f0.customFromYear : new Date().getFullYear());
-    const [customToMonth, setCustomToMonth] = useState(() => _f0.customToMonth != null ? _f0.customToMonth : new Date().getMonth());
-    const [customToYear, setCustomToYear] = useState(() => _f0.customToYear != null ? _f0.customToYear : new Date().getFullYear());
-
-    // The person sub-filter only makes sense (and is only shown) when multiple
-    // participants are active — drop any stale selection once it drops back to one.
-    useEffect(() => { if (activeView.length <= 1 && selectedPaidBy) setSelectedPaidBy(''); }, [activeView]);
-
-    // Persist filters for the session (see FilterMemory) so navigating away keeps them.
-    useEffect(() => {
-        FilterMemory.save('summary', { timeRange, category: selectedCategory, paidBy: selectedPaidBy, chartSeries: chartSeriesFilter, customFromMonth, customFromYear, customToMonth, customToYear });
-    }, [timeRange, selectedCategory, selectedPaidBy, chartSeriesFilter, customFromMonth, customFromYear, customToMonth, customToYear]);
-    const [convertedIncome, setConvertedIncome] = useState([]);
-
-    const convertAmountSync = (amount, fromCurrency, toCurrency) => {
-        if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) return amount;
-        return Math.round(CurrencyService.convertToDefaultSync(amount, fromCurrency, toCurrency) * 100) / 100;
-    };
-
-    useEffect(() => {
-        const convertAll = async () => {
-            const newExpenses = await Promise.all(expenses.map(async (exp) => {
-                const expCurrency = exp.currency || 'GBP';
-                if (expCurrency === defaultCurrency) return exp;
-                try {
-                    const converted = await CurrencyService.convertCurrency(exp.amount, expCurrency, defaultCurrency);
-                    return { ...exp, amount: converted, currency: defaultCurrency, originalDisplayAmount: exp.amount, originalDisplayCurrency: expCurrency };
-                } catch (e) {
-                    return { ...exp, amount: convertAmountSync(exp.amount, expCurrency, defaultCurrency), currency: defaultCurrency };
-                }
-            }));
-            const newIncome = await Promise.all(income.map(async (inc) => {
-                const incCurrency = inc.currency || 'GBP';
-                if (incCurrency === defaultCurrency) return inc;
-                try {
-                    const converted = await CurrencyService.convertCurrency(inc.amount, incCurrency, defaultCurrency);
-                    return { ...inc, amount: converted, currency: defaultCurrency };
-                } catch (e) {
-                    return { ...inc, amount: convertAmountSync(inc.amount, incCurrency, defaultCurrency), currency: defaultCurrency };
-                }
-            }));
-            setConvertedExpenses(newExpenses);
-            setConvertedIncome(newIncome);
-        };
-        convertAll();
-    }, [expenses, income, defaultCurrency]);
-
-    const getEffectiveBudget = (category, now, person) => {
-        const pb = (category.personBudgets && category.personBudgets[person]) || {};
-        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        if (pb.budgetHistory && pb.budgetHistory.length > 0) {
-            const midMonthReset = pb.budgetHistory.find(h => {
-                const endDate = DateUtils.parseDateStr(h.endDate);
-                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
-            });
-            if (midMonthReset) {
-                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
-            }
-        }
-        if (pb.useSubcategoryBudgets && pb.subcategoryBudgets) {
-            const total = Object.values(pb.subcategoryBudgets).reduce((sum, v) => sum + (v || 0), 0);
-            const currency = pb.budgetCurrency || (pb.subcategoryBudgetCurrencies ? Object.values(pb.subcategoryBudgetCurrencies)[0] : null) || defaultCurrency;
-            return { amount: total, currency: currency };
-        }
-        return { amount: pb.monthlyBudget || 0, currency: pb.budgetCurrency || defaultCurrency };
-    };
-    const getEffectiveSubcategoryBudget = (category, subcatName, now, person) => {
-        const pb = (category.personBudgets && category.personBudgets[person]) || {};
-        const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        if (pb.subcategoryBudgetHistory && pb.subcategoryBudgetHistory[subcatName]) {
-            const midMonthReset = pb.subcategoryBudgetHistory[subcatName].find(h => {
-                const endDate = DateUtils.parseDateStr(h.endDate);
-                return endDate >= currentMonthStart && endDate <= currentMonthEnd;
-            });
-            if (midMonthReset) {
-                return { amount: midMonthReset.amount, currency: midMonthReset.currency };
-            }
-        }
-        const amount = (pb.subcategoryBudgets && pb.subcategoryBudgets[subcatName]) || 0;
-        const currency = (pb.subcategoryBudgetCurrencies && pb.subcategoryBudgetCurrencies[subcatName]) || defaultCurrency;
-        return { amount, currency };
-    };
-
-    const convertBudgetAmount = async (amount, fromCurrency) => {
-        if (!fromCurrency || fromCurrency === defaultCurrency || amount <= 0) return amount;
-        try { return await CurrencyService.convertCurrency(amount, fromCurrency, defaultCurrency); }
-        catch (e) { return convertAmountSync(amount, fromCurrency, defaultCurrency); }
-    };
-
-    // Always the current calendar month, independent of the Time Period filter above —
-    // budgets are inherently a "this month" concept, and this is now the only
-    // category-level breakdown on the screen (Expenses by Category was removed as a
-    // duplicate of this), so it stays visible no matter what period is being viewed.
-    useEffect(() => {
-        const now = new Date();
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        let monthlyExpenses = convertedExpenses.filter(exp => { const d = DateUtils.parseDateStr(exp.date); return d >= startOfMonth && d <= endOfMonth; });
-        if (selectedPaidBy) {
-            if (selectedPaidBy === 'self') { monthlyExpenses = monthlyExpenses.filter(exp => !exp.paidBy || exp.paidBy.trim() === ''); }
-            else { monthlyExpenses = monthlyExpenses.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy); }
-        }
-        // Which person(s)' budgets to combine — narrows to a single person when "Filter by
-        // Person" is set, otherwise pools every currently active person (mirrors the exact
-        // narrowing already applied to monthlyExpenses above).
-        const budgetPeople = selectedPaidBy ? (selectedPaidBy === 'self' ? ['own'] : [selectedPaidBy]) : activeView;
-        const buildSummary = async () => {
-            const summaryPromises = categories.map(async (category) => {
-                const catExpenses = monthlyExpenses.filter(exp => exp.categoryId === category.id);
-                const totalSpent = catExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-                let budget = 0;
-                for (const person of budgetPeople) {
-                    const eff = getEffectiveBudget(category, now, person);
-                    budget += await convertBudgetAmount(eff.amount, eff.currency);
-                }
-                // Subcategory rows only reflect people who've opted into subcategory-level
-                // budgeting for this category; others' budgets still count toward the
-                // category-level total above but aren't attributed to any one subcategory.
-                const subcatModePeople = budgetPeople.filter(p => category.personBudgets && category.personBudgets[p] && category.personBudgets[p].useSubcategoryBudgets);
-                const subcats = [];
-                if (subcatModePeople.length > 0) {
-                    for (const subcatName of (category.subcategories || [])) {
-                        const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
-                        let subcatBudget = 0;
-                        for (const person of subcatModePeople) {
-                            const effSub = getEffectiveSubcategoryBudget(category, subcatName, now, person);
-                            subcatBudget += await convertBudgetAmount(effSub.amount, effSub.currency);
-                        }
-                        if (subcatBudget > 0 || subcatSpent > 0) { subcats.push({ name: subcatName, budget: subcatBudget, spent: subcatSpent, remaining: subcatBudget - subcatSpent, percentage: subcatBudget > 0 ? (subcatSpent / subcatBudget) * 100 : 0, hasBudget: subcatBudget > 0 }); }
-                    }
-                } else {
-                    // Nobody currently active budgets this category at the subcategory level. Still
-                    // surface a spend-only breakdown by subcategory (no bar/remaining, since there's
-                    // no subcategory budget to measure against) — the budget view itself stays category-level.
-                    for (const subcatName of (category.subcategories || [])) {
-                        const subcatSpent = catExpenses.filter(exp => exp.subcategory === subcatName).reduce((sum, exp) => sum + exp.amount, 0);
-                        if (subcatSpent > 0) { subcats.push({ name: subcatName, budget: 0, spent: subcatSpent, remaining: 0, percentage: 0, hasBudget: false }); }
-                    }
-                }
-                return { id: category.id, name: category.name, budget: budget, spent: totalSpent, remaining: budget - totalSpent, percentage: budget > 0 ? (totalSpent / budget) * 100 : 0, hasBudget: budget > 0, subcategories: subcats };
-            });
-            const summary = (await Promise.all(summaryPromises)).filter(item => item.budget > 0 || item.spent > 0);
-            setBudgetData(summary);
-        };
-        buildSummary();
-    }, [convertedExpenses, categories, selectedPaidBy, defaultCurrency, activeView]);
-
-    const getDateRange = () => {
-        const now = new Date(); let startDate, endDate = now;
-        switch (timeRange) {
-            case 'week': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
-            case 'month': startDate = new Date(now.getFullYear(), now.getMonth(), 1); break;
-            case 'year': startDate = new Date(now.getFullYear(), 0, 1); break;
-            case 'threeMonths': startDate = new Date(now.getFullYear(), now.getMonth() - 2, 1); break;
-            case 'sixMonths': startDate = new Date(now.getFullYear(), now.getMonth() - 5, 1); break;
-            case 'custom': {
-                // Month+year only pickers, so always snap to the start/end of those months.
-                // Swap ends if the user picked From after To, rather than returning an
-                // inverted (always-empty) range.
-                const fromKey = customFromYear * 12 + customFromMonth, toKey = customToYear * 12 + customToMonth;
-                const [startYear, startMonth, endYear, endMonth] = fromKey <= toKey
-                    ? [customFromYear, customFromMonth, customToYear, customToMonth]
-                    : [customToYear, customToMonth, customFromYear, customFromMonth];
-                startDate = new Date(startYear, startMonth, 1);
-                endDate = new Date(endYear, endMonth + 1, 0, 23, 59, 59, 999);
-                break;
-            }
-            default: startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-        }
-        return { startDate, endDate };
-    };
-    const filterByDateRange = (data) => { const { startDate, endDate } = getDateRange(); return data.filter(item => { const itemDate = DateUtils.parseDateStr(item.date); return itemDate >= startDate && itemDate <= endDate; }); };
-
-    let filteredExpenses = filterByDateRange(convertedExpenses);
-    let filteredIncome = filterByDateRange(convertedIncome);
-    if (selectedPaidBy) {
-        if (selectedPaidBy === 'self') { filteredExpenses = filteredExpenses.filter(expense => !expense.paidBy || expense.paidBy.trim() === ''); filteredIncome = filteredIncome.filter(incomeItem => !incomeItem.paidBy || incomeItem.paidBy.trim() === ''); }
-        else { filteredExpenses = filteredExpenses.filter(expense => expense.paidBy && expense.paidBy === selectedPaidBy); filteredIncome = filteredIncome.filter(incomeItem => incomeItem.paidBy && incomeItem.paidBy === selectedPaidBy); }
-    }
-    if (selectedCategory) {
-        filteredExpenses = filteredExpenses.filter(exp => exp.categoryId === parseInt(selectedCategory));
-    }
-    const totalExpenses = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
-    const totalIncome = filteredIncome.reduce((sum, inc) => sum + inc.amount, 0);
-    const netAmount = totalIncome - totalExpenses;
-    const expensesByCategory = categories.map(category => { const categoryExpenses = filteredExpenses.filter(expense => expense.categoryId === category.id); const total = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0); const percentage = totalExpenses > 0 ? (total / totalExpenses) * 100 : 0; return { ...category, total, percentage, count: categoryExpenses.length }; }).filter(category => category.total > 0).sort((a, b) => b.total - a.total);
-    // Trend chart bucketing, driven by the same Time Period selector as the summary
-    // cards above (still scoped by the Person/Category filters, mirroring the filtering
-    // already done for filteredExpenses/filteredIncome): This Week -> 7 daily bars for
-    // the current Mon-Sun; This Month -> a single bar for the whole month; every
-    // multi-month period (This Year / Last 3 / Last 6 / Custom) -> one bar per
-    // calendar month in that window.
-    const applyTrendFilters = (exps, incs) => {
-        let fe = exps, fi = incs;
-        if (selectedPaidBy) {
-            if (selectedPaidBy === 'self') { fe = fe.filter(exp => !exp.paidBy || exp.paidBy.trim() === ''); fi = fi.filter(inc => !inc.paidBy || inc.paidBy.trim() === ''); }
-            else { fe = fe.filter(exp => exp.paidBy && exp.paidBy === selectedPaidBy); fi = fi.filter(inc => inc.paidBy && inc.paidBy === selectedPaidBy); }
-        }
-        if (selectedCategory) { fe = fe.filter(exp => exp.categoryId === parseInt(selectedCategory)); }
-        return { fe, fi };
-    };
-    const trendBucket = (start, end, label) => {
-        const rawExpenses = convertedExpenses.filter(exp => { const d = DateUtils.parseDateStr(exp.date); return d >= start && d <= end; });
-        const rawIncome = convertedIncome.filter(inc => { const d = DateUtils.parseDateStr(inc.date); return d >= start && d <= end; });
-        const { fe, fi } = applyTrendFilters(rawExpenses, rawIncome);
-        return { label, income: fi.reduce((sum, inc) => sum + inc.amount, 0), expense: fe.reduce((sum, exp) => sum + exp.amount, 0) };
-    };
-    const chartPeriods = (() => {
-        const now = new Date();
-        if (timeRange === 'week') {
-            const dow = now.getDay();
-            const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (dow === 0 ? -6 : 1 - dow));
-            const days = [];
-            for (let i = 0; i < 7; i++) {
-                const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i);
-                days.push(trendBucket(d, new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999), d.toLocaleDateString('en-US', { weekday: 'short' })));
-            }
-            return days;
-        }
-        if (timeRange === 'month') {
-            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-            const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-            return [trendBucket(monthStart, monthEnd, now.toLocaleDateString('en-US', { month: 'short' }))];
-        }
-        let monthStarts = [];
-        if (timeRange === 'year') {
-            for (let m = 0; m <= now.getMonth(); m++) monthStarts.push(new Date(now.getFullYear(), m, 1));
-        } else if (timeRange === 'threeMonths') {
-            for (let i = 2; i >= 0; i--) monthStarts.push(new Date(now.getFullYear(), now.getMonth() - i, 1));
-        } else if (timeRange === 'custom') {
-            const fromKey = customFromYear * 12 + customFromMonth, toKey = customToYear * 12 + customToMonth;
-            const [sY, sM, eY, eM] = fromKey <= toKey ? [customFromYear, customFromMonth, customToYear, customToMonth] : [customToYear, customToMonth, customFromYear, customFromMonth];
-            let cursor = new Date(sY, sM, 1);
-            const end = new Date(eY, eM, 1);
-            let guard = 0;
-            // Safety cap only — not meant to be reachable via the UI. The From/To year
-            // selects offer up to 8 years back (96 months apart at most), so this used to
-            // silently truncate at 60 months well before that's possible (see MonthlyTrends'
-            // identical custom-range loop, which had the same bug).
-            while (cursor <= end && guard < 240) { monthStarts.push(new Date(cursor)); cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); guard++; }
-        } else { // 'sixMonths' and fallback
-            for (let i = 5; i >= 0; i--) monthStarts.push(new Date(now.getFullYear(), now.getMonth() - i, 1));
-        }
-        // A custom range over 2 years (>24 monthly bars) is too dense to read as individual
-        // months — fold it down to one bar per year instead, bounded to whichever months of
-        // that year actually fall inside the selected range (not the full calendar year for
-        // a partial first/last year).
-        if (timeRange === 'custom' && monthStarts.length > 24) {
-            const yearGroups = {};
-            monthStarts.forEach(d => { const y = d.getFullYear(); (yearGroups[y] = yearGroups[y] || []).push(d); });
-            return Object.keys(yearGroups).sort((a, b) => a - b).map(yStr => {
-                const y = parseInt(yStr);
-                const datesInYear = yearGroups[y];
-                const minMonth = Math.min(...datesInYear.map(d => d.getMonth()));
-                const maxMonth = Math.max(...datesInYear.map(d => d.getMonth()));
-                const start = new Date(y, minMonth, 1);
-                const end = new Date(y, maxMonth + 1, 0, 23, 59, 59, 999);
-                return trendBucket(start, end, String(y));
-            });
-        }
-        return monthStarts.map(monthDate => {
-            const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
-            const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0, 23, 59, 59, 999);
-            const label = monthDate.toLocaleDateString('en-US', { month: 'short' }) + (monthDate.getFullYear() !== now.getFullYear() ? " '" + String(monthDate.getFullYear()).slice(2) : '');
-            return trendBucket(monthStart, monthEnd, label);
-        });
-    })();
-    const chartLabel = (() => {
-        const now = new Date();
-        switch (timeRange) {
-            case 'week': case 'month': return MONTH_NAMES[now.getMonth()] + ' ' + now.getFullYear();
-            case 'year': return String(now.getFullYear());
-            case 'threeMonths': return 'Last 3 Months';
-            case 'custom': {
-                const from = MONTH_NAMES[customFromMonth].slice(0, 3) + ' ' + customFromYear;
-                const to = MONTH_NAMES[customToMonth].slice(0, 3) + ' ' + customToYear;
-                return from === to ? from : from + ' – ' + to;
-            }
-            default: return 'Last 6 Months';
-        }
-    })();
-    const getPreviousPeriodComparison = () => { const { startDate } = getDateRange(); const periodLength = new Date() - startDate; const previousEndDate = new Date(startDate.getTime() - 1); const previousStartDate = new Date(previousEndDate.getTime() - periodLength); const previousExpenses = convertedExpenses.filter(expense => { const expenseDate = new Date(expense.date); return expenseDate >= previousStartDate && expenseDate <= previousEndDate; }); const previousTotal = previousExpenses.reduce((sum, expense) => sum + expense.amount, 0); const change = totalExpenses - previousTotal; const changePercentage = previousTotal > 0 ? (change / previousTotal) * 100 : 0; return { change, changePercentage, previousTotal }; };
-    const trendData = getPreviousPeriodComparison();
-    const getTopSpendingDays = () => { const dailySpending = {}; filteredExpenses.forEach(expense => { const date = expense.date; dailySpending[date] = (dailySpending[date] || 0) + expense.amount; }); return Object.entries(dailySpending).sort(([,a], [,b]) => b - a).slice(0, 5).map(([date, amount]) => ({ date, amount })); };
-    const topSpendingDays = getTopSpendingDays();
-    const { startDate, endDate } = getDateRange();
-    const daysDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)) || 1;
-    const avgDailySpending = totalExpenses / daysDiff;
-
+    const filterByDateRange = (data) => data.filter(item => { const d = DateUtils.parseDateStr(item.date); return d >= startDate && d <= endDate; });
+    if (transfers.length === 0 && reconciliations.length === 0) return null;
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2>Financial Summary</h2>
-                <div className="summary-filters">
-                    <div className="filter-group">
-                        <label className="filter-label">Time Period:</label>
-                        <select className="form-select form-select-sm" value={timeRange} onChange={(e) => setTimeRange(e.target.value)}>
-                            <option value="week">This Week</option><option value="month">This Month</option><option value="year">This Year</option>
-                            <option value="threeMonths">Last 3 Months</option><option value="sixMonths">Last 6 Months</option><option value="custom">Custom</option>
-                        </select>
-                    </div>
-                    {timeRange === 'custom' && (
-                        <div className="filter-group" style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                            <div>
-                                <label className="filter-label">From:</label>
-                                <div style={{display: 'flex', gap: '0.25rem'}}>
-                                    <select className="form-select form-select-sm" value={customFromMonth} onChange={e => setCustomFromMonth(parseInt(e.target.value))}>
-                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
-                                    </select>
-                                    <select className="form-select form-select-sm" value={customFromYear} onChange={e => setCustomFromYear(parseInt(e.target.value))}>
-                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
-                                    </select>
-                                </div>
-                            </div>
-                            <div>
-                                <label className="filter-label">To:</label>
-                                <div style={{display: 'flex', gap: '0.25rem'}}>
-                                    <select className="form-select form-select-sm" value={customToMonth} onChange={e => setCustomToMonth(parseInt(e.target.value))}>
-                                        {MONTH_NAMES.map((m, i) => (<option key={i} value={i}>{m}</option>))}
-                                    </select>
-                                    <select className="form-select form-select-sm" value={customToYear} onChange={e => setCustomToYear(parseInt(e.target.value))}>
-                                        {Array.from({length: 8}, (_, i) => new Date().getFullYear() - i).map(y => (<option key={y} value={y}>{y}</option>))}
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                    {/* Hidden when a single Active View is selected — data is already scoped to
-                        that person upstream. Reappears, restricted to the selected
-                        participants, when multiple are active. */}
-                    {activeView.length > 1 && (
-                        <div className="filter-group">
-                            <label className="filter-label">Filter by Person:</label>
-                            <select className="form-select form-select-sm" value={selectedPaidBy} onChange={(e) => setSelectedPaidBy(e.target.value)}>
-                                <option value="">All (selected participants)</option>
-                                {activeView.includes('own') && <option value="self">My Money Only</option>}
-                                {activeView.filter(v => v !== 'own').map(person => (<option key={person} value={person}>{person}'s Money Only</option>))}
-                            </select>
-                        </div>
-                    )}
-                    <div className="filter-group">
-                        <label className="filter-label">Category:</label>
-                        <select className="form-select form-select-sm" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
-                            <option value="">All Categories</option>
-                            {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
-                        </select>
-                    </div>
-                </div>
-                <div className="print-hide" style={{textAlign: 'right', marginTop: '0.5rem'}}>
-                    <button className="btn btn-sm btn-outline-secondary" onClick={() => window.print()}>
-                        <i className="fas fa-file-pdf me-1"></i> Download as PDF
-                    </button>
-                </div>
-            </div>
-            <div className="summary-cards">
-                <div className="summary-card income"><div className="card-icon"><i className="fas fa-arrow-up"></i></div><div className="card-content"><h6>Total Income</h6><div className="amount">{ValidationUtils.formatCurrency(totalIncome, defaultCurrency)}</div>{selectedPaidBy && (<div className="filter-info">{selectedPaidBy === 'self' ? 'Your income only' : selectedPaidBy + "'s income only"}</div>)}</div></div>
-                <div className="summary-card expense"><div className="card-icon"><i className="fas fa-arrow-down"></i></div><div className="card-content"><h6>Total Expenses</h6><div className="amount">{ValidationUtils.formatCurrency(totalExpenses, defaultCurrency)}</div>{selectedPaidBy && (<div className="filter-info">{selectedPaidBy === 'self' ? 'Your expenses only' : selectedPaidBy + "'s expenses only"}</div>)}{trendData.changePercentage !== 0 && (<div className={'trend ' + (trendData.change > 0 ? 'negative' : 'positive')}><i className={'fas fa-arrow-' + (trendData.change > 0 ? 'up' : 'down')}></i>{Math.abs(trendData.changePercentage).toFixed(1)}% vs last period</div>)}</div></div>
-                <div className={'summary-card ' + (netAmount >= 0 ? 'positive' : 'negative')}><div className="card-icon"><i className={'fas fa-' + (netAmount >= 0 ? 'plus' : 'minus')}></i></div><div className="card-content"><h6>Net Amount</h6><div className="amount">{ValidationUtils.formatCurrency(Math.abs(netAmount), defaultCurrency)}</div><div className="trend">{netAmount >= 0 ? 'Surplus' : 'Deficit'}</div></div></div>
-                <div className="summary-card info"><div className="card-icon"><i className="fas fa-calendar-day"></i></div><div className="card-content"><h6>Daily Average</h6><div className="amount">{ValidationUtils.formatCurrency(avgDailySpending, defaultCurrency)}</div><div className="trend">{daysDiff} days</div></div></div>
-            </div>
-            <div className="category-breakdown" style={{marginBottom: '1.5rem'}}>
-                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem'}}>
-                    <h5 style={{margin: 0}}><i className="fas fa-chart-bar me-2"></i>Income vs Expense ({chartLabel})</h5>
-                    <div className="btn-group btn-group-sm" role="group" aria-label="Chart series">
-                        <button type="button" className={'btn ' + (chartSeriesFilter === 'both' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('both')}>Both</button>
-                        <button type="button" className={'btn ' + (chartSeriesFilter === 'income' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('income')}>Income</button>
-                        <button type="button" className={'btn ' + (chartSeriesFilter === 'expense' ? 'btn-primary' : 'btn-outline-secondary')} onClick={() => setChartSeriesFilter('expense')}>Expense</button>
-                    </div>
-                </div>
-                <IncomeExpenseTrendChart months={chartPeriods} defaultCurrency={defaultCurrency} seriesFilter={chartSeriesFilter} />
-            </div>
-            {budgetData.length > 0 && (
-                <div className="budget-overview">
-                    <h5><i className="fas fa-calculator"></i> Monthly Budget Overview</h5>
-                    <div className="budget-list">
-                        {budgetData.map(budgetItem => {
-                            const hasSubcats = budgetItem.subcategories && budgetItem.subcategories.length > 0;
-                            const isExpanded = !!expandedBudgetItems[budgetItem.id];
-                            return (
-                                <div key={budgetItem.id} className="budget-item">
-                                    <div className="budget-info">
-                                        <div className="budget-name" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem'}}>
-                                            <span>{budgetItem.name}</span>
-                                            {hasSubcats && (
-                                                <button type="button" className="btn btn-sm btn-link p-0" style={{fontSize: '0.78rem', textDecoration: 'none'}} onClick={() => setExpandedBudgetItems(prev => ({ ...prev, [budgetItem.id]: !prev[budgetItem.id] }))}>
-                                                    {isExpanded ? 'Hide' : 'Show'} subcategories <i className={'fas fa-chevron-' + (isExpanded ? 'up' : 'down') + ' ms-1'}></i>
-                                                </button>
+        <div className="sp-mm">
+            <button type="button" className="sp-mm-head" onClick={onToggle} aria-expanded={open}>
+                <span className="sp-mm-icon"><i className="fas fa-right-left"></i></span>
+                <span className="sp-mm-main"><span className="sp-mm-title">Money movements</span><span className="sp-mm-sub">Transfers, cash withdrawals and reconciliations in this period</span></span>
+                <i className={'fas fa-chevron-' + (open ? 'up' : 'down')}></i>
+            </button>
+            {open && (
+                <div className="sp-mm-body">
+                    {(() => {
+                        // Scoped to the active view via the FROM account's owner, same convention
+                        // Wallet/Net Worth use for "which accounts belong to who's currently active",
+                        // and to the Summary screen's own Time Period filter, same as expenses/income.
+                        const dateFilteredTransfers = filterByDateRange(transfers);
+                        const visibleTransfers = dateFilteredTransfers.filter(t => {
+                            const from = bankAccountsForTransfers.find(a => a.id === t.fromAccountId);
+                            return from && matchesActiveView(from.person, activeView);
+                        });
+                        const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
+                        const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
+                        const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas && !t.toAssetId);
+                        const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId && !t.isCashWithdrawal);
+                        const cashWithdrawTransfers = sortedVisibleTransfers.filter(t => t.isCashWithdrawal);
+                        const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
+                        const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
+                        const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
+                        const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
+                        // Cash Withdrawals shows amounts as symbol+figure only (no ISO code) — bypasses
+                        // ValidationUtils.formatCurrency's Intl-driven style:'currency', which falls back
+                        // to printing the raw code for currencies Intl has no dedicated symbol glyph for.
+                        const symbolAmount = (amount, currency) => `${CurrencyService.getCurrencySymbol(currency)}${Number(amount).toFixed(2)}`;
+                        const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                        const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                        const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
+                        const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.feeCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
+                        const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
+                        const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
+                        if (transfers.length === 0) return null;
+                        return (
+                            <React.Fragment>
+                                <div style={{marginTop: '1.25rem'}}>
+                                    <h5>Overseas Transfers</h5>
+                                    {overseasTransfers.length > 0 ? (
+                                        <React.Fragment>
+                                        <div style={{overflowX: 'auto'}}>
+                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                                <thead>
+                                                    <tr><th>From Account</th><th>Amount</th><th>Date</th><th>Transferred Amount</th><th>Conversion Rate</th><th>Fee</th><th>To Whom</th><th>Target Account</th><th></th></tr>
+                                                </thead>
+                                                <tbody>
+                                                    {overseasTransfers.map(t => (
+                                                        <tr key={t.id}>
+                                                            <td>{accountLabel(t.fromAccountId)}</td>
+                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
+                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                            <td>{ValidationUtils.formatCurrency(t.toAmount, currencyOf(t.toAccountId))}</td>
+                                                            <td>1 {currencyOf(t.fromAccountId)} = {t.conversionRate} {currencyOf(t.toAccountId)}</td>
+                                                            <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
+                                                            <td>{ownerLabel(t.toAccountId)}</td>
+                                                            <td>{accountLabel(t.toAccountId)}</td>
+                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                            {Object.keys(overseasTransferAmountTotals).length === 1 ? (
+                                                <div><strong>Total Transferred:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferAmountTotals)[0], Object.keys(overseasTransferAmountTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total Transferred:</strong>
+                                                    {Object.entries(overseasTransferAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                                </div>
+                                            )}
+                                            {Object.keys(overseasTransferFeeTotals).length === 1 ? (
+                                                <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferFeeTotals)[0], Object.keys(overseasTransferFeeTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total Fees:</strong>
+                                                    {Object.entries(overseasTransferFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                                </div>
                                             )}
                                         </div>
-                                        {budgetItem.hasBudget ? (
-                                            <React.Fragment>
-                                                <div className="budget-bar"><div className={'budget-bar-fill ' + (budgetItem.percentage > 100 ? 'over-budget' : budgetItem.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(budgetItem.percentage, 100) + '%' }}></div></div>
-                                                <div className="budget-amounts">
-                                                    <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}</span>
-                                                    <span className={'budget-remaining ' + (budgetItem.remaining >= 0 ? 'positive' : 'negative')}>{budgetItem.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(budgetItem.remaining), defaultCurrency)}</span>
+                                        </React.Fragment>
+                                    ) : (
+                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No overseas transfers in the selected period.</div>
+                                    )}
+                                </div>
+                                <div style={{marginTop: '1.25rem'}}>
+                                    <h5>Account Transfers</h5>
+                                    {accountTransfers.length > 0 ? (
+                                        <React.Fragment>
+                                        <div style={{overflowX: 'auto'}}>
+                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                                <thead>
+                                                    <tr><th>From Account</th><th>To Account</th><th>Amount</th><th>Date</th><th>To Whom</th><th></th></tr>
+                                                </thead>
+                                                <tbody>
+                                                    {accountTransfers.map(t => (
+                                                        <tr key={t.id}>
+                                                            <td>{accountLabel(t.fromAccountId)}</td>
+                                                            <td>{accountLabel(t.toAccountId)}</td>
+                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
+                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                            <td>{ownerLabel(t.toAccountId)}</td>
+                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                            {Object.keys(accountTransferTotals).length === 1 ? (
+                                                <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(accountTransferTotals)[0], Object.keys(accountTransferTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total:</strong>
+                                                    {Object.entries(accountTransferTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
                                                 </div>
-                                            </React.Fragment>
-                                        ) : (
-                                            <div className="budget-amounts">
-                                                <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(budgetItem.spent, defaultCurrency)}</span>
-                                                <span className="budget-remaining" style={{color: '#6c757d'}}>No budget set</span>
-                                            </div>
-                                        )}
-                                        {isExpanded && hasSubcats && (
-                                            <div style={{marginTop: '0.6rem', paddingLeft: '0.85rem', borderLeft: '2px solid #e9ecef'}}>
-                                                {budgetItem.subcategories.map(sub => (
-                                                    <div key={sub.name} style={{marginBottom: '0.5rem'}}>
-                                                        <div style={{fontSize: '0.83rem', fontWeight: 600, marginBottom: '0.2rem'}}>{sub.name}</div>
-                                                        {sub.hasBudget ? (
-                                                            <React.Fragment>
-                                                                <div className="budget-bar" style={{height: '6px'}}><div className={'budget-bar-fill ' + (sub.percentage > 100 ? 'over-budget' : sub.percentage > 85 ? 'near-budget' : 'under-budget')} style={{ width: Math.min(sub.percentage, 100) + '%' }}></div></div>
-                                                                <div className="budget-amounts" style={{fontSize: '0.76rem'}}>
-                                                                    <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(sub.spent, defaultCurrency)}</span>
-                                                                    <span className={'budget-remaining ' + (sub.remaining >= 0 ? 'positive' : 'negative')}>{sub.remaining >= 0 ? 'Remaining: ' : 'Over by: '}{ValidationUtils.formatCurrency(Math.abs(sub.remaining), defaultCurrency)}</span>
-                                                                </div>
-                                                            </React.Fragment>
-                                                        ) : (
-                                                            <div className="budget-amounts" style={{fontSize: '0.76rem'}}>
-                                                                <span className="budget-spent">Spent: {ValidationUtils.formatCurrency(sub.spent, defaultCurrency)}</span>
-                                                            </div>
-                                                        )}
-                                                    </div>
+                                            )}
+                                        </div>
+                                        </React.Fragment>
+                                    ) : (
+                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No account transfers in the selected period.</div>
+                                    )}
+                                </div>
+                                <div style={{marginTop: '1.25rem'}}>
+                                    <h5>Asset Funding</h5>
+                                    {assetFundingTransfers.length > 0 ? (
+                                        <React.Fragment>
+                                        <div style={{overflowX: 'auto'}}>
+                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                                <thead>
+                                                    <tr><th>From Account</th><th>Asset</th><th>Amount</th><th>Date</th><th>Note</th><th></th></tr>
+                                                </thead>
+                                                <tbody>
+                                                    {assetFundingTransfers.map(t => (
+                                                        <tr key={t.id}>
+                                                            <td>{accountLabel(t.fromAccountId)}</td>
+                                                            <td>{t.toAssetName || 'Unknown asset'}</td>
+                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
+                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                            <td><span className="badge bg-secondary">Logged for audit</span></td>
+                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                            {Object.keys(assetFundingTotals).length === 1 ? (
+                                                <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(assetFundingTotals)[0], Object.keys(assetFundingTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total:</strong>
+                                                    {Object.entries(assetFundingTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        </React.Fragment>
+                                    ) : (
+                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No asset funding transfers in the selected period.</div>
+                                    )}
+                                </div>
+                                <div style={{marginTop: '1.25rem'}}>
+                                    <h5>Cash Withdrawals</h5>
+                                    {cashWithdrawTransfers.length > 0 ? (
+                                        <React.Fragment>
+                                        <div style={{overflowX: 'auto'}}>
+                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                                <thead>
+                                                    <tr><th>From Account</th>{activeView.length > 1 && <th>Person</th>}<th>Amount</th><th>Fee</th><th>Date</th><th></th></tr>
+                                                </thead>
+                                                <tbody>
+                                                    {cashWithdrawTransfers.map(t => (
+                                                        <tr key={t.id}>
+                                                            <td>{accountLabel(t.fromAccountId)}</td>
+                                                            {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
+                                                            <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
+                                                            <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
+                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
+                                                            <td>
+                                                                <SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} />
+                                                                <button type="button" className="btn btn-sm btn-outline-primary" style={{marginRight: '0.25rem'}} onClick={() => openEditWithdraw(t)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
+                                                                <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
+                                            {Object.keys(cashWithdrawAmountTotals).length === 1 ? (
+                                                <div><strong>Total Withdrawn:</strong> {symbolAmount(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total Withdrawn:</strong>
+                                                    {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
+                                                </div>
+                                            )}
+                                            {Object.keys(cashWithdrawFeeTotals).length === 1 ? (
+                                                <div><strong>Total Fees:</strong> {symbolAmount(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
+                                            ) : (
+                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
+                                                    <strong>Total Fees:</strong>
+                                                    {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        </React.Fragment>
+                                    ) : (
+                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No cash withdrawals in the selected period.</div>
+                                    )}
+                                </div>
+                            </React.Fragment>
+                        );
+                    })()}
+                    {(() => {
+                        const dateFilteredReconciliations = filterByDateRange(reconciliations);
+                        const visibleReconciliations = dateFilteredReconciliations.filter(r => matchesActiveView(r.person, activeView));
+                        const sortedReconciliations = [...visibleReconciliations].sort((a, b) => new Date(b.date) - new Date(a.date));
+                        const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
+                        const personLabel = (person) => (!person || person === 'own') ? 'Me' : person;
+                        // Cash reconciliations use a synthetic 'cash-{person}|{currency}' accountId (no
+                        // real bank account behind them) instead of a numeric bank account id — see
+                        // NetWorth's cash-update modal, which is the only writer of these.
+                        const isCashRecon = (id) => typeof id === 'string' && id.startsWith('cash-');
+                        const cashRefFromId = (id) => { const [person, currency] = id.slice(5).split('|'); return { person, currency }; };
+                        const accountLabel = (id) => {
+                            if (isCashRecon(id)) { const ref = cashRefFromId(id); return `Cash (${personLabel(ref.person)} · ${ref.currency})`; }
+                            const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account';
+                        };
+                        const currencyOf = (id) => {
+                            if (isCashRecon(id)) return cashRefFromId(id).currency;
+                            const a = findAccount(id); return a ? a.currency : defaultCurrency;
+                        };
+                        if (reconciliations.length === 0) return null;
+                        return (
+                            <div style={{marginTop: '1.25rem'}}>
+                                <h5>Balance Reconciliations</h5>
+                                {sortedReconciliations.length > 0 ? (
+                                    <div style={{overflowX: 'auto'}}>
+                                        <table className="table table-sm" style={{fontSize: '0.82rem'}}>
+                                            <thead>
+                                                <tr><th>Account</th><th>User</th><th>Date</th><th>Reconciled Amount</th><th>Balance Before</th><th>Balance After</th><th>Logged?</th><th></th></tr>
+                                            </thead>
+                                            <tbody>
+                                                {sortedReconciliations.map(r => (
+                                                    <tr key={r.id}>
+                                                        <td>{accountLabel(r.accountId)}</td>
+                                                        <td>{personLabel(r.person)}</td>
+                                                        <td>{ValidationUtils.formatDate(r.date)}</td>
+                                                        <td style={{color: r.delta > 0 ? '#198754' : '#dc3545', fontWeight: 600}}>{r.delta > 0 ? '+' : '-'}{ValidationUtils.formatCurrency(Math.abs(r.delta), currencyOf(r.accountId))}</td>
+                                                        <td>{ValidationUtils.formatCurrency(r.balanceBefore, currencyOf(r.accountId))}</td>
+                                                        <td>{ValidationUtils.formatCurrency(r.balanceAfter, currencyOf(r.accountId))}</td>
+                                                        <td>{r.loggedAsTransaction
+                                                            ? <span className={'badge ' + (r.transactionType === 'expense' ? 'bg-danger' : 'bg-success')}>{r.transactionType === 'expense' ? 'Expense' : 'Income'}</span>
+                                                            : <span className="badge bg-secondary">Not logged</span>}
+                                                        </td>
+                                                        <td><SyncConflictBadge conflict={reconciliationSyncConflicts[String(r.id)]} onClick={() => setShowConflictDetail({ collection: 'reconciliations', id: r.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
+                                                    </tr>
                                                 ))}
-                                            </div>
-                                        )}
+                                            </tbody>
+                                        </table>
                                     </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
-            {topSpendingDays.length > 0 && (
-                <div className="top-spending-days">
-                    <h5>Top Spending Days</h5>
-                    <div className="spending-days-list">
-                        {topSpendingDays.map((day, index) => (
-                            <div key={day.date} className="spending-day-item"><div className="day-rank">#{index + 1}</div><div className="day-info"><div className="day-date">{ValidationUtils.formatDate(day.date)}</div></div><div className="day-amount">{ValidationUtils.formatCurrency(day.amount, defaultCurrency)}</div></div>
-                        ))}
-                    </div>
-                </div>
-            )}
-            <div className="quick-stats">
-                <h5>Quick Stats</h5>
-                <div className="stats-grid">
-                    <div className="stat-item"><div className="stat-label">Total Transactions</div><div className="stat-value">{filteredExpenses.length}</div></div>
-                    <div className="stat-item"><div className="stat-label">Largest Expense</div><div className="stat-value">{filteredExpenses.length > 0 ? ValidationUtils.formatCurrency(Math.max(...filteredExpenses.map(e => e.amount)), defaultCurrency) : ValidationUtils.formatCurrency(0, defaultCurrency)}</div></div>
-                    <div className="stat-item"><div className="stat-label">Categories Used</div><div className="stat-value">{expensesByCategory.length}</div></div>
-                    <div className="stat-item"><div className="stat-label">Savings Rate</div><div className="stat-value">{totalIncome > 0 ? ((netAmount / totalIncome) * 100).toFixed(1) + '%' : 'N/A'}</div></div>
-                </div>
-            </div>
-            {(() => {
-                // Scoped to the active view via the FROM account's owner, same convention
-                // Wallet/Net Worth use for "which accounts belong to who's currently active",
-                // and to the Summary screen's own Time Period filter, same as expenses/income.
-                const dateFilteredTransfers = filterByDateRange(transfers);
-                const visibleTransfers = dateFilteredTransfers.filter(t => {
-                    const from = bankAccountsForTransfers.find(a => a.id === t.fromAccountId);
-                    return from && matchesActiveView(from.person, activeView);
-                });
-                const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
-                const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
-                const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas && !t.toAssetId);
-                const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId && !t.isCashWithdrawal);
-                const cashWithdrawTransfers = sortedVisibleTransfers.filter(t => t.isCashWithdrawal);
-                const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
-                const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
-                const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
-                const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
-                // Cash Withdrawals shows amounts as symbol+figure only (no ISO code) — bypasses
-                // ValidationUtils.formatCurrency's Intl-driven style:'currency', which falls back
-                // to printing the raw code for currencies Intl has no dedicated symbol glyph for.
-                const symbolAmount = (amount, currency) => `${CurrencyService.getCurrencySymbol(currency)}${Number(amount).toFixed(2)}`;
-                const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
-                const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.feeCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
-                const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
-                if (transfers.length === 0) return null;
-                return (
-                    <React.Fragment>
-                        <div style={{marginTop: '1.25rem'}}>
-                            <h5>Overseas Transfers</h5>
-                            {overseasTransfers.length > 0 ? (
-                                <React.Fragment>
-                                <div style={{overflowX: 'auto'}}>
-                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                        <thead>
-                                            <tr><th>From Account</th><th>Amount</th><th>Date</th><th>Transferred Amount</th><th>Conversion Rate</th><th>Fee</th><th>To Whom</th><th>Target Account</th><th></th></tr>
-                                        </thead>
-                                        <tbody>
-                                            {overseasTransfers.map(t => (
-                                                <tr key={t.id}>
-                                                    <td>{accountLabel(t.fromAccountId)}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.toAmount, currencyOf(t.toAccountId))}</td>
-                                                    <td>1 {currencyOf(t.fromAccountId)} = {t.conversionRate} {currencyOf(t.toAccountId)}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ownerLabel(t.toAccountId)}</td>
-                                                    <td>{accountLabel(t.toAccountId)}</td>
-                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                    {Object.keys(overseasTransferAmountTotals).length === 1 ? (
-                                        <div><strong>Total Transferred:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferAmountTotals)[0], Object.keys(overseasTransferAmountTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total Transferred:</strong>
-                                            {Object.entries(overseasTransferAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                    {Object.keys(overseasTransferFeeTotals).length === 1 ? (
-                                        <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferFeeTotals)[0], Object.keys(overseasTransferFeeTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total Fees:</strong>
-                                            {Object.entries(overseasTransferFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                </div>
-                                </React.Fragment>
-                            ) : (
-                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No overseas transfers in the selected period.</div>
-                            )}
-                        </div>
-                        <div style={{marginTop: '1.25rem'}}>
-                            <h5>Account Transfers</h5>
-                            {accountTransfers.length > 0 ? (
-                                <React.Fragment>
-                                <div style={{overflowX: 'auto'}}>
-                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                        <thead>
-                                            <tr><th>From Account</th><th>To Account</th><th>Amount</th><th>Date</th><th>To Whom</th><th></th></tr>
-                                        </thead>
-                                        <tbody>
-                                            {accountTransfers.map(t => (
-                                                <tr key={t.id}>
-                                                    <td>{accountLabel(t.fromAccountId)}</td>
-                                                    <td>{accountLabel(t.toAccountId)}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                    <td>{ownerLabel(t.toAccountId)}</td>
-                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                    {Object.keys(accountTransferTotals).length === 1 ? (
-                                        <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(accountTransferTotals)[0], Object.keys(accountTransferTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total:</strong>
-                                            {Object.entries(accountTransferTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                </div>
-                                </React.Fragment>
-                            ) : (
-                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No account transfers in the selected period.</div>
-                            )}
-                        </div>
-                        <div style={{marginTop: '1.25rem'}}>
-                            <h5>Asset Funding</h5>
-                            {assetFundingTransfers.length > 0 ? (
-                                <React.Fragment>
-                                <div style={{overflowX: 'auto'}}>
-                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                        <thead>
-                                            <tr><th>From Account</th><th>Asset</th><th>Amount</th><th>Date</th><th>Note</th><th></th></tr>
-                                        </thead>
-                                        <tbody>
-                                            {assetFundingTransfers.map(t => (
-                                                <tr key={t.id}>
-                                                    <td>{accountLabel(t.fromAccountId)}</td>
-                                                    <td>{t.toAssetName || 'Unknown asset'}</td>
-                                                    <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                    <td><span className="badge bg-secondary">Logged for audit</span></td>
-                                                    <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                    {Object.keys(assetFundingTotals).length === 1 ? (
-                                        <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(assetFundingTotals)[0], Object.keys(assetFundingTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total:</strong>
-                                            {Object.entries(assetFundingTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                </div>
-                                </React.Fragment>
-                            ) : (
-                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No asset funding transfers in the selected period.</div>
-                            )}
-                        </div>
-                        <div style={{marginTop: '1.25rem'}}>
-                            <h5>Cash Withdrawals</h5>
-                            {cashWithdrawTransfers.length > 0 ? (
-                                <React.Fragment>
-                                <div style={{overflowX: 'auto'}}>
-                                    <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                        <thead>
-                                            <tr><th>From Account</th>{activeView.length > 1 && <th>Person</th>}<th>Amount</th><th>Fee</th><th>Date</th><th></th></tr>
-                                        </thead>
-                                        <tbody>
-                                            {cashWithdrawTransfers.map(t => (
-                                                <tr key={t.id}>
-                                                    <td>{accountLabel(t.fromAccountId)}</td>
-                                                    {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
-                                                    <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
-                                                    <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
-                                                    <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                    <td>
-                                                        <SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} />
-                                                        <button type="button" className="btn btn-sm btn-outline-primary" style={{marginRight: '0.25rem'}} onClick={() => openEditWithdraw(t)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
-                                                        <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                                <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                    {Object.keys(cashWithdrawAmountTotals).length === 1 ? (
-                                        <div><strong>Total Withdrawn:</strong> {symbolAmount(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total Withdrawn:</strong>
-                                            {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                    {Object.keys(cashWithdrawFeeTotals).length === 1 ? (
-                                        <div><strong>Total Fees:</strong> {symbolAmount(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
-                                    ) : (
-                                        <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                            <strong>Total Fees:</strong>
-                                            {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
-                                        </div>
-                                    )}
-                                </div>
-                                </React.Fragment>
-                            ) : (
-                                <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No cash withdrawals in the selected period.</div>
-                            )}
-                        </div>
-                    </React.Fragment>
-                );
-            })()}
-            {(() => {
-                const dateFilteredReconciliations = filterByDateRange(reconciliations);
-                const visibleReconciliations = dateFilteredReconciliations.filter(r => matchesActiveView(r.person, activeView));
-                const sortedReconciliations = [...visibleReconciliations].sort((a, b) => new Date(b.date) - new Date(a.date));
-                const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
-                const personLabel = (person) => (!person || person === 'own') ? 'Me' : person;
-                // Cash reconciliations use a synthetic 'cash-{person}|{currency}' accountId (no
-                // real bank account behind them) instead of a numeric bank account id — see
-                // NetWorth's cash-update modal, which is the only writer of these.
-                const isCashRecon = (id) => typeof id === 'string' && id.startsWith('cash-');
-                const cashRefFromId = (id) => { const [person, currency] = id.slice(5).split('|'); return { person, currency }; };
-                const accountLabel = (id) => {
-                    if (isCashRecon(id)) { const ref = cashRefFromId(id); return `Cash (${personLabel(ref.person)} · ${ref.currency})`; }
-                    const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account';
-                };
-                const currencyOf = (id) => {
-                    if (isCashRecon(id)) return cashRefFromId(id).currency;
-                    const a = findAccount(id); return a ? a.currency : defaultCurrency;
-                };
-                if (reconciliations.length === 0) return null;
-                return (
-                    <div style={{marginTop: '1.25rem'}}>
-                        <h5>Balance Reconciliations</h5>
-                        {sortedReconciliations.length > 0 ? (
-                            <div style={{overflowX: 'auto'}}>
-                                <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                    <thead>
-                                        <tr><th>Account</th><th>User</th><th>Date</th><th>Reconciled Amount</th><th>Balance Before</th><th>Balance After</th><th>Logged?</th><th></th></tr>
-                                    </thead>
-                                    <tbody>
-                                        {sortedReconciliations.map(r => (
-                                            <tr key={r.id}>
-                                                <td>{accountLabel(r.accountId)}</td>
-                                                <td>{personLabel(r.person)}</td>
-                                                <td>{ValidationUtils.formatDate(r.date)}</td>
-                                                <td style={{color: r.delta > 0 ? '#198754' : '#dc3545', fontWeight: 600}}>{r.delta > 0 ? '+' : '-'}{ValidationUtils.formatCurrency(Math.abs(r.delta), currencyOf(r.accountId))}</td>
-                                                <td>{ValidationUtils.formatCurrency(r.balanceBefore, currencyOf(r.accountId))}</td>
-                                                <td>{ValidationUtils.formatCurrency(r.balanceAfter, currencyOf(r.accountId))}</td>
-                                                <td>{r.loggedAsTransaction
-                                                    ? <span className={'badge ' + (r.transactionType === 'expense' ? 'bg-danger' : 'bg-success')}>{r.transactionType === 'expense' ? 'Expense' : 'Income'}</span>
-                                                    : <span className="badge bg-secondary">Not logged</span>}
-                                                </td>
-                                                <td><SyncConflictBadge conflict={reconciliationSyncConflicts[String(r.id)]} onClick={() => setShowConflictDetail({ collection: 'reconciliations', id: r.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                                ) : (
+                                    <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No balance reconciliations in the selected period.</div>
+                                )}
                             </div>
-                        ) : (
-                            <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No balance reconciliations in the selected period.</div>
-                        )}
-                    </div>
-                );
-            })()}
+                        );
+                    })()}
+                </div>
+            )}
             {showConflictDetail && conflictRecord && conflictRecordSnapshot && (
                 <SyncConflictModal
                     localRecord={conflictRecord}
@@ -5877,9 +6011,6 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     </div>
                 );
             })()}
-            {filteredExpenses.length === 0 && filteredIncome.length === 0 && (
-                <div className="empty-state"><i className="fas fa-chart-bar fa-3x"></i><h4>No financial data for this period</h4><p>Add some income and expenses to see your financial summary.</p></div>
-            )}
         </div>
     );
 }
@@ -12411,7 +12542,7 @@ function QuickAddSheet({ onClose, onPick }) {
     );
 }
 
-// "More" tab. Accounts stays inside Settings until the Accounts phase; Trends until Summary absorbs it.
+// "More" tab. Accounts stays inside Settings until the Accounts phase. Trends is now part of Summary.
 function MoreScreen({ onNavigate }) {
     const tiles = [
         ['categories', 'Categories', 'fas fa-tags', '#dcfce7', '#16a34a'],
@@ -12420,7 +12551,6 @@ function MoreScreen({ onNavigate }) {
         ['networth', 'Net Worth', 'fas fa-scale-balanced', '#eef2ff', '#6366f1'],
         ['bulk-upload', 'Upload', 'fas fa-upload', '#fee2e2', '#e11d48'],
         ['export', 'Export', 'fas fa-file-export', '#f1f5f9', '#0f172a'],
-        ['trends', 'Trends', 'fas fa-chart-line', '#fef3c7', '#d97706'],
         ['settings', 'Settings', 'fas fa-sliders', '#f1f5f9', '#475569']
     ];
     return (
@@ -12461,7 +12591,6 @@ function App() {
     const [defaultCurrency, setDefaultCurrency] = useState('GBP');
     const [people, setPeople] = useState([]);
     const [notifications, setNotifications] = useState(() => DataService.getNotifications());
-    const [showNotifPanel, setShowNotifPanel] = useState(false);
     // Redesign shell (Phase 0): header sheets + back-navigation history. UI state only.
     const [shellSheet, setShellSheet] = useState(null); // null | 'view' | 'sync' | 'profile' | 'add'
     const [screenHistory, setScreenHistory] = useState([]);
@@ -13177,7 +13306,7 @@ function App() {
             case 'add-expense': return <ExpenseForm categories={categories} onSave={handleDataUpdate} onCancel={() => setCurrentScreen('expenses')} activeView={activeView} />;
             case 'categories': return <CategoryManager categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} defaultCurrency={defaultCurrency} activeView={activeView} />;
             case 'income': return <IncomeForm income={income} onUpdate={handleDataUpdate} activeView={activeView} defaultCurrency={defaultCurrency} autoOpenForm={incomeAutoOpen} onFormOpened={() => setIncomeAutoOpen(false)} />;
-            case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
+            case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} currentUser={currentUser} notifications={notifications} onNavigate={navigate} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
                 return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
@@ -13267,17 +13396,11 @@ function App() {
     const syncIconColor = syncView.tone === 'ok' ? '#16a34a' : syncView.tone === 'info' ? '#4f46e5' : syncStatus === 'error' && isCloudStorage ? '#e11d48' : syncStatus === 'syncing' ? '#64748b' : '#94a3b8';
     const syncNeedsAttention = syncView.tone === 'bad' || syncView.tone === 'warn' || syncView.tone === 'info';
     const peopleList = people && people.length ? people : DataService.getPeople();
-    const unreadNotifs = notifications.filter(n => !n.read).length;
 
     return (
         <div className="mobile-app sp-shell">
             <header className="sp-top">
                 <ViewBar activeView={activeView} currentUser={currentUser} people={peopleList} onOpen={() => setShellSheet('view')} />
-                {/* Kept until the Summary phase adds its "Needs attention" strip. */}
-                <button type="button" className="sp-iconbtn" onClick={() => setShowNotifPanel(true)} title="Notifications">
-                    <i className="fas fa-bell"></i>
-                    {unreadNotifs > 0 && <span className="sp-iconbtn-count">{unreadNotifs}</span>}
-                </button>
                 <button type="button" className="sp-iconbtn" onClick={() => setShellSheet('sync')} title={syncView.title}>
                     <i className={syncView.icon} style={{color: syncIconColor}}></i>
                     {syncNeedsAttention && <span className="sp-iconbtn-dot" style={{background: syncIconColor}}></span>}
@@ -13286,39 +13409,6 @@ function App() {
                     {((currentUser && currentUser.displayName) || '?').trim().charAt(0).toUpperCase()}
                 </button>
             </header>
-            {showNotifPanel && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}} onClick={() => setShowNotifPanel(false)}>
-                    <div className="modal-dialog modal-dialog-centered" onClick={e => e.stopPropagation()}>
-                        <div className="modal-content">
-                            <div className="modal-header">
-                                <h5 className="modal-title"><i className="fas fa-bell me-2"></i>Notifications</h5>
-                                <button type="button" className="btn-close" onClick={() => setShowNotifPanel(false)}></button>
-                            </div>
-                            <div className="modal-body" style={{maxHeight:'60vh',overflowY:'auto'}}>
-                                {notifications.length === 0 ? (
-                                    <p className="text-muted text-center mb-0">You're all caught up — no notifications.</p>
-                                ) : notifications.map(n => (
-                                    <div key={n.id} className="d-flex align-items-start gap-2 mb-2 pb-2" style={{borderBottom:'1px solid #eee',cursor:'pointer',opacity:n.read?0.65:1}}
-                                        onClick={() => { DataService.markNotificationRead(n.id); setNotifications(DataService.getNotifications()); setShowNotifPanel(false); if (n.screen) setCurrentScreen(n.screen); }}>
-                                        <i className={'fas mt-1 ' + (n.type === 'bill' ? 'fa-clock text-info' : n.type === 'budget-over' ? 'fa-exclamation-circle text-danger' : 'fa-exclamation-triangle text-warning')}></i>
-                                        <div style={{flex:1}}>
-                                            <div style={{fontSize:'0.9rem',fontWeight:n.read?400:600}}>{n.title}</div>
-                                            <div className="text-muted" style={{fontSize:'0.78rem'}}>{n.message}</div>
-                                        </div>
-                                        <button type="button" className="btn-close btn-close-sm" style={{fontSize:'0.55rem'}} onClick={(e) => { e.stopPropagation(); DataService.dismissNotification(n.id); setNotifications(DataService.getNotifications()); }}></button>
-                                    </div>
-                                ))}
-                            </div>
-                            {notifications.length > 0 && (
-                                <div className="modal-footer">
-                                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { DataService.markAllNotificationsRead(); setNotifications(DataService.getNotifications()); }}>Mark all read</button>
-                                    <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => { DataService.clearAllNotifications(); setNotifications([]); }}>Clear all</button>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
             {/* The same conditions and dismiss behaviour as the old banners, shown as pop-up messages. */}
             <div className="sp-toasts">
                 {syncMergeToast && (
