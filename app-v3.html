@@ -510,6 +510,9 @@ function spCategoryLook(category, index) {
     if (!category) return { icon: 'fas fa-tag', tint: '#f1f5f9', ink: '#64748b' };
     const pal = SP_CAT_LOOKS[Math.abs(index || 0) % SP_CAT_LOOKS.length];
     const guess = SP_CAT_ICON_GUESS.find(([re]) => re.test(category.name || ''));
+    // A picked icon brings its own colours (see SP_CAT_ICON_CHOICES); otherwise use the palette.
+    const picked = category.icon && SP_CAT_ICON_CHOICES.find(c => c[0] === category.icon);
+    if (picked) return { icon: picked[0], tint: picked[1], ink: picked[2] };
     return { icon: category.icon || (guess ? guess[1] : 'fas fa-tag'), tint: pal[0], ink: pal[1] };
 }
 function spDayLabel(dateStr) {
@@ -1296,11 +1299,11 @@ class DataService {
                 this.data.categories = JSON.parse(savedCategories);
             } else {
                 this.data.categories = [
-                    { id: 1, name: 'Food & Dining', subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food'], monthlyBudget: 0, subcategoryBudgets: {} },
-                    { id: 2, name: 'Transportation', subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft'], monthlyBudget: 0, subcategoryBudgets: {} },
-                    { id: 3, name: 'Shopping', subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care'], monthlyBudget: 0, subcategoryBudgets: {} },
-                    { id: 4, name: 'Entertainment', subcategories: ['Movies', 'Sports', 'Music', 'Games'], monthlyBudget: 0, subcategoryBudgets: {} },
-                    { id: 5, name: 'Bills & Utilities', subcategories: ['Electric', 'Water', 'Internet', 'Phone'], monthlyBudget: 0, subcategoryBudgets: {} }
+                    { id: 1, name: 'Food & Dining', icon: 'fas fa-utensils', subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food'], monthlyBudget: 0, subcategoryBudgets: {} },
+                    { id: 2, name: 'Transportation', icon: 'fas fa-car', subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft'], monthlyBudget: 0, subcategoryBudgets: {} },
+                    { id: 3, name: 'Shopping', icon: 'fas fa-shirt', subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care'], monthlyBudget: 0, subcategoryBudgets: {} },
+                    { id: 4, name: 'Entertainment', icon: 'fas fa-film', subcategories: ['Movies', 'Sports', 'Music', 'Games'], monthlyBudget: 0, subcategoryBudgets: {} },
+                    { id: 5, name: 'Bills & Utilities', icon: 'fas fa-bolt', subcategories: ['Electric', 'Water', 'Internet', 'Phone'], monthlyBudget: 0, subcategoryBudgets: {} }
                 ];
                 this.saveCategories();
             }
@@ -1320,11 +1323,11 @@ class DataService {
 
     static initializeDefaultData() {
         this.data.categories = [
-            { id: 1, name: 'Food & Dining', subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food'] },
-            { id: 2, name: 'Transportation', subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft'] },
-            { id: 3, name: 'Shopping', subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care'] },
-            { id: 4, name: 'Entertainment', subcategories: ['Movies', 'Sports', 'Music', 'Games'] },
-            { id: 5, name: 'Bills & Utilities', subcategories: ['Electric', 'Water', 'Internet', 'Phone'] }
+            { id: 1, name: 'Food & Dining', icon: 'fas fa-utensils', subcategories: ['Restaurants', 'Groceries', 'Coffee', 'Fast Food'] },
+            { id: 2, name: 'Transportation', icon: 'fas fa-car', subcategories: ['Gas', 'Public Transit', 'Parking', 'Uber/Lyft'] },
+            { id: 3, name: 'Shopping', icon: 'fas fa-shirt', subcategories: ['Clothing', 'Electronics', 'Home', 'Personal Care'] },
+            { id: 4, name: 'Entertainment', icon: 'fas fa-film', subcategories: ['Movies', 'Sports', 'Music', 'Games'] },
+            { id: 5, name: 'Bills & Utilities', icon: 'fas fa-bolt', subcategories: ['Electric', 'Water', 'Internet', 'Phone'] }
         ];
         this.saveCategories();
     }
@@ -3842,580 +3845,462 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     );
 }
 
-function CategoryManager({ categories, assetCategories, liabilityCategories, onUpdate, defaultCurrency, activeView }) {
-    const [editingCategory, setEditingCategory] = useState(null);
-    const [newCategoryName, setNewCategoryName] = useState('');
-    const [newSubcategoryName, setNewSubcategoryName] = useState('');
-    const [addingSubcategoryTo, setAddingSubcategoryTo] = useState(null);
-    const [errors, setErrors] = useState({});
-    const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
-    const [editingSubcategory, setEditingSubcategory] = useState(null);
-    const [renameConfirm, setRenameConfirm] = useState(null);
-    const [showBudgets, setShowBudgets] = useState(false);
-    const [showConflictDetail, setShowConflictDetail] = useState(null); // { collection, id } | null
-    const [budgetChanges, setBudgetChanges] = useState({});
-    const [categoryBudgetModes, setCategoryBudgetModes] = useState({});
-    // Budgets are only editable while a single person is active — with multiple people
-    // selected there's no unambiguous "whose budget" for a plain input to mean, and letting
-    // the user switch between people mid-edit risks silently discarding unsaved changes for
-    // whoever they switch away from. editingPersonKey is null whenever editing is blocked.
-    const isSingleView = activeView.length === 1;
-    const editingPersonKey = isSingleView ? (resolveActiveViewValue(activeView) === '' ? 'own' : resolveActiveViewValue(activeView)) : null;
-    useEffect(() => {
-        if (!editingPersonKey) { setCategoryBudgetModes({}); setBudgetChanges({}); return; }
-        const modes = {};
-        categories.forEach(cat => { if (cat.personBudgets && cat.personBudgets[editingPersonKey] && cat.personBudgets[editingPersonKey].useSubcategoryBudgets) modes[cat.id] = true; });
-        setCategoryBudgetModes(modes);
-        setBudgetChanges({});
-    }, [editingPersonKey, categories]);
-    const hasBudgetCurrencyMismatch = !!editingPersonKey && categories.some(cat => { const pb = cat.personBudgets && cat.personBudgets[editingPersonKey]; return pb && pb.budgetCurrency && pb.budgetCurrency !== defaultCurrency && (pb.monthlyBudget > 0 || (pb.subcategoryBudgets && Object.values(pb.subcategoryBudgets).some(v => v > 0))); });
-    const handleResetAllBudgets = async () => { if (!editingPersonKey) return; try { await DataService.resetAllBudgets(defaultCurrency, editingPersonKey); onUpdate(); } catch (error) { setErrors({ budget: 'Failed to reset budgets' }); } };
+// ── Categories (Phase 6) ─────────────────────────────────────────────────────
+// Icon choices for expense categories. Only `icon` is stored on the category (an optional,
+// additive field); the tint/ink shown with it are looked up here, never saved.
+const SP_CAT_ICON_CHOICES = [
+    ['fas fa-cart-shopping', '#dcfce7', '#16a34a'], ['fas fa-car', '#dbeafe', '#2563eb'], ['fas fa-utensils', '#ffedd5', '#ea580c'],
+    ['fas fa-bolt', '#fef3c7', '#d97706'], ['fas fa-film', '#fae8ff', '#c026d3'], ['fas fa-house', '#e0e7ff', '#4f46e5'],
+    ['fas fa-heart-pulse', '#fee2e2', '#e11d48'], ['fas fa-paw', '#fef3c7', '#b45309'], ['fas fa-graduation-cap', '#e0f2fe', '#0284c7'],
+    ['fas fa-shirt', '#fce7f3', '#db2777'], ['fas fa-plane', '#ccfbf1', '#0d9488'], ['fas fa-gift', '#ede9fe', '#7c3aed']
+];
+// Display-only icons for asset / liability categories (guessed from the name, never saved).
+const SP_NW_ICON_GUESS = [
+    [/invest|stock|share|fund/i, 'fas fa-chart-line', '#dcfce7', '#16a34a'], [/property|house|home|real estate/i, 'fas fa-house', '#e0e7ff', '#4f46e5'],
+    [/pension|retire/i, 'fas fa-umbrella', '#ede9fe', '#7c3aed'], [/bank|saving/i, 'fas fa-building-columns', '#dbeafe', '#2563eb'],
+    [/vehicle|car/i, 'fas fa-car', '#e0f2fe', '#0284c7'], [/cash/i, 'fas fa-money-bill-wave', '#dcfce7', '#15803d'],
+    [/mortgage/i, 'fas fa-house-chimney', '#fee2e2', '#e11d48'], [/loan/i, 'fas fa-hand-holding-dollar', '#ffedd5', '#ea580c'],
+    [/credit/i, 'fas fa-credit-card', '#fce7f3', '#db2777'], [/overdraft/i, 'fas fa-building-columns', '#fef3c7', '#d97706'],
+    [/owed|debt/i, 'fas fa-handshake', '#fef3c7', '#b45309']
+];
+const spNetWorthCatLook = (cat, type) => {
+    const g = SP_NW_ICON_GUESS.find(([re]) => re.test(cat.name || ''));
+    return g ? { icon: g[1], tint: g[2], ink: g[3] } : type === 'asset' ? { icon: 'fas fa-layer-group', tint: '#f1f5f9', ink: '#475569' } : { icon: 'fas fa-file-invoice-dollar', tint: '#f1f5f9', ink: '#475569' };
+};
+const SP_NOTIFY_CHOICES = [50, 70, 80, 90, 100];
 
-    const handleAddCategory = (e) => { e.preventDefault(); const validation = ValidationUtils.validateCategory({ name: newCategoryName }); if (!validation.isValid) { setErrors(validation.errors); return; } const existingCategory = categories.find(cat => cat.name.toLowerCase() === newCategoryName.trim().toLowerCase()); if (existingCategory) { setErrors({ name: 'Category name already exists' }); return; } DataService.addCategory({ name: newCategoryName.trim() }); setNewCategoryName(''); setErrors({}); onUpdate(); };
-    const handleUpdateCategory = (categoryId, newName) => { const validation = ValidationUtils.validateCategory({ name: newName }); if (!validation.isValid) { setErrors({ [categoryId]: validation.errors.name }); return; } const existingCategory = categories.find(cat => cat.id !== categoryId && cat.name.toLowerCase() === newName.trim().toLowerCase()); if (existingCategory) { setErrors({ [categoryId]: 'Category name already exists' }); return; } DataService.updateCategory(categoryId, { name: newName.trim() }); setEditingCategory(null); setErrors({}); onUpdate(); };
-    const handleDeleteCategory = async (categoryId) => { const expensesUsingCategory = await DataService.getExpensesByCategory(categoryId); if (expensesUsingCategory.length > 0) { setErrors({ delete: `Cannot delete category. It's being used by ${expensesUsingCategory.length} expense(s).` }); setShowDeleteConfirm(null); return; } await DataService.deleteCategory(categoryId); setShowDeleteConfirm(null); setErrors({}); onUpdate(); };
-    const handleAddSubcategory = (categoryId) => { if (!newSubcategoryName.trim()) { setErrors({ subcategory: 'Subcategory name is required' }); return; } const category = categories.find(cat => cat.id === categoryId); if (category.subcategories.includes(newSubcategoryName.trim())) { setErrors({ subcategory: 'Subcategory already exists' }); return; } DataService.addSubcategory(categoryId, newSubcategoryName.trim()); setNewSubcategoryName(''); setAddingSubcategoryTo(null); setErrors({}); onUpdate(); };
-    const handleDeleteSubcategory = async (categoryId, subcategoryName) => { const expensesUsingSubcategory = await DataService.getExpensesByCategory(categoryId, subcategoryName); if (expensesUsingSubcategory.length > 0) { setErrors({ delete: `Cannot delete subcategory. It's being used by ${expensesUsingSubcategory.length} expense(s).` }); return; } await DataService.removeSubcategory(categoryId, subcategoryName); setErrors({}); onUpdate(); };
-    const handleStartRenameSubcategory = (categoryId, name) => { setEditingSubcategory({ categoryId, oldName: name, value: name }); setErrors(prev => ({ ...prev, subcategory: '' })); };
-    const handleCancelRenameSubcategory = () => { setEditingSubcategory(null); setErrors(prev => ({ ...prev, subcategory: '' })); };
-    const handleRequestRenameSubcategory = async () => {
-        if (!editingSubcategory) return;
-        const { categoryId, oldName, value } = editingSubcategory;
-        const newName = (value || '').trim();
-        if (!newName) { setErrors({ subcategory: 'Subcategory name is required' }); return; }
-        if (newName === oldName) { setEditingSubcategory(null); return; }
-        const category = categories.find(cat => cat.id === categoryId);
-        if (category && category.subcategories.includes(newName)) { setErrors({ subcategory: 'Subcategory already exists' }); return; }
-        const [expensesUsingSubcategory, bills] = await Promise.all([DataService.getExpensesByCategory(categoryId, oldName), DataService.getBills()]);
-        const billCount = bills.filter(bill => bill.categoryId === categoryId && bill.subcategory === oldName).length;
-        setErrors(prev => ({ ...prev, subcategory: '' }));
-        if (expensesUsingSubcategory.length === 0 && billCount === 0) {
-            await DataService.renameSubcategory(categoryId, oldName, newName);
-            setEditingSubcategory(null);
-            onUpdate();
-            return;
-        }
-        setRenameConfirm({ categoryId, oldName, newName, expenseCount: expensesUsingSubcategory.length, billCount });
+function CategoryFormSheet({ kind, category, look, existingNames, onClose, onSave }) {
+    const isExpense = kind === 'expense';
+    const [name, setName] = useState(category ? category.name : '');
+    const [icon, setIcon] = useState(category ? (category.icon || '') : SP_CAT_ICON_CHOICES[0][0]);
+    const [subs, setSubs] = useState([]);
+    const [subDraft, setSubDraft] = useState('');
+    const [error, setError] = useState('');
+    const shownIcon = icon || (look && look.icon) || SP_CAT_ICON_CHOICES[0][0];
+    const choice = SP_CAT_ICON_CHOICES.find(c => c[0] === shownIcon);
+    const headLook = isExpense ? (choice ? { icon: choice[0], tint: choice[1], ink: choice[2] } : look) : { icon: kind === 'asset' ? 'fas fa-layer-group' : 'fas fa-file-invoice-dollar', tint: kind === 'asset' ? '#dcfce7' : '#fee2e2', ink: kind === 'asset' ? '#16a34a' : '#e11d48' };
+    const addSub = () => {
+        const s = subDraft.trim();
+        if (!s) return;
+        if (subs.includes(s)) { setError('Subcategory already exists'); return; }
+        setSubs(prev => [...prev, s]); setSubDraft(''); setError('');
     };
-    const handleConfirmRenameSubcategory = async () => {
-        if (!renameConfirm) return;
-        const { categoryId, oldName, newName } = renameConfirm;
-        await DataService.renameSubcategory(categoryId, oldName, newName);
-        setRenameConfirm(null);
-        setEditingSubcategory(null);
-        onUpdate();
+    const save = () => {
+        const n = name.trim();
+        if (isExpense) { const v = ValidationUtils.validateCategory({ name: n }); if (!v.isValid) { setError(v.errors.name); return; } }
+        else if (!n) { setError('Category name is required'); return; }
+        if (existingNames.some(x => x.toLowerCase() === n.toLowerCase() && (!category || x.toLowerCase() !== category.name.toLowerCase()))) { setError('Category name already exists'); return; }
+        const pendingSub = subDraft.trim();
+        onSave({ name: n, icon: icon || '', subs: pendingSub && !subs.includes(pendingSub) ? [...subs, pendingSub] : subs });
     };
-    const handleBudgetChange = (categoryId, type, subcategory, value) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; setBudgetChanges(prev => ({ ...prev, [key]: value })); };
-    const handleThresholdChange = (categoryId, value) => { setBudgetChanges(prev => ({ ...prev, ['threshold-' + categoryId]: value })); };
-    const getCurrentThresholdValue = (categoryId) => { const key = 'threshold-' + categoryId; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); const pb = category && category.personBudgets && category.personBudgets[editingPersonKey]; return (pb && pb.notificationThreshold) || 80; };
-    const saveBudgetChanges = async () => { try { for (const [key, value] of Object.entries(budgetChanges)) { if (key.startsWith('cat-')) { const categoryId = parseInt(key.replace('cat-', '')); await DataService.setCategoryBudget(categoryId, value, defaultCurrency, editingPersonKey); } else if (key.startsWith('threshold-')) { const categoryId = parseInt(key.replace('threshold-', '')); const clamped = Math.min(100, Math.max(50, parseInt(value) || 80)); await DataService.setPersonBudgetThreshold(categoryId, editingPersonKey, clamped); } else if (key.startsWith('sub-')) { const parts = key.replace('sub-', '').split('-'); const categoryId = parseInt(parts[0]); const subcategory = parts.slice(1).join('-'); await DataService.setSubcategoryBudget(categoryId, subcategory, value, defaultCurrency, editingPersonKey); } } await onUpdate(); setBudgetChanges({}); } catch (error) { setErrors({ budget: 'Failed to save budget changes' }); } };
-    const toggleBudgetMode = async (categoryId) => { const newMode = !categoryBudgetModes[categoryId]; setCategoryBudgetModes(prev => ({ ...prev, [categoryId]: newMode })); await DataService.setUseSubcategoryBudgets(categoryId, editingPersonKey, newMode); const keysToRemove = Object.keys(budgetChanges).filter(key => key.startsWith('cat-' + categoryId) || key.startsWith('sub-' + categoryId + '-')); setBudgetChanges(prev => { const updated = { ...prev }; keysToRemove.forEach(key => delete updated[key]); return updated; }); onUpdate(); };
-    const getCurrentBudgetValue = (categoryId, type, subcategory) => { const key = type === 'category' ? 'cat-' + categoryId : 'sub-' + categoryId + '-' + subcategory; if (budgetChanges[key] !== undefined) return budgetChanges[key]; const category = categories.find(c => c.id === categoryId); const pb = category && category.personBudgets && category.personBudgets[editingPersonKey]; if (!pb) return ''; if (type === 'category') return pb.monthlyBudget || ''; else return (pb.subcategoryBudgets && pb.subcategoryBudgets[subcategory]) || ''; };
-    const hasUnsavedChanges = Object.keys(budgetChanges).length > 0;
-    const getCategoryTotalBudget = (category) => { if (categoryBudgetModes[category.id]) { return category.subcategories.reduce((sum, sub) => sum + (parseFloat(getCurrentBudgetValue(category.id, 'subcategory', sub)) || 0), 0); } return parseFloat(getCurrentBudgetValue(category.id, 'category')) || 0; };
-    const totalBudget = categories.reduce((sum, category) => sum + getCategoryTotalBudget(category), 0);
-    // Read-only preview of what Summary's Monthly Budget Overview will show for a category —
-    // sums each active person's effective budget the same way (no currency conversion,
-    // mirroring DataService.getBudgetSummary's existing simplification) so the two screens agree.
-    const getCombinedCategoryBudget = (category) => activeView.reduce((sum, p) => {
-        const pb = category.personBudgets && category.personBudgets[p];
-        if (!pb) return sum;
-        const amt = (pb.useSubcategoryBudgets && pb.subcategoryBudgets) ? Object.values(pb.subcategoryBudgets).reduce((s, v) => s + (v || 0), 0) : (pb.monthlyBudget || 0);
-        return sum + amt;
-    }, 0);
-    const combinedTotalBudget = categories.reduce((sum, category) => sum + getCombinedCategoryBudget(category), 0);
-
-    // Shared across expense categories and both net-worth category types below — each
-    // collection gets its own conflict map, but the badge/modal/resolve logic is generic.
-    const categorySyncConflicts = useMemo(() => SyncConflicts.read('categories'), [categories]);
-    const categoryConflictFieldLabels = { name: 'Name', subcategories: 'Subcategories' };
-    const formatCategoryConflictValue = (key, value) => {
-        if (key === 'subcategories') return Array.isArray(value) && value.length ? value.join(', ') : '—';
-        if (key === 'personBudgets' || key === 'budgetHistory') return 'Budgets differ — review in Settings';
-        return value === undefined || value === null || value === '' ? '—' : String(value);
-    };
-    const conflictCategory = (showConflictDetail && showConflictDetail.collection === 'categories') ? categories.find(c => c.id === showConflictDetail.id) : null;
-    const categoryConflictSnapshot = conflictCategory ? categorySyncConflicts[String(showConflictDetail.id)] : null;
-    const handleResolveCategoryConflict = async (useCloud) => {
-        const catId = showConflictDetail.id;
-        const updates = useCloud && categoryConflictSnapshot ? categoryConflictSnapshot.cloudSnapshot : {};
-        await DataService.updateCategory(catId, updates);
-        SyncConflicts.dismiss('categories', catId);
-        setShowConflictDetail(null);
-        onUpdate();
-    };
-
+    const noun = kind === 'expense' ? 'expense' : kind;
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2>Category Management & Budgets</h2>
-                {hasUnsavedChanges && (<button className="btn btn-success btn-sm" onClick={saveBudgetChanges}><i className="fas fa-save"></i> Save Budget Changes</button>)}
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{category ? 'Save changes' : 'Save category'}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon={headLook.icon} tint={headLook.tint} ink={headLook.ink} title={category ? 'Edit ' + noun + ' category' : 'New ' + noun + ' category'} />
+            {error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className={'sp-formrow' + (error && !name.trim() ? ' is-bad' : '')}><span>Name</span><input type="text" value={name} placeholder={isExpense ? 'e.g. Pets' : 'e.g. Crypto'} onChange={e => { setName(e.target.value); setError(''); }} autoFocus /></div>
             </div>
-            {errors.delete && (<div className="alert alert-danger">{errors.delete}</div>)}
-            {!isSingleView && (
-                <div className="alert alert-info" style={{marginBottom: '1rem'}}>
-                    <i className="fas fa-info-circle me-2"></i>Showing the combined budget across everyone selected in Active View — matches Summary's Monthly Budget Overview. Switch to an individual view to edit a person's budget.
-                </div>
-            )}
-            {hasBudgetCurrencyMismatch && (
-                <div className="alert alert-warning d-flex align-items-center justify-content-between" style={{marginBottom: '1rem'}}>
-                    <div><i className="fas fa-exclamation-triangle me-2"></i>Budgets were set in a different currency. Reset all to {defaultCurrency}?</div>
-                    <button className="btn btn-warning btn-sm ms-2" onClick={handleResetAllBudgets}><i className="fas fa-sync-alt me-1"></i>Reset All Budgets</button>
-                </div>
-            )}
-            <h4 style={{fontSize:'1rem', marginBottom:'0.75rem'}}><i className="fas fa-receipt me-2"></i>Expense Categories</h4>
-            <div className="add-category-section">
-                <h5>Add New Category</h5>
-                <form onSubmit={handleAddCategory} className="add-form">
-                    <div className="input-group">
-                        <input type="text" className={'form-control ' + (errors.name ? 'is-invalid' : '')} value={newCategoryName} onChange={(e) => { setNewCategoryName(e.target.value); if (errors.name) setErrors(prev => ({ ...prev, name: '' })); }} placeholder="Enter category name" />
-                        <button type="submit" className="btn btn-primary"><i className="fas fa-plus"></i> Add</button>
+            {isExpense && (
+                <React.Fragment>
+                    <div className="sp-formlabel">Icon</div>
+                    <div className="sp-icongrid">
+                        {SP_CAT_ICON_CHOICES.map(([ic, tint, ink]) => (
+                            <button key={ic} type="button" className={shownIcon === ic ? 'is-active' : ''} style={{background: tint, color: ink}} onClick={() => setIcon(ic)} aria-label={ic.replace('fas fa-', '')}><i className={ic}></i></button>
+                        ))}
                     </div>
-                    {errors.name && <div className="invalid-feedback d-block">{errors.name}</div>}
-                </form>
-            </div>
-            <div className="categories-list">
-                {categories.length === 0 ? (
-                    <div className="empty-state"><i className="fas fa-tags fa-3x"></i><h4>No categories found</h4><p>Start by adding your first category!</p></div>
-                ) : (
-                    categories.map(category => (
-                        <div key={category.id} className="category-item">
-                            <div className="category-header">
-                                {editingCategory === category.id ? (
-                                    <div className="edit-category-form">
-                                        <input type="text" className={'form-control ' + (errors[category.id] ? 'is-invalid' : '')} defaultValue={category.name} onBlur={(e) => handleUpdateCategory(category.id, e.target.value)} onKeyPress={(e) => { if (e.key === 'Enter') handleUpdateCategory(category.id, e.target.value); }} autoFocus />
-                                        {errors[category.id] && (<div className="invalid-feedback d-block">{errors[category.id]}</div>)}
-                                    </div>
-                                ) : (
-                                    <div className="category-info"><h6>{category.name}<SyncConflictBadge conflict={categorySyncConflicts[String(category.id)]} onClick={() => setShowConflictDetail({ collection: 'categories', id: category.id })} /></h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
-                                )}
-                                <div className="category-actions">
-                                    <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingCategory(editingCategory === category.id ? null : category.id)} title="Edit"><i className="fas fa-edit"></i></button>
-                                    <button className="btn btn-sm btn-outline-success" onClick={() => setAddingSubcategoryTo(addingSubcategoryTo === category.id ? null : category.id)} title="Add Subcategory"><i className="fas fa-plus"></i></button>
-                                    <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(category.id)} title="Delete"><i className="fas fa-trash"></i></button>
-                                </div>
-                            </div>
-                            {isSingleView && (
-                            <div className="category-budget-inline">
-                                {category.subcategories.length > 0 && (
-                                    <div className="budget-mode-toggle">
-                                        <div className="form-check">
-                                            <input type="checkbox" className="form-check-input" id={'budget-mode-' + category.id} checked={categoryBudgetModes[category.id] || false} onChange={() => toggleBudgetMode(category.id)} />
-                                            <label className="form-check-label" htmlFor={'budget-mode-' + category.id}>Use subcategory-level budgets</label>
-                                        </div>
-                                    </div>
-                                )}
-                                {!categoryBudgetModes[category.id] && (
-                                    <div className="budget-input-row">
-                                        <label className="budget-label"><i className="fas fa-calculator"></i> Category Budget:</label>
-                                        <div className="input-group input-group-sm budget-input">
-                                            <span className="input-group-text">{ValidationUtils.getCurrencySymbol(hasBudgetCurrencyMismatch && category.personBudgets && category.personBudgets[editingPersonKey] && category.personBudgets[editingPersonKey].budgetCurrency ? category.personBudgets[editingPersonKey].budgetCurrency : defaultCurrency)}</span>
-                                            <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'category')} onChange={(e) => handleBudgetChange(category.id, 'category', null, e.target.value)} placeholder="0.00" step="0.01" min="0" disabled={hasBudgetCurrencyMismatch} />
-                                        </div>
-                                    </div>
-                                )}
-                                {categoryBudgetModes[category.id] && category.subcategories.length > 0 && (
-                                    <div className="subcategory-budgets">
-                                        <div className="subcategory-budget-header"><h6>Subcategory Budgets:</h6></div>
-                                        {category.subcategories.map(subcategory => {
-                                            const pb = category.personBudgets && category.personBudgets[editingPersonKey];
-                                            const subBudgetCurrency = hasBudgetCurrencyMismatch && pb && pb.subcategoryBudgetCurrencies && pb.subcategoryBudgetCurrencies[subcategory] ? pb.subcategoryBudgetCurrencies[subcategory] : defaultCurrency;
-                                            return (
-                                            <div key={subcategory} className="budget-input-row subcategory-budget-row">
-                                                <label className="budget-label subcategory-label">{subcategory}:</label>
-                                                <div className="input-group input-group-sm budget-input">
-                                                    <span className="input-group-text">{ValidationUtils.getCurrencySymbol(subBudgetCurrency)}</span>
-                                                    <input type="number" className="form-control" value={getCurrentBudgetValue(category.id, 'subcategory', subcategory)} onChange={(e) => handleBudgetChange(category.id, 'subcategory', subcategory, e.target.value)} placeholder="0.00" step="0.01" min="0" disabled={hasBudgetCurrencyMismatch} />
-                                                </div>
-                                            </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                                <div className="budget-input-row">
-                                    <label className="budget-label"><i className="fas fa-bell"></i> Notify me at:</label>
-                                    <div className="input-group input-group-sm budget-input">
-                                        <input type="number" className="form-control" value={getCurrentThresholdValue(category.id)} onChange={(e) => handleThresholdChange(category.id, e.target.value)} min="50" max="100" step="1" />
-                                        <span className="input-group-text">%</span>
-                                    </div>
-                                </div>
-                                {(() => {
-                                    const useSubcategoryBudgets = categoryBudgetModes[category.id];
-                                    let totalCategoryBudget = 0;
-                                    if (useSubcategoryBudgets) { totalCategoryBudget = category.subcategories.reduce((sum, subcategory) => sum + (parseFloat(getCurrentBudgetValue(category.id, 'subcategory', subcategory)) || 0), 0); } else { totalCategoryBudget = parseFloat(getCurrentBudgetValue(category.id, 'category')) || 0; }
-                                    const pb = category.personBudgets && category.personBudgets[editingPersonKey];
-                                    const displayCurrency = hasBudgetCurrencyMismatch && pb && pb.budgetCurrency ? pb.budgetCurrency : defaultCurrency;
-                                    return totalCategoryBudget > 0 ? (<div className="category-total-budget"><div className="total-budget-display"><strong>Total for {category.name}: {ValidationUtils.formatCurrency(totalCategoryBudget, displayCurrency)}</strong></div></div>) : null;
-                                })()}
-                            </div>
-                            )}
-                            {!isSingleView && (() => {
-                                const subcatModePeople = activeView.filter(p => category.personBudgets && category.personBudgets[p] && category.personBudgets[p].useSubcategoryBudgets);
-                                return (
-                                    <div className="category-budget-inline" style={{opacity: 0.75}}>
-                                        <div className="budget-input-row">
-                                            <label className="budget-label"><i className="fas fa-calculator"></i> Combined Category Budget (read-only):</label>
-                                            <div className="total-budget-display"><strong>{ValidationUtils.formatCurrency(getCombinedCategoryBudget(category), defaultCurrency)}</strong></div>
-                                        </div>
-                                        {subcatModePeople.length > 0 && category.subcategories.length > 0 && (
-                                            <div className="subcategory-budgets">
-                                                <div className="subcategory-budget-header"><h6>Subcategory Budgets (combined):</h6></div>
-                                                {category.subcategories.map(subcategory => {
-                                                    const subTotal = subcatModePeople.reduce((sum, p) => sum + ((category.personBudgets[p].subcategoryBudgets && category.personBudgets[p].subcategoryBudgets[subcategory]) || 0), 0);
-                                                    return (
-                                                        <div key={subcategory} className="budget-input-row subcategory-budget-row">
-                                                            <label className="budget-label subcategory-label">{subcategory}:</label>
-                                                            <div className="total-budget-display">{ValidationUtils.formatCurrency(subTotal, defaultCurrency)}</div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                    </div>
-                                );
-                            })()}
-                            {addingSubcategoryTo === category.id && (
-                                <div className="add-subcategory-form">
-                                    <div className="input-group input-group-sm">
-                                        <input type="text" className={'form-control ' + (errors.subcategory ? 'is-invalid' : '')} value={newSubcategoryName} onChange={(e) => { setNewSubcategoryName(e.target.value); if (errors.subcategory) setErrors(prev => ({ ...prev, subcategory: '' })); }} placeholder="Enter subcategory name" onKeyPress={(e) => { if (e.key === 'Enter') handleAddSubcategory(category.id); }} />
-                                        <button className="btn btn-primary" onClick={() => handleAddSubcategory(category.id)}>Add</button>
-                                    </div>
-                                    {errors.subcategory && (<div className="invalid-feedback d-block">{errors.subcategory}</div>)}
-                                </div>
-                            )}
-                            {category.subcategories.length > 0 && (
-                                <div className="subcategories-list">
-                                    {category.subcategories.map(subcategory => (
-                                        <div key={subcategory} className="subcategory-item">
-                                            {editingSubcategory && editingSubcategory.categoryId === category.id && editingSubcategory.oldName === subcategory ? (
-                                                <>
-                                                    <input type="text" className={'form-control form-control-sm ' + (errors.subcategory ? 'is-invalid' : '')} value={editingSubcategory.value} onChange={(e) => setEditingSubcategory(prev => ({ ...prev, value: e.target.value }))} onKeyPress={(e) => { if (e.key === 'Enter') handleRequestRenameSubcategory(); }} autoFocus />
-                                                    <button className="btn btn-sm btn-outline-success" onClick={handleRequestRenameSubcategory} title="Save"><i className="fas fa-check"></i></button>
-                                                    <button className="btn btn-sm btn-outline-secondary" onClick={handleCancelRenameSubcategory} title="Cancel"><i className="fas fa-times"></i></button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <span>{subcategory}</span>
-                                                    <button className="btn btn-sm btn-outline-primary" onClick={() => handleStartRenameSubcategory(category.id, subcategory)} title="Edit Subcategory"><i className="fas fa-edit"></i></button>
-                                                    <button className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteSubcategory(category.id, subcategory)} title="Delete Subcategory"><i className="fas fa-times"></i></button>
-                                                </>
-                                            )}
-                                        </div>
-                                    ))}
-                                    {editingSubcategory && editingSubcategory.categoryId === category.id && errors.subcategory && (<div className="invalid-feedback d-block">{errors.subcategory}</div>)}
-                                </div>
-                            )}
-                        </div>
-                    ))
-                )}
-            </div>
-            <div className="total-budget-summary">
-                <div className="budget-summary-card">
-                    <div className="summary-content">
-                        <div className="summary-icon"><i className="fas fa-calculator"></i></div>
-                        <div className="summary-info">
-                            <h5>Total Monthly Budget{!isSingleView ? ' (combined, read-only)' : ''}</h5>
-                            {isSingleView ? (
-                                <div className="total-amount">{ValidationUtils.formatCurrency(totalBudget, hasBudgetCurrencyMismatch ? categories.find(c => c.personBudgets && c.personBudgets[editingPersonKey] && c.personBudgets[editingPersonKey].budgetCurrency)?.personBudgets[editingPersonKey].budgetCurrency || defaultCurrency : defaultCurrency)}</div>
-                            ) : (
-                                <div className="total-amount">{ValidationUtils.formatCurrency(combinedTotalBudget, defaultCurrency)}</div>
-                            )}
-                            <div className="summary-note">{categories.filter(cat => (isSingleView ? getCategoryTotalBudget(cat) : getCombinedCategoryBudget(cat)) > 0).length} of {categories.length} categories have budgets set</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            {showDeleteConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Confirm Delete</h5></div>
-                            <div className="modal-body"><p>Are you sure you want to delete this category?</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => handleDeleteCategory(showDeleteConfirm)}>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                    {category && !category.icon && !icon && <div className="sp-hint" style={{margin: '6px 4px 0', fontSize: '11px'}}>Showing a suggested icon. Tap one to save it.</div>}
+                </React.Fragment>
             )}
-            {renameConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Rename Subcategory</h5></div>
-                            <div className="modal-body">
-                                <p>Rename <strong>{renameConfirm.oldName}</strong> to <strong>{renameConfirm.newName}</strong>?</p>
-                                <p className="text-warning"><i className="fas fa-exclamation-triangle me-1"></i>This will update <strong>{renameConfirm.expenseCount + renameConfirm.billCount}</strong> historical record(s) ({renameConfirm.expenseCount} expense(s), {renameConfirm.billCount} bill(s)).</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setRenameConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-primary" onClick={handleConfirmRenameSubcategory}>Rename</button>
-                            </div>
-                        </div>
+            {!category && (
+                <React.Fragment>
+                    <div className="sp-formlabel">Sub categories</div>
+                    <div className="sp-subadd-card">
+                        {subs.length > 0 && <div className="sp-subchips">{subs.map(s => <span key={s}>{s}<button type="button" onClick={() => setSubs(prev => prev.filter(x => x !== s))} aria-label={'Remove ' + s}><i className="fas fa-xmark"></i></button></span>)}</div>}
+                        <form className="sp-subadd" onSubmit={e => { e.preventDefault(); addSub(); }}>
+                            <input type="text" value={subDraft} placeholder="Add a sub category" onChange={e => setSubDraft(e.target.value)} />
+                            <button type="submit">Add</button>
+                        </form>
                     </div>
-                </div>
+                </React.Fragment>
             )}
-            {conflictCategory && categoryConflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictCategory}
-                    cloudSnapshot={categoryConflictSnapshot.cloudSnapshot}
-                    fieldLabels={categoryConflictFieldLabels}
-                    formatValue={formatCategoryConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveCategoryConflict(false)}
-                    onUseCloud={() => handleResolveCategoryConflict(true)}
-                />
-            )}
-            <NetWorthCategorySection type="asset" title="Asset Categories" icon="fa-plus-circle" categories={assetCategories} onUpdate={onUpdate} />
-            <NetWorthCategorySection type="liability" title="Liability Categories" icon="fa-minus-circle" categories={liabilityCategories} onUpdate={onUpdate} />
+        </Sheet>
+    );
+}
+
+// Sub-category list shared by expense and net-worth categories. `ops` supplies the
+// existing DataService calls and usage counts; rename keeps the "updates N records" confirm.
+function SpSubcategoryList({ category, ops, budgetInput, onChanged }) {
+    const [editing, setEditing] = useState(null); // { oldName, value }
+    const [renameConfirm, setRenameConfirm] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null);
+    const [blocked, setBlocked] = useState(null); // { name, msg }
+    const [draft, setDraft] = useState('');
+    const [error, setError] = useState('');
+    const add = async (e) => {
+        e.preventDefault();
+        const s = draft.trim();
+        if (!s) { setError('Subcategory name is required'); return; }
+        if (category.subcategories.includes(s)) { setError('Subcategory already exists'); return; }
+        await ops.add(s); setDraft(''); setError(''); onChanged('Sub category added');
+    };
+    const requestRename = async () => {
+        const newName = (editing.value || '').trim();
+        if (!newName) { setError('Subcategory name is required'); return; }
+        if (newName === editing.oldName) { setEditing(null); return; }
+        if (category.subcategories.includes(newName)) { setError('Subcategory already exists'); return; }
+        setError('');
+        const usage = await ops.renameUsage(editing.oldName);
+        if (usage.total === 0) { await ops.rename(editing.oldName, newName); setEditing(null); onChanged('Sub category renamed'); return; }
+        setRenameConfirm({ oldName: editing.oldName, newName, ...usage });
+    };
+    const confirmRename = async () => { await ops.rename(renameConfirm.oldName, renameConfirm.newName); setRenameConfirm(null); setEditing(null); onChanged('Sub category renamed'); };
+    const askDelete = async (name) => {
+        setBlocked(null); setPendingDelete(null);
+        const n = await ops.deleteUsage(name);
+        if (n > 0) { setBlocked({ name, msg: 'Can\'t delete ' + name + ': it\'s used by ' + n + ' ' + ops.itemWord + (n === 1 ? '' : 's') + '.' }); return; }
+        setPendingDelete(name);
+    };
+    const doDelete = async (name) => { await ops.remove(name); setPendingDelete(null); onChanged('Sub category deleted'); };
+    return (
+        <div className="sp-sublist">
+            {category.subcategories.map(sub => {
+                const isEditing = editing && editing.oldName === sub;
+                const uses = ops.useLabel ? ops.useLabel(sub) : '';
+                return (
+                    <div key={sub} className="sp-subrow">
+                        {isEditing ? (
+                            <div className="sp-subedit">
+                                <input type="text" value={editing.value} autoFocus onChange={e => setEditing(p => ({ ...p, value: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') requestRename(); if (e.key === 'Escape') setEditing(null); }} />
+                                <button type="button" className="sp-subedit-cancel" onClick={() => { setEditing(null); setRenameConfirm(null); setError(''); }}>Cancel</button>
+                                <button type="button" className="sp-subedit-save" onClick={requestRename}>Save</button>
+                            </div>
+                        ) : (
+                            <div className="sp-subview">
+                                <div className="sp-subname"><div>{sub}</div>{uses && <span>{uses}</span>}</div>
+                                {budgetInput && budgetInput(sub)}
+                                <button type="button" className="sp-subbtn" onClick={() => { setEditing({ oldName: sub, value: sub }); setPendingDelete(null); setBlocked(null); }} title="Rename"><i className="fas fa-pen"></i></button>
+                                <button type="button" className="sp-subbtn is-danger" onClick={() => askDelete(sub)} title="Delete"><i className="fas fa-trash"></i></button>
+                            </div>
+                        )}
+                        {isEditing && renameConfirm && (
+                            <InlineConfirm text={'Rename ' + renameConfirm.oldName + ' to ' + renameConfirm.newName + '? This updates ' + renameConfirm.total + ' record' + (renameConfirm.total === 1 ? '' : 's') + (renameConfirm.detail ? ' (' + renameConfirm.detail + ')' : '') + '.'} keepLabel="Cancel" cta="Rename" onKeep={() => setRenameConfirm(null)} onConfirm={confirmRename} />
+                        )}
+                        {blocked && blocked.name === sub && <div className="sp-blocked"><i className="fas fa-circle-info"></i><span>{blocked.msg}</span></div>}
+                        {pendingDelete === sub && <InlineConfirm text={'Delete ' + sub + '?'} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => doDelete(sub)} />}
+                    </div>
+                );
+            })}
+            <form className="sp-subadd" onSubmit={add}>
+                <input type="text" value={draft} placeholder="Add a sub category" onChange={e => { setDraft(e.target.value); setError(''); }} />
+                <button type="submit"><i className="fas fa-plus" style={{marginRight: '5px'}}></i>Add</button>
+            </form>
+            {error && <div className="sp-suberror">{error}</div>}
         </div>
     );
 }
 
-// Simplified category/subcategory manager for Asset & Liability net worth categories —
-// same add/rename/delete + subcategory-rename-with-confirm pattern as the expense category
-// list above, minus the budget UI (budgets are expense-specific).
-function NetWorthCategorySection({ type, title, icon, categories, onUpdate }) {
-    const [editingCategory, setEditingCategory] = useState(null);
-    const [newCategoryName, setNewCategoryName] = useState('');
-    const [newSubcategoryName, setNewSubcategoryName] = useState('');
-    const [addingSubcategoryTo, setAddingSubcategoryTo] = useState(null);
-    const [errors, setErrors] = useState({});
-    const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
-    const [editingSubcategory, setEditingSubcategory] = useState(null);
-    const [renameConfirm, setRenameConfirm] = useState(null);
-    const [renameCategoryConfirm, setRenameCategoryConfirm] = useState(null);
-    const [showConflictDetail, setShowConflictDetail] = useState(null);
-    const conflictCollection = type === 'asset' ? 'assetCategories' : 'liabilityCategories';
-    const syncConflicts = useMemo(() => SyncConflicts.read(conflictCollection), [categories]);
-    const conflictCategory = showConflictDetail ? categories.find(c => c.id === showConflictDetail) : null;
+function CategoryManager({ categories, assetCategories, liabilityCategories, onUpdate, defaultCurrency, activeView }) {
+    const [tab, setTab] = useState(() => { const t = FilterMemory.load('categories').tab; return ['expense', 'asset', 'liability'].includes(t) ? t : 'expense'; });
+    useEffect(() => { FilterMemory.save('categories', { tab }); }, [tab]);
+    const [openId, setOpenId] = useState(null);
+    const [toast, setToast] = useState('');
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
+    const [formFor, setFormFor] = useState(null); // null | 'new' | category
+    const [pendingDelete, setPendingDelete] = useState(null);
+    const [blocked, setBlocked] = useState(null); // { id, msg }
+    const [askReset, setAskReset] = useState(false);
+    const [renameCatConfirm, setRenameCatConfirm] = useState(null); // net-worth rename { id, oldName, newName, itemCount }
+    const [showConflictDetail, setShowConflictDetail] = useState(null); // category id
+    const [drafts, setDrafts] = useState({}); // unsaved budget input text by key
+    const [usage, setUsage] = useState({ exp: {}, bills: {} }); // counts by 'catId|sub'
+    const people = DataService.getPeople();
+    const done = async (msg) => { if (msg) setToast(msg); await onUpdate(); };
+    const switchTab = (t) => { setTab(t); setOpenId(null); setPendingDelete(null); setBlocked(null); setAskReset(false); };
+
+    // Budgets are only shown and edited while a single person is active (C1); with several
+    // people there's no single "whose budget", so they're hidden with a note instead.
+    const isSingleView = activeView.length === 1;
+    const editingPersonKey = isSingleView ? (resolveActiveViewValue(activeView) === '' ? 'own' : resolveActiveViewValue(activeView)) : null;
+    const whoName = !editingPersonKey ? '' : editingPersonKey === 'own' ? ((JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null') || {}).displayName || 'You').split(' ')[0] : editingPersonKey;
+    const pbOf = (cat) => (editingPersonKey && cat.personBudgets && cat.personBudgets[editingPersonKey]) || null;
+    const hasBudgetCurrencyMismatch = !!editingPersonKey && categories.some(cat => { const pb = pbOf(cat); return pb && pb.budgetCurrency && pb.budgetCurrency !== defaultCurrency && (pb.monthlyBudget > 0 || (pb.subcategoryBudgets && Object.values(pb.subcategoryBudgets).some(v => v > 0))); });
+    const budgetSym = (cat, sub) => {
+        const pb = pbOf(cat);
+        if (!hasBudgetCurrencyMismatch || !pb) return ValidationUtils.getCurrencySymbol(defaultCurrency);
+        const c = sub ? (pb.subcategoryBudgetCurrencies && pb.subcategoryBudgetCurrencies[sub]) : pb.budgetCurrency;
+        return ValidationUtils.getCurrencySymbol(c || defaultCurrency);
+    };
+    const subMode = (cat) => { const pb = pbOf(cat); return !!(pb && pb.useSubcategoryBudgets) && cat.subcategories.length > 0; };
+    const storedBudget = (cat, sub) => { const pb = pbOf(cat); if (!pb) return 0; return sub ? ((pb.subcategoryBudgets && pb.subcategoryBudgets[sub]) || 0) : (pb.monthlyBudget || 0); };
+    const catTotal = (cat) => subMode(cat) ? cat.subcategories.reduce((s, sub) => s + (parseFloat(storedBudget(cat, sub)) || 0), 0) : (parseFloat(storedBudget(cat)) || 0);
+    const totalBudget = categories.reduce((s, c) => s + catTotal(c), 0);
+    const budgetedCount = categories.filter(c => catTotal(c) > 0).length;
+    const heroCurrency = hasBudgetCurrencyMismatch ? ((categories.map(pbOf).find(pb => pb && pb.budgetCurrency) || {}).budgetCurrency || defaultCurrency) : defaultCurrency;
+    const fmt0 = (v, cur) => ValidationUtils.getCurrencySymbol(cur || defaultCurrency) + Math.round(v).toLocaleString((cur || defaultCurrency) === 'INR' ? 'en-IN' : 'en-GB');
+
+    // Expense / bill counts per sub category (display only, for "N expenses" and rename confirms).
+    useEffect(() => {
+        let cancelled = false;
+        DataService.getExpenses().then(exps => {
+            if (cancelled) return;
+            const exp = {}, bills = {};
+            exps.forEach(e => { const k = e.categoryId + '|' + (e.subcategory || ''); exp[k] = (exp[k] || 0) + 1; exp[e.categoryId + '|*'] = (exp[e.categoryId + '|*'] || 0) + 1; });
+            DataService.getBills().forEach(b => { const k = b.categoryId + '|' + (b.subcategory || ''); bills[k] = (bills[k] || 0) + 1; });
+            setUsage({ exp, bills });
+        });
+        return () => { cancelled = true; };
+    }, [categories]);
+
+    // Budgets save on their own (C2): when a field loses focus, or on Enter.
+    const draftKey = (cat, sub) => 'b:' + cat.id + ':' + (sub || '');
+    const budgetValue = (cat, sub) => { const k = draftKey(cat, sub); return drafts[k] !== undefined ? drafts[k] : (storedBudget(cat, sub) || ''); };
+    const commitBudget = async (cat, sub) => {
+        const k = draftKey(cat, sub);
+        if (drafts[k] === undefined) return;
+        const value = drafts[k];
+        setDrafts(prev => { const n = { ...prev }; delete n[k]; return n; });
+        if ((parseFloat(value) || 0) === (parseFloat(storedBudget(cat, sub)) || 0)) return;
+        if (sub) await DataService.setSubcategoryBudget(cat.id, sub, value, defaultCurrency, editingPersonKey);
+        else await DataService.setCategoryBudget(cat.id, value, defaultCurrency, editingPersonKey);
+        done('Budget saved');
+    };
+    const moneyInput = (cat, sub) => (
+        <span className="sp-budgetin">
+            <span>{budgetSym(cat, sub)}</span>
+            <input type="number" min="0" step="1" inputMode="decimal" placeholder="0" disabled={hasBudgetCurrencyMismatch}
+                value={budgetValue(cat, sub)}
+                onChange={e => { const v = e.target.value; setDrafts(prev => ({ ...prev, [draftKey(cat, sub)]: v })); }}
+                onBlur={() => commitBudget(cat, sub)}
+                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+        </span>
+    );
+    const setMode = async (cat, useSub) => { await DataService.setUseSubcategoryBudgets(cat.id, editingPersonKey, useSub); done(useSub ? 'Budget set by sub category' : 'Budget set for the whole category'); };
+    const threshold = (cat) => { const pb = pbOf(cat); return (pb && pb.notificationThreshold) || 80; };
+    const setThreshold = async (cat, v) => { await DataService.setPersonBudgetThreshold(cat.id, editingPersonKey, Math.min(100, Math.max(50, parseInt(v) || 80))); done('Notify level saved'); };
+    const handleResetAll = async () => { setAskReset(false); await DataService.resetAllBudgets(defaultCurrency, editingPersonKey); setDrafts({}); done('All budgets reset for ' + whoName); };
+
+    const netType = tab === 'asset' || tab === 'liability' ? tab : null;
+    const list = tab === 'expense' ? categories : tab === 'asset' ? assetCategories : liabilityCategories;
+    const conflictCollection = tab === 'expense' ? 'categories' : tab === 'asset' ? 'assetCategories' : 'liabilityCategories';
+    const syncConflicts = useMemo(() => SyncConflicts.read(conflictCollection), [conflictCollection, list]);
+    const conflictCategory = showConflictDetail ? list.find(c => c.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
-    const conflictFieldLabels = { name: 'Name', subcategories: 'Subcategories' };
-    const formatConflictValue = (key, value) => (key === 'subcategories' ? (Array.isArray(value) && value.length ? value.join(', ') : '—') : (value === undefined || value === null || value === '' ? '—' : String(value)));
-    // updateNetWorthCategory only supports renaming (and refuses locked categories entirely)
-    // — there's no bulk "replace subcategories" method, so a subcategory-only difference
-    // can't be fully auto-resolved here; the name is what "Use Cloud"/"Keep Local" affects.
-    const handleResolveCategoryConflict = (useCloud) => {
+    const categoryConflictFieldLabels = { name: 'Name', subcategories: 'Subcategories', icon: 'Icon', personBudgets: 'Budgets' };
+    const formatCategoryConflictValue = (key, value) => {
+        if (key === 'subcategories') return Array.isArray(value) && value.length ? value.join(', ') : '—';
+        if (key === 'personBudgets' || key === 'budgetHistory') return 'Budgets differ';
+        if (key === 'icon') return value ? value.replace('fas fa-', '') : '—';
+        return value === undefined || value === null || value === '' ? '—' : String(value);
+    };
+    const handleResolveConflict = async (useCloud) => {
         const catId = showConflictDetail;
-        const cat = categories.find(c => c.id === catId);
-        if (cat && !cat.locked) {
-            const newName = useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot.name : cat.name;
-            DataService.updateNetWorthCategory(type, catId, newName);
+        if (netType) {
+            // updateNetWorthCategory only renames (and refuses locked categories), as before.
+            const cat = list.find(c => c.id === catId);
+            if (cat && !cat.locked) DataService.updateNetWorthCategory(netType, catId, useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot.name : cat.name);
+        } else {
+            await DataService.updateCategory(catId, useCloud && conflictSnapshot ? conflictSnapshot.cloudSnapshot : {});
         }
         SyncConflicts.dismiss(conflictCollection, catId);
         setShowConflictDetail(null);
-        onUpdate();
+        done();
     };
 
-    const handleAddCategory = (e) => {
-        e.preventDefault();
-        const name = newCategoryName.trim();
-        if (!name) { setErrors({ name: 'Category name is required' }); return; }
-        if (categories.some(c => c.name.toLowerCase() === name.toLowerCase())) { setErrors({ name: 'Category name already exists' }); return; }
-        DataService.addNetWorthCategory(type, name);
-        setNewCategoryName(''); setErrors({}); onUpdate();
+    const expenseSubOps = (cat) => ({
+        itemWord: 'expense',
+        useLabel: (sub) => { const n = usage.exp[cat.id + '|' + sub] || 0; return n ? n + ' expense' + (n === 1 ? '' : 's') : ''; },
+        add: (s) => DataService.addSubcategory(cat.id, s),
+        remove: (s) => DataService.removeSubcategory(cat.id, s),
+        rename: (a, b) => DataService.renameSubcategory(cat.id, a, b),
+        deleteUsage: async (s) => (await DataService.getExpensesByCategory(cat.id, s)).length,
+        renameUsage: async (s) => {
+            const [exps, bills] = await Promise.all([DataService.getExpensesByCategory(cat.id, s), DataService.getBills()]);
+            const billCount = bills.filter(b => b.categoryId === cat.id && b.subcategory === s).length;
+            return { total: exps.length + billCount, detail: exps.length + ' expense' + (exps.length === 1 ? '' : 's') + ', ' + billCount + ' bill' + (billCount === 1 ? '' : 's') };
+        }
+    });
+    const netSubOps = (cat) => ({
+        itemWord: 'item',
+        add: (s) => DataService.addNetWorthSubcategory(netType, cat.id, s),
+        remove: (s) => DataService.removeNetWorthSubcategory(netType, cat.id, s),
+        rename: (a, b) => DataService.renameNetWorthSubcategory(netType, cat.id, a, b),
+        deleteUsage: async (s) => DataService.countNetWorthSubcategoryUsage(netType, cat.id, s),
+        renameUsage: async (s) => { const n = DataService.countNetWorthSubcategoryUsage(netType, cat.id, s); return { total: n, detail: '' }; }
+    });
+
+    const askDeleteCategory = async (cat) => {
+        setPendingDelete(null); setBlocked(null);
+        const n = netType ? DataService.countNetWorthCategoryUsage(netType, cat.id) : (await DataService.getExpensesByCategory(cat.id)).length;
+        if (n > 0) { setBlocked({ id: cat.id, msg: 'Can\'t delete ' + cat.name + ': it\'s used by ' + n + ' ' + (netType ? 'item' : 'expense') + (n === 1 ? '' : 's') + '.' }); return; }
+        setPendingDelete(cat.id);
     };
-    // Renaming a category is gated behind a confirm-with-warning modal (rather than saving
-    // straight on blur/Enter) because the name is what groups items in the Net Worth summary
-    // and history — a rename changes how existing items are displayed there, not just the label.
-    const handleUpdateCategory = (categoryId, newName) => {
-        const name = newName.trim();
-        const category = categories.find(c => c.id === categoryId);
-        if (!name) { setErrors({ [categoryId]: 'Category name is required' }); return; }
-        if (category && name === category.name) { setEditingCategory(null); return; }
-        if (categories.some(c => c.id !== categoryId && c.name.toLowerCase() === name.toLowerCase())) { setErrors({ [categoryId]: 'Category name already exists' }); return; }
-        setErrors({});
-        setRenameCategoryConfirm({ categoryId, oldName: category.name, newName: name, itemCount: DataService.countNetWorthCategoryUsage(type, categoryId) });
+    const doDeleteCategory = async (cat) => {
+        if (netType) DataService.deleteNetWorthCategory(netType, cat.id);
+        else await DataService.deleteCategory(cat.id);
+        setPendingDelete(null); setOpenId(null); done(cat.name + ' deleted');
     };
-    const handleConfirmUpdateCategory = () => {
-        if (!renameCategoryConfirm) return;
-        const { categoryId, newName } = renameCategoryConfirm;
-        DataService.updateNetWorthCategory(type, categoryId, newName);
-        setRenameCategoryConfirm(null); setEditingCategory(null); onUpdate();
-    };
-    const handleDeleteCategory = (categoryId) => {
-        const usage = DataService.countNetWorthCategoryUsage(type, categoryId);
-        if (usage > 0) { setErrors({ delete: `Cannot delete category. It's being used by ${usage} item(s).` }); setShowDeleteConfirm(null); return; }
-        DataService.deleteNetWorthCategory(type, categoryId);
-        setShowDeleteConfirm(null); setErrors({}); onUpdate();
-    };
-    const handleAddSubcategory = (categoryId) => {
-        if (!newSubcategoryName.trim()) { setErrors({ subcategory: 'Subcategory name is required' }); return; }
-        const category = categories.find(c => c.id === categoryId);
-        if (category.subcategories.includes(newSubcategoryName.trim())) { setErrors({ subcategory: 'Subcategory already exists' }); return; }
-        DataService.addNetWorthSubcategory(type, categoryId, newSubcategoryName.trim());
-        setNewSubcategoryName(''); setAddingSubcategoryTo(null); setErrors({}); onUpdate();
-    };
-    const handleDeleteSubcategory = (categoryId, subcategoryName) => {
-        const usage = DataService.countNetWorthSubcategoryUsage(type, categoryId, subcategoryName);
-        if (usage > 0) { setErrors({ delete: `Cannot delete subcategory. It's being used by ${usage} item(s).` }); return; }
-        DataService.removeNetWorthSubcategory(type, categoryId, subcategoryName);
-        setErrors({}); onUpdate();
-    };
-    const handleStartRenameSubcategory = (categoryId, name) => { setEditingSubcategory({ categoryId, oldName: name, value: name }); setErrors(prev => ({ ...prev, subcategory: '' })); };
-    const handleCancelRenameSubcategory = () => { setEditingSubcategory(null); setErrors(prev => ({ ...prev, subcategory: '' })); };
-    const handleRequestRenameSubcategory = () => {
-        if (!editingSubcategory) return;
-        const { categoryId, oldName, value } = editingSubcategory;
-        const newName = (value || '').trim();
-        if (!newName) { setErrors({ subcategory: 'Subcategory name is required' }); return; }
-        if (newName === oldName) { setEditingSubcategory(null); return; }
-        const category = categories.find(c => c.id === categoryId);
-        if (category && category.subcategories.includes(newName)) { setErrors({ subcategory: 'Subcategory already exists' }); return; }
-        const usage = DataService.countNetWorthSubcategoryUsage(type, categoryId, oldName);
-        setErrors(prev => ({ ...prev, subcategory: '' }));
-        if (usage === 0) {
-            DataService.renameNetWorthSubcategory(type, categoryId, oldName, newName);
-            setEditingSubcategory(null);
-            onUpdate();
+
+    const saveForm = async ({ name, icon, subs }) => {
+        const editing = formFor && formFor !== 'new' ? formFor : null;
+        if (netType) {
+            if (editing) {
+                if (name !== editing.name) { setRenameCatConfirm({ id: editing.id, oldName: editing.name, newName: name, itemCount: DataService.countNetWorthCategoryUsage(netType, editing.id) }); setOpenId(editing.id); }
+                setFormFor(null);
+                return;
+            }
+            DataService.addNetWorthCategory(netType, name);
+            const created = DataService.getNetWorthCategories(netType).find(c => c.name.toLowerCase() === name.toLowerCase());
+            if (created) subs.forEach(s => DataService.addNetWorthSubcategory(netType, created.id, s));
+            setFormFor(null); done(name + ' added');
             return;
         }
-        setRenameConfirm({ categoryId, oldName, newName, itemCount: usage });
+        if (editing) {
+            const updates = {};
+            if (name !== editing.name) updates.name = name;
+            if (icon && icon !== (editing.icon || '')) updates.icon = icon; // only written when picked
+            if (Object.keys(updates).length) await DataService.updateCategory(editing.id, updates);
+            setFormFor(null); done(Object.keys(updates).length ? 'Category updated' : '');
+            return;
+        }
+        await DataService.addCategory({ name, icon, subcategories: subs });
+        setFormFor(null); done(name + ' added');
     };
-    const handleConfirmRenameSubcategory = () => {
-        if (!renameConfirm) return;
-        const { categoryId, oldName, newName } = renameConfirm;
-        DataService.renameNetWorthSubcategory(type, categoryId, oldName, newName);
-        setRenameConfirm(null);
-        setEditingSubcategory(null);
-        onUpdate();
-    };
+    const confirmNetRename = () => { DataService.updateNetWorthCategory(netType, renameCatConfirm.id, renameCatConfirm.newName); setRenameCatConfirm(null); done('Category renamed'); };
+
+    const noun = tab === 'expense' ? 'expense' : tab;
+    const lookOf = (cat, i) => netType ? spNetWorthCatLook(cat, netType) : spCategoryLook(cat, i);
 
     return (
-        <div style={{marginTop:'1.5rem'}}>
-            <h4 style={{fontSize:'1rem', marginBottom:'0.75rem'}}><i className={'fas ' + icon + ' me-2'}></i>{title}</h4>
-            {errors.delete && (<div className="alert alert-danger">{errors.delete}</div>)}
-            <div className="add-category-section">
-                <form onSubmit={handleAddCategory} className="add-form">
-                    <div className="input-group">
-                        <input type="text" className={'form-control ' + (errors.name ? 'is-invalid' : '')} value={newCategoryName} onChange={(e) => { setNewCategoryName(e.target.value); if (errors.name) setErrors(prev => ({ ...prev, name: '' })); }} placeholder="Enter category name" />
-                        <button type="submit" className="btn btn-primary"><i className="fas fa-plus"></i> Add</button>
-                    </div>
-                    {errors.name && <div className="invalid-feedback d-block">{errors.name}</div>}
-                </form>
+        <div className="sp-page sp-catpage">
+            <div className="sp-page-kicker">{list.length} {noun} categor{list.length === 1 ? 'y' : 'ies'}</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>Categories</h2>
+            <div className="sp-seg" style={{margin: '0 0 12px'}}>
+                {[['expense', 'Expense'], ['asset', 'Asset'], ['liability', 'Liability']].map(([k, l]) => <button key={k} type="button" className={tab === k ? 'is-active' : ''} onClick={() => switchTab(k)}>{l}</button>)}
             </div>
-            <div className="categories-list">
-                {(categories || []).length === 0 ? (
-                    <div className="empty-state"><p>No categories found</p></div>
-                ) : (
-                    categories.map(category => (
-                        <div key={category.id} className="category-item">
-                            <div className="category-header">
-                                {editingCategory === category.id ? (
-                                    <div className="edit-category-form">
-                                        <input type="text" className={'form-control ' + (errors[category.id] ? 'is-invalid' : '')} defaultValue={category.name} onBlur={(e) => handleUpdateCategory(category.id, e.target.value)} onKeyPress={(e) => { if (e.key === 'Enter') handleUpdateCategory(category.id, e.target.value); }} autoFocus />
-                                        {errors[category.id] && (<div className="invalid-feedback d-block">{errors[category.id]}</div>)}
-                                    </div>
-                                ) : (
-                                    <div className="category-info"><h6>{category.name}<SyncConflictBadge conflict={syncConflicts[String(category.id)]} onClick={() => setShowConflictDetail(category.id)} /></h6><span className="subcategory-count">{category.subcategories.length} subcategories</span></div>
-                                )}
-                                <div className="category-actions">
-                                    {!category.locked && (
-                                        <button className="btn btn-sm btn-outline-primary" onClick={() => setEditingCategory(editingCategory === category.id ? null : category.id)} title="Edit"><i className="fas fa-edit"></i></button>
-                                    )}
-                                    <button className="btn btn-sm btn-outline-success" onClick={() => setAddingSubcategoryTo(addingSubcategoryTo === category.id ? null : category.id)} title="Add Subcategory"><i className="fas fa-plus"></i></button>
-                                    {!category.locked && (
-                                        <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteConfirm(category.id)} title="Delete"><i className="fas fa-trash"></i></button>
-                                    )}
-                                    {category.locked && (
-                                        <span className="text-muted" style={{fontSize:'0.78rem', padding:'0 4px'}} title="Default category — can't be renamed or deleted"><i className="fas fa-lock"></i></span>
-                                    )}
-                                </div>
+
+            {tab === 'expense' && !isSingleView && (
+                <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span><b style={{display: 'block', color: 'var(--sp-navy)'}}>Budgets hidden in shared view</b>Budgets are set per person. Switch to one person in the view bar to see or edit budgets. You can still manage categories here.</span></div>
+            )}
+            {tab === 'expense' && isSingleView && (
+                <div className="sp-hero sp-cathero">
+                    <div className="sp-cathero-top"><span className="sp-hero-label">Total monthly budget · {whoName}</span><span className="sp-cathero-cur"><i className="fas fa-lock"></i>{defaultCurrency} · default</span></div>
+                    <div className="sp-hero-value">{fmt0(totalBudget, heroCurrency)}</div>
+                    <div className="sp-cathero-foot">
+                        <span>{budgetedCount} of {categories.length} categories budgeted · currency follows your default in Settings</span>
+                        {budgetedCount > 0 && !askReset && <button type="button" className="sp-cathero-reset" onClick={() => setAskReset(true)}><i className="fas fa-rotate-left"></i>Reset all</button>}
+                    </div>
+                    {askReset && (
+                        <div className="sp-cathero-confirm">
+                            <div className="sp-cathero-confirm-title">Reset all budgets for {whoName}?</div>
+                            <div className="sp-cathero-confirm-text">Clears every category and sub-category budget. Categories and expenses stay as they are.</div>
+                            <div className="sp-btn-row" style={{marginTop: '10px'}}>
+                                <button type="button" className="sp-btn sp-btn-white" style={{height: '40px', fontSize: '13px'}} onClick={() => setAskReset(false)}>Cancel</button>
+                                <button type="button" className="sp-btn sp-btn-danger" style={{height: '40px', fontSize: '13px'}} onClick={handleResetAll}>Reset all</button>
                             </div>
-                            {addingSubcategoryTo === category.id && (
-                                <div className="add-subcategory-form">
-                                    <div className="input-group input-group-sm">
-                                        <input type="text" className={'form-control ' + (errors.subcategory ? 'is-invalid' : '')} value={newSubcategoryName} onChange={(e) => { setNewSubcategoryName(e.target.value); if (errors.subcategory) setErrors(prev => ({ ...prev, subcategory: '' })); }} placeholder="Enter subcategory name" onKeyPress={(e) => { if (e.key === 'Enter') handleAddSubcategory(category.id); }} />
-                                        <button className="btn btn-primary" onClick={() => handleAddSubcategory(category.id)}>Add</button>
-                                    </div>
-                                    {errors.subcategory && (<div className="invalid-feedback d-block">{errors.subcategory}</div>)}
-                                </div>
+                        </div>
+                    )}
+                </div>
+            )}
+            {tab === 'expense' && hasBudgetCurrencyMismatch && (
+                <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>Budgets were set in a different currency. Reset all to {defaultCurrency} to edit them.</span></div>
+            )}
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
+
+            {list.length === 0 && <div className="sp-empty"><i className="fas fa-tags"></i>No {noun} categories yet.</div>}
+            {list.map((cat, i) => {
+                const look = lookOf(cat, i);
+                const isOpen = openId === cat.id;
+                const locked = !!(netType && cat.locked);
+                const showBudget = tab === 'expense' && isSingleView;
+                const total = showBudget ? catTotal(cat) : 0;
+                const conflict = syncConflicts[String(cat.id)];
+                const cfOpen = showConflictDetail === cat.id;
+                const nSubs = cat.subcategories.length;
+                return (
+                    <div key={cat.id} className="sp-catcard">
+                        <button type="button" className="sp-catrow" onClick={() => { setOpenId(isOpen ? null : cat.id); setPendingDelete(null); setBlocked(null); }}>
+                            <span className="sp-schedicon" style={{background: look.tint, color: look.ink}}><i className={look.icon}></i></span>
+                            <span className="sp-schedmain">
+                                <span className="sp-schedtitle">
+                                    <span>{cat.name}</span>
+                                    {locked && <span className="sp-kindtag is-paused"><i className="fas fa-lock" style={{fontSize: '8px', marginRight: '3px'}}></i>SYSTEM</span>}
+                                    {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : cat.id); }}><i className="fas fa-code-compare"></i></span>}
+                                </span>
+                                <span className="sp-schedmeta">{nSubs ? nSubs + ' sub categor' + (nSubs === 1 ? 'y' : 'ies') : 'No sub categories'}</span>
+                            </span>
+                            {showBudget && (
+                                <span className="sp-schedright">
+                                    <span className="sp-schedamt">{total > 0 ? fmt0(total, budgetSym(cat) === ValidationUtils.getCurrencySymbol(defaultCurrency) ? defaultCurrency : heroCurrency) : '—'}</span>
+                                    <span className="sp-schedsub">{total > 0 ? (subMode(cat) ? 'by sub category' : 'per month') : 'No budget'}</span>
+                                </span>
                             )}
-                            {category.subcategories.length > 0 && (
-                                <div className="subcategories-list">
-                                    {category.subcategories.map(subcategory => (
-                                        <div key={subcategory} className="subcategory-item">
-                                            {editingSubcategory && editingSubcategory.categoryId === category.id && editingSubcategory.oldName === subcategory ? (
-                                                <>
-                                                    <input type="text" className={'form-control form-control-sm ' + (errors.subcategory ? 'is-invalid' : '')} value={editingSubcategory.value} onChange={(e) => setEditingSubcategory(prev => ({ ...prev, value: e.target.value }))} onKeyPress={(e) => { if (e.key === 'Enter') handleRequestRenameSubcategory(); }} autoFocus />
-                                                    <button className="btn btn-sm btn-outline-success" onClick={handleRequestRenameSubcategory} title="Save"><i className="fas fa-check"></i></button>
-                                                    <button className="btn btn-sm btn-outline-secondary" onClick={handleCancelRenameSubcategory} title="Cancel"><i className="fas fa-times"></i></button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <span>{subcategory}</span>
-                                                    <button className="btn btn-sm btn-outline-primary" onClick={() => handleStartRenameSubcategory(category.id, subcategory)} title="Edit Subcategory"><i className="fas fa-edit"></i></button>
-                                                    <button className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteSubcategory(category.id, subcategory)} title="Delete Subcategory"><i className="fas fa-times"></i></button>
-                                                </>
+                            <i className={'fas fa-chevron-' + (isOpen ? 'up' : 'down') + ' sp-catchev'}></i>
+                        </button>
+                        {cfOpen && conflictCategory && conflictSnapshot && (
+                            <div style={{padding: '0 15px 12px'}}>
+                                <ConflictCompare localRecord={conflictCategory} cloudSnapshot={conflictSnapshot.cloudSnapshot} detectedAt={conflictSnapshot.detectedAt} fieldLabels={categoryConflictFieldLabels} formatValue={formatCategoryConflictValue} onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
+                            </div>
+                        )}
+                        {isOpen && (
+                            <div className="sp-catopen">
+                                {showBudget && (
+                                    <React.Fragment>
+                                        <div className="sp-catlabel">Monthly budget · {whoName}</div>
+                                        <div className="sp-catbox">
+                                            {nSubs > 0 && (
+                                                <div className="sp-seg is-light" style={{marginBottom: '10px'}}>
+                                                    <button type="button" className={!subMode(cat) ? 'is-active' : ''} onClick={() => subMode(cat) && setMode(cat, false)}>Whole category</button>
+                                                    <button type="button" className={subMode(cat) ? 'is-active' : ''} onClick={() => !subMode(cat) && setMode(cat, true)}>By sub category</button>
+                                                </div>
                                             )}
+                                            {subMode(cat)
+                                                ? <div className="sp-catbox-row"><span>Set an amount on each sub category below</span><b>{fmt0(total)}</b></div>
+                                                : <div className="sp-catbox-row"><span>Amount per month</span>{moneyInput(cat)}</div>}
                                         </div>
-                                    ))}
-                                    {editingSubcategory && editingSubcategory.categoryId === category.id && errors.subcategory && (<div className="invalid-feedback d-block">{errors.subcategory}</div>)}
-                                </div>
-                            )}
-                        </div>
-                    ))
-                )}
-            </div>
-            {showDeleteConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Confirm Delete</h5></div>
-                            <div className="modal-body"><p>Are you sure you want to delete this category?</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => handleDeleteCategory(showDeleteConfirm)}>Delete</button>
+                                    </React.Fragment>
+                                )}
+                                <div className="sp-catlabel">Sub categories</div>
+                                <SpSubcategoryList category={cat} ops={netType ? netSubOps(cat) : expenseSubOps(cat)} budgetInput={showBudget && subMode(cat) ? (sub) => moneyInput(cat, sub) : null} onChanged={done} />
+                                {showBudget && (
+                                    <div className="sp-catbox" style={{marginTop: '10px'}}>
+                                        <div className="sp-remind-head"><span><i className="fas fa-bell"></i>Notify me at</span><span className="sp-remind-when">{threshold(cat)}% of budget</span></div>
+                                        <div className="sp-remind-chips">
+                                            {(SP_NOTIFY_CHOICES.includes(threshold(cat)) ? SP_NOTIFY_CHOICES : [...SP_NOTIFY_CHOICES, threshold(cat)].sort((a, b) => a - b)).map(n => (
+                                                <button key={n} type="button" className={threshold(cat) === n ? 'is-active' : ''} onClick={() => setThreshold(cat, n)}>{n}%</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                {renameCatConfirm && renameCatConfirm.id === cat.id && (
+                                    <div style={{marginTop: '10px'}}>
+                                        <InlineConfirm text={'Rename ' + renameCatConfirm.oldName + ' to ' + renameCatConfirm.newName + '?' + (renameCatConfirm.itemCount ? ' ' + renameCatConfirm.itemCount + ' Net Worth item' + (renameCatConfirm.itemCount === 1 ? '' : 's') + ' will show under the new name.' : '')} keepLabel="Cancel" cta="Rename" onKeep={() => setRenameCatConfirm(null)} onConfirm={confirmNetRename} />
+                                    </div>
+                                )}
+                                {locked ? (
+                                    <div className="sp-blocked" style={{marginTop: '10px'}}><i className="fas fa-lock"></i><span>System category · can't be renamed or removed. You can add sub categories.</span></div>
+                                ) : (
+                                    <div style={{marginTop: '8px'}}>
+                                        <SpActBar actions={[
+                                            { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => setFormFor(cat) },
+                                            { key: 'delete', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => askDeleteCategory(cat) }
+                                        ]} />
+                                    </div>
+                                )}
+                                {blocked && blocked.id === cat.id && <div className="sp-blocked"><i className="fas fa-circle-info"></i><span>{blocked.msg}</span></div>}
+                                {pendingDelete === cat.id && <InlineConfirm text={'Delete ' + cat.name + '? Its sub categories' + (tab === 'expense' && isSingleView ? ' and budget' : '') + ' go too.'} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => doDeleteCategory(cat)} />}
                             </div>
-                        </div>
+                        )}
                     </div>
-                </div>
-            )}
-            {renameConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Rename Subcategory</h5></div>
-                            <div className="modal-body">
-                                <p>Rename <strong>{renameConfirm.oldName}</strong> to <strong>{renameConfirm.newName}</strong>?</p>
-                                <p className="text-warning"><i className="fas fa-exclamation-triangle me-1"></i>This will update <strong>{renameConfirm.itemCount}</strong> item(s).</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setRenameConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-primary" onClick={handleConfirmRenameSubcategory}>Rename</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {renameCategoryConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Rename Category</h5></div>
-                            <div className="modal-body">
-                                <p>Rename <strong>{renameCategoryConfirm.oldName}</strong> to <strong>{renameCategoryConfirm.newName}</strong>?</p>
-                                <p className="text-warning"><i className="fas fa-exclamation-triangle me-1"></i>This changes how {renameCategoryConfirm.itemCount > 0 ? <><strong>{renameCategoryConfirm.itemCount}</strong> existing item(s)</> : 'items'} are grouped and labeled in your Net Worth summary and history — it isn't just a display label change.</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setRenameCategoryConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-primary" onClick={handleConfirmUpdateCategory}>Rename</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {conflictCategory && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictCategory}
-                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
-                    fieldLabels={conflictFieldLabels}
-                    formatValue={formatConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveCategoryConflict(false)}
-                    onUseCloud={() => handleResolveCategoryConflict(true)}
-                />
+                );
+            })}
+            {!formFor && <PinnedCta label={'New ' + (tab === 'expense' ? 'Expense' : tab === 'asset' ? 'Asset' : 'Liability') + ' Category'} icon="fas fa-plus" onClick={() => setFormFor('new')} />}
+            {formFor && (
+                <CategoryFormSheet kind={tab} category={formFor === 'new' ? null : formFor} look={formFor === 'new' ? null : lookOf(formFor, list.indexOf(formFor))}
+                    existingNames={list.map(c => c.name)} onClose={() => setFormFor(null)} onSave={saveForm} />
             )}
         </div>
     );
