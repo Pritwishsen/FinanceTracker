@@ -1576,6 +1576,21 @@ class DataService {
     // Fee cleanup is fire-and-forget (deleteExpense is async, matching every other
     // uncoupled caller of it in this file) — the transfer record itself is removed
     // synchronously either way.
+    // Deleting an Asset Funding entry also takes its amount back off the asset (approved) —
+    // value and invested both drop, and the matching top-up history entry is removed. This
+    // includes the opening deduction made when the asset was added. Cash withdrawals aren't
+    // asset funding and never come through here.
+    static revertAssetFunding(transfer) {
+        if (!transfer || !transfer.toAssetId || transfer.isCashWithdrawal) return;
+        const item = this.getNetWorthItems().find(i => i.id === transfer.toAssetId);
+        if (!item) return;
+        const amt = Number(transfer.toAmount) || 0;
+        const history = [...(item.history || [])];
+        const h = history.findIndex(x => x.type === 'topup' && Number(x.amount) === amt && x.date === transfer.date);
+        if (h !== -1) history.splice(h, 1);
+        const invested = item.originalAmount != null ? item.originalAmount : item.value;
+        this.updateNetWorthItem(item.id, { value: Math.round((item.value - amt) * 100) / 100, originalAmount: Math.round((invested - amt) * 100) / 100, history });
+    }
     static deleteTransfer(id) {
         const transfers = this.getTransfers();
         const transfer = transfers.find(t => t.id === id);
@@ -3319,7 +3334,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                             </button>
                         </div>
                     ) : (
-                        <div className="sp-alert sp-alert-warn" style={{marginTop: '10px'}}><i className="fas fa-circle-info"></i><span>No bank accounts for {formData.paidBy || 'you'} yet, so this won't be linked to one. Add accounts in Settings.</span></div>
+                        <div className="sp-alert sp-alert-warn" style={{marginTop: '10px'}}><i className="fas fa-circle-info"></i><span>No bank accounts for {formData.paidBy || 'you'} yet, so this won't be linked to one. Add accounts in More → Accounts.</span></div>
                     ))}
                     {formData.isCashPayment && <div className="sp-hint" style={{margin: '8px 4px 0'}}>Taken from your cash in hand.</div>}
                 </React.Fragment>
@@ -4625,7 +4640,7 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                         </div>
                     )}
                     {accounts.length === 0 && (
-                        <div className="sp-alert sp-alert-warn" style={{marginTop: '8px'}}><i className="fas fa-circle-info"></i><span>No bank accounts for {formData.paidBy || 'you'} yet, so this is recorded as cash. Add accounts in Settings.</span></div>
+                        <div className="sp-alert sp-alert-warn" style={{marginTop: '8px'}}><i className="fas fa-circle-info"></i><span>No bank accounts for {formData.paidBy || 'you'} yet, so this is recorded as cash. Add accounts in More → Accounts.</span></div>
                     )}
                     {!editingIncome && (
                         <React.Fragment>
@@ -4998,7 +5013,6 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     const [showCatSheet, setShowCatSheet] = useState(false);
     const [openBuckets, setOpenBuckets] = useState({});
     const [openCats, setOpenCats] = useState({});
-    const [showMovements, setShowMovements] = useState(false);
     const [convertedExpenses, setConvertedExpenses] = useState([]);
     const [convertedIncome, setConvertedIncome] = useState([]);
     const [monthBudgets, setMonthBudgets] = useState({}); // { 'YYYY-MM': { [categoryId]: { amount, subs: { [name]: amount } } } }
@@ -5267,8 +5281,6 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     const pageTitle = { month: 'Your Month', last: 'Last Month', year: 'Your Year', custom: 'Your Range' }[period];
     const toggleCat = (id) => setSumCats(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
     const hasData = pExp.length > 0 || pInc.length > 0;
-    const rangeStartDate = periodStart;
-    const rangeEndDate = new Date(DateUtils.parseDateStr(periodEndStr).getTime() + 86399999);
 
     return (
         <div className="sp-page">
@@ -5468,7 +5480,6 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                 </React.Fragment>
             )}
 
-            <SummaryMoneyMovements open={showMovements} onToggle={() => setShowMovements(v => !v)} activeView={activeView} defaultCurrency={defaultCurrency} onUpdate={onUpdate} startDate={rangeStartDate} endDate={rangeEndDate} />
 
             {showRangeSheet && (
                 <SummaryRangeSheet from={rangeFrom} to={rangeTo} onClose={() => setShowRangeSheet(false)}
@@ -5495,453 +5506,606 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     );
 }
 
-// Transfer, withdrawal and reconciliation tables that used to sit on Summary. They stay here,
-// collapsed, until the Accounts screen's Money movements list replaces them — it's still the
-// only place to edit a cash withdrawal or delete a transfer / reconciliation.
-function SummaryMoneyMovements({ open, onToggle, activeView, defaultCurrency, onUpdate, startDate, endDate }) {
-    const [transfers, setTransfers] = useState(() => DataService.getTransfers());
-    const bankAccountsForTransfers = React.useMemo(() => DataService.getBankAccounts(), [transfers]);
-    // Deleting a transfer can also remove its linked fee Expense — refresh App's own
-    // expenses/categories state (not just this component's local transfers list) so
-    // Quick Stats/Budget Overview/etc. don't keep showing the now-deleted fee.
-    const handleDeleteTransfer = (id) => {
-        DataService.deleteTransfer(id);
-        setTransfers(DataService.getTransfers());
-        if (onUpdate) onUpdate();
-    };
-    const [editingWithdraw, setEditingWithdraw] = useState(null);
-    const [editWithdrawForm, setEditWithdrawForm] = useState(null);
-    const [editWithdrawErrors, setEditWithdrawErrors] = useState({});
-    const [editWithdrawSubmitting, setEditWithdrawSubmitting] = useState(false);
-    const openEditWithdraw = (t) => {
-        setEditingWithdraw(t);
-        setEditWithdrawForm({
-            amount: String(t.toAmount),
-            currency: t.cashWithdrawCurrency || '',
-            fee: String(t.fee || 0),
-            feeCurrency: t.feeCurrency || '',
-            deductedAmount: String(t.fromAmount),
-            date: t.date
-        });
-        setEditWithdrawErrors({});
-    };
-    const handleCancelEditWithdraw = () => {
-        setEditingWithdraw(null);
-        setEditWithdrawForm(null);
-        setEditWithdrawErrors({});
-    };
-    // Deliberately does NOT recompute "Deducted from Account" from amount/fee like the Add
-    // form does — that would silently overwrite the historically-correct deducted amount
-    // using today's exchange rate the moment the modal opens. It's a plain editable field here.
-    const handleSubmitEditWithdraw = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        const amount = parseFloat(editWithdrawForm.amount);
-        const deductedAmount = parseFloat(editWithdrawForm.deductedAmount);
-        if (!editWithdrawForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
-        if (!editWithdrawForm.deductedAmount || deductedAmount <= 0) errors.deductedAmount = 'Deducted amount must be greater than 0';
-        if (!editWithdrawForm.date) errors.date = 'Date is required';
-        if (Object.keys(errors).length > 0) { setEditWithdrawErrors(errors); return; }
 
-        setEditWithdrawSubmitting(true);
+// ── Accounts (Phase 9) ───────────────────────────────────────────────────────
+// Moved out of Settings → Bank Accounts. The add/transfer/withdraw/link handlers are the same
+// as before; approved changes: opening balance + currency lock on edit (use Reconcile),
+// Reconcile no longer offers "also record as Expense/Income", and deleting an Asset Funding
+// entry also takes the amount back off the asset.
+const SP_ACCT_TYPE_LOOK = {
+    'Checking': ['fas fa-building-columns', '#dbeafe', '#2563eb'], 'Savings': ['fas fa-piggy-bank', '#dcfce7', '#16a34a'],
+    'Credit Card': ['fas fa-credit-card', '#fae8ff', '#c026d3'], 'Investment': ['fas fa-chart-line', '#ede9fe', '#7c3aed'],
+    'Cash': ['fas fa-money-bill-wave', '#dcfce7', '#15803d'], 'Loan': ['fas fa-hand-holding-dollar', '#ffedd5', '#ea580c'], 'Other': ['fas fa-wallet', '#f1f5f9', '#475569']
+};
+const spAcctLook = (t) => { const l = SP_ACCT_TYPE_LOOK[t] || SP_ACCT_TYPE_LOOK.Other; return { icon: l[0], tint: l[1], ink: l[2] }; };
+
+function AccountFormCard({ account, bankAccounts, activeView, onCancel, onSaved }) {
+    const isEdit = !!account;
+    const people = DataService.getPeople();
+    const [f, setF] = useState(() => account
+        ? { accountName: account.accountName, accountRef: account.accountRef || '', accountType: account.accountType, country: account.country, currency: account.currency, person: account.person, openingAmount: String(account.openingAmount), isPrimary: !!account.isPrimary }
+        : { accountName: '', accountRef: '', accountType: BANK_ACCOUNT_TYPES[0], country: defaultCountryForCurrency('GBP') || COUNTRIES[0], currency: 'GBP', person: resolveActiveViewValue(activeView) || 'own', openingAmount: '', isPrimary: false });
+    const [error, setError] = useState('');
+    const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setError(''); };
+    const setCurrency = (cur) => setF(p => { const m = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === cur); return { ...p, currency: cur, country: m.length === 1 ? m[0] : (COUNTRY_CURRENCY_MAP[p.country] === cur ? p.country : p.country) }; });
+    const existingPrimary = f.isPrimary ? bankAccounts.find(a => a.isPrimary && a.person === (f.person || 'own') && (!isEdit || a.id !== account.id)) : null;
+    const save = (e) => {
+        if (e) e.preventDefault();
         try {
-            DataService.updateTransfer(editingWithdraw.id, {
-                toAmount: amount,
-                cashWithdrawCurrency: editWithdrawForm.currency,
-                fee: parseFloat(editWithdrawForm.fee) || 0,
-                feeCurrency: editWithdrawForm.feeCurrency,
-                fromAmount: deductedAmount,
-                date: editWithdrawForm.date
-            });
-            setTransfers(DataService.getTransfers());
-            setEditingWithdraw(null);
-            setEditWithdrawForm(null);
-            setEditWithdrawErrors({});
-            if (onUpdate) await onUpdate();
-        } finally {
-            setEditWithdrawSubmitting(false);
-        }
+            if (isEdit) {
+                // Opening balance and currency are locked on edit (approved) — corrections go through Reconcile.
+                const { openingAmount, currency, ...rest } = f;
+                DataService.updateBankAccount(account.id, rest);
+                onSaved(f.accountName.trim() + ' updated');
+            } else {
+                DataService.addBankAccount(f);
+                onSaved(f.accountName.trim() + ' added');
+            }
+        } catch (err) { setError(err.message); }
     };
+    const balance = isEdit ? DataService.computeBankAccountBalance(account) : 0;
+    return (
+        <form className="sp-goalform" onSubmit={save} noValidate>
+            <div className="sp-acctform-head"><span className="sp-sheethead-icon" style={{background: '#dbeafe', color: '#2563eb'}}><i className="fas fa-building-columns"></i></span><div className="sp-goalform-title">{isEdit ? 'Edit account' : 'Add account'}</div></div>
+            {error && <div className="sp-alert sp-alert-err" style={{marginTop: '8px'}}><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
+            <div className={'sp-formrow' + (error ? ' is-bad' : '')}><span>Account name</span><input type="text" value={f.accountName} placeholder="e.g. Barclays Current" onChange={e => set('accountName', e.target.value)} /></div>
+            <div className="sp-formrow"><span>Account type</span><select value={f.accountType} onChange={e => set('accountType', e.target.value)}>{BANK_ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select></div>
+            <div className="sp-formrow"><span>Country</span><select value={f.country} onChange={e => set('country', e.target.value)}>{COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+            <div className="sp-formrow">
+                <span>Currency</span>
+                {isEdit ? <span className="sp-lockedval"><b>{f.currency}</b><i className="fas fa-lock"></i></span>
+                    : <select value={f.currency} onChange={e => setCurrency(e.target.value)}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}</select>}
+            </div>
+            <div className="sp-formrow">
+                <span>Account owner</span>
+                {activeView.length > 1
+                    ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
+                    : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
+            </div>
+            {!isEdit && <div className="sp-formrow"><span>Opening balance</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={f.openingAmount} onChange={e => set('openingAmount', e.target.value)} /></span></div>}
+            {isEdit && <div className="sp-blocked" style={{margin: '4px 0 6px'}}><i className="fas fa-lock"></i><span>Balance {spFmtMoney(balance, account.currency)} and currency can't be edited here. Use Balance (reconcile) to correct it.</span></div>}
+            <div className="sp-formrow"><span>Account ID<small className="sp-formrow-hint">Optional · last 4 or IBAN</small></span><input type="text" value={f.accountRef} placeholder="Optional" onChange={e => set('accountRef', e.target.value)} /></div>
+            <button type="button" className="sp-checkrow" onClick={() => set('isPrimary', !f.isPrimary)}>
+                <span className={'sp-checkbox' + (f.isPrimary ? ' is-on' : '')}>{f.isPrimary && <i className="fas fa-check"></i>}</span>
+                <span><span className="sp-row-title">Set as primary account</span><span className="sp-row-sub" style={{display: 'block'}}>For {f.person === 'own' ? 'you' : f.person} · pre-selected when paying or receiving</span></span>
+            </button>
+            {existingPrimary && <div className="sp-alert sp-alert-warn" style={{margin: '8px 0 0'}}><i className="fas fa-triangle-exclamation"></i><span>This will replace '{existingPrimary.accountName}' as {f.person === 'own' ? 'your' : f.person + "'s"} primary account.</span></div>}
+            <button type="button" className="sp-btn sp-btn-soft" style={{width: '100%', marginTop: '10px'}} onClick={onCancel}>Cancel</button>
+            <PinnedCta type="submit" label={isEdit ? 'Save changes' : 'Save account'} icon="fas fa-check" />
+        </form>
+    );
+}
+
+function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
+    const [bankAccounts, setBankAccounts] = useState(() => DataService.getBankAccounts());
+    const [transfers, setTransfers] = useState(() => DataService.getTransfers());
     const [reconciliations, setReconciliations] = useState(() => DataService.getReconciliations());
-    const handleDeleteReconciliation = (id) => {
-        DataService.deleteReconciliation(id);
-        setReconciliations(DataService.getReconciliations());
-        if (onUpdate) onUpdate();
-    };
-    // Transfers (4 subtype tables below) and Reconciliations each get their own conflict
-    // map, but share one badge/modal — showConflictDetail carries which collection+id.
+    const [linkableExpenses, setLinkableExpenses] = useState([]);
+    const [linkableIncome, setLinkableIncome] = useState([]);
+    const [openId, setOpenId] = useState(null);
+    const [form, setForm] = useState(null); // null | 'new' | account
+    const [pendingPrimary, setPendingPrimary] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null); // movement key
+    const [deleteAccount, setDeleteAccount] = useState(null);
+    const [deleteAck, setDeleteAck] = useState(false);
+    const [toast, setToast] = useState('');
+    const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('bankAccounts').syncConflict);
+    const [showConflictDetail, setShowConflictDetail] = useState(null); // { collection, id }
+    const people = DataService.getPeople();
+    useEffect(() => { FilterMemory.save('bankAccounts', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3500); return () => clearTimeout(t); }, [toast]);
+
+    const reloadLinkable = async () => { const [exp, inc] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]); setLinkableExpenses(exp); setLinkableIncome(inc); };
+    useEffect(() => { reloadLinkable(); }, []);
+    const reload = () => { setBankAccounts(DataService.getBankAccounts()); setTransfers(DataService.getTransfers()); setReconciliations(DataService.getReconciliations()); reloadLinkable(); };
+    const done = (msg) => { if (msg) setToast(msg); reload(); if (onUpdate) onUpdate(); };
+
+    const linkCandidatesAll = React.useMemo(() => computeLinkCandidates(bankAccounts, linkableExpenses, linkableIncome), [bankAccounts, linkableExpenses, linkableIncome]);
+    const visible = bankAccounts.filter(a => matchesActiveView(a.person, activeView));
+    const acctSyncConflicts = useMemo(() => SyncConflicts.read('bankAccounts'), [bankAccounts]);
     const transferSyncConflicts = useMemo(() => SyncConflicts.read('transfers'), [transfers]);
     const reconciliationSyncConflicts = useMemo(() => SyncConflicts.read('reconciliations'), [reconciliations]);
-    const [showConflictDetail, setShowConflictDetail] = useState(null); // { collection, id } | null
-    const transferConflictFieldLabels = { date: 'Date', fromAccountId: 'From Account', toAccountId: 'To Account', fromAmount: 'From Amount', toAmount: 'To Amount', isOverseas: 'Overseas', conversionRate: 'Conversion Rate', fee: 'Fee', feeCurrency: 'Fee Currency', notes: 'Notes', toAssetId: 'To Asset', toAssetName: 'Asset Name', isCashWithdrawal: 'Cash Withdrawal', cashWithdrawCurrency: 'Withdrawal Currency' };
-    const reconciliationConflictFieldLabels = { accountId: 'Account', person: 'Person', date: 'Date', balanceBefore: 'Balance Before', delta: 'Adjustment', balanceAfter: 'Balance After', notes: 'Notes', loggedAsTransaction: 'Logged as Transaction', transactionType: 'Transaction Type' };
-    const conflictAccountNameById = useMemo(() => {
-        const m = new Map();
-        bankAccountsForTransfers.forEach(a => m.set(String(a.id), a.accountName));
-        return m;
-    }, [bankAccountsForTransfers]);
-    const formatSyncConflictValue = (key, value) => {
-        if ((key === 'fromAccountId' || key === 'toAccountId' || key === 'accountId') && value) return conflictAccountNameById.get(String(value)) || String(value);
+    const displayAccounts = filterSyncConflict ? visible.filter(a => !!acctSyncConflicts[String(a.id)]) : visible;
+    const isLiab = (a) => DataService.LIABILITY_ACCOUNT_TYPES.includes(a.accountType);
+    const bal = (a) => DataService.computeBankAccountBalance(a);
+    const signed = (a) => isLiab(a) ? -bal(a) : bal(a); // what it adds to your total
+
+    // Hero: your default currency total, other currencies listed separately (never converted).
+    const byCur = {};
+    visible.forEach(a => { byCur[a.currency] = (byCur[a.currency] || 0) + signed(a); });
+    const curOrder = Object.keys(byCur).sort((a, b) => a === defaultCurrency ? -1 : b === defaultCurrency ? 1 : a.localeCompare(b));
+    const groups = curOrder.map(cur => ({ cur, name: (CurrencyService.getAllCurrencies().find(c => c.code === cur) || {}).name || cur, total: byCur[cur], rows: displayAccounts.filter(a => a.currency === cur) })).filter(g => g.rows.length);
+
+    // ---- Link (same scope as before: this person's unlinked expenses + income → their primary)
+    const [linkSheet, setLinkSheet] = useState(null);
+    const openLink = (account) => {
+        const c = linkCandidatesAll.find(x => x.person === account.person);
+        setLinkSheet({ account, expenseCount: c ? c.expenseCount : 0, incomeCount: c ? c.incomeCount : 0 });
+    };
+    const confirmLink = async () => {
+        const { account, expenseCount, incomeCount } = linkSheet;
+        await DataService.bulkLinkAccounts([account.person]);
+        setLinkSheet(null);
+        done('Linked ' + expenseCount + ' expense' + (expenseCount === 1 ? '' : 's') + ' and ' + incomeCount + ' income record' + (incomeCount === 1 ? '' : 's') + ' to ' + account.accountName);
+    };
+
+    // ---- Transfer (unchanged rules: overseas fee → fee expense with a category when it's your
+    // own account; to another person → expense for the sender + income for the receiver)
+    const emptyTransferForm = { fromAccountId: '', toAccountId: '', date: DateUtils.today(), amount: '', conversionRate: '', fee: '', toAmount: '', categoryId: '', subcategory: '', principalCategoryId: '', principalSubcategory: '', notes: '' };
+    const [transferForm, setTransferForm] = useState(null);
+    const [transferErrors, setTransferErrors] = useState({});
+    const [transferSubmitting, setTransferSubmitting] = useState(false);
+    const [liveConversionRate, setLiveConversionRate] = useState(null);
+    const tf = transferForm || emptyTransferForm;
+    const transferFromAccount = bankAccounts.find(a => String(a.id) === String(tf.fromAccountId));
+    const transferToAccount = bankAccounts.find(a => String(a.id) === String(tf.toAccountId));
+    const isOverseasTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.currency !== transferToAccount.currency);
+    const isCrossPersonTransfer = !!(transferFromAccount && transferToAccount && transferFromAccount.person !== transferToAccount.person);
+    const transferFeeCategory = categories.find(c => c.id === parseInt(tf.categoryId));
+    const transferPrincipalCategory = categories.find(c => c.id === parseInt(tf.principalCategoryId));
+    useEffect(() => {
+        if (!isOverseasTransfer) { setLiveConversionRate(null); return; }
+        let cancelled = false;
+        CurrencyService.getConversionRate(transferFromAccount.currency, transferToAccount.currency).then(rate => { if (!cancelled) setLiveConversionRate(rate); });
+        return () => { cancelled = true; };
+    }, [transferFromAccount && transferFromAccount.currency, transferToAccount && transferToAccount.currency, isOverseasTransfer]);
+    useEffect(() => {
+        if (!transferForm || !isOverseasTransfer) return;
+        const amount = parseFloat(tf.amount) || 0, fee = parseFloat(tf.fee) || 0, rate = parseFloat(tf.conversionRate) || liveConversionRate;
+        if (!amount || !rate) return;
+        setTransferForm(prev => ({ ...prev, toAmount: String(Math.round((amount - fee) * rate * 100) / 100) }));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tf.amount, tf.fee, tf.conversionRate, liveConversionRate, isOverseasTransfer]);
+    const setTf = (field, value) => {
+        setTransferForm(prev => {
+            const next = { ...prev, [field]: value };
+            if (field === 'categoryId') next.subcategory = '';
+            if (field === 'principalCategoryId') next.principalSubcategory = '';
+            return next;
+        });
+        if (transferErrors[field]) setTransferErrors(prev => ({ ...prev, [field]: '' }));
+    };
+    const submitTransfer = async () => {
+        const errors = {};
+        const amount = parseFloat(tf.amount);
+        if (!tf.toAccountId) errors.toAccountId = 'Choose where the money goes';
+        if (!amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
+        const feeAmount = parseFloat(tf.fee) || 0;
+        if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
+            if (!tf.categoryId) errors.categoryId = 'Category is required for a fee';
+            if (transferFeeCategory && transferFeeCategory.subcategories.length > 0 && !tf.subcategory) errors.subcategory = 'Subcategory is required for a fee';
+        }
+        if (isCrossPersonTransfer) {
+            if (!tf.principalCategoryId) errors.principalCategoryId = 'Category is required';
+            if (transferPrincipalCategory && transferPrincipalCategory.subcategories.length > 0 && !tf.principalSubcategory) errors.principalSubcategory = 'Subcategory is required';
+        }
+        if (Object.keys(errors).length > 0) { setTransferErrors(errors); return; }
+        setTransferSubmitting(true);
+        try {
+            const rate = isOverseasTransfer ? (parseFloat(tf.conversionRate) || liveConversionRate || await CurrencyService.getConversionRate(transferFromAccount.currency, transferToAccount.currency)) : 1;
+            const toAmount = isOverseasTransfer ? (parseFloat(tf.toAmount) || Math.round((amount - feeAmount) * rate * 100) / 100) : amount;
+            let feeExpenseId = null;
+            if (isOverseasTransfer && feeAmount > 0 && !isCrossPersonTransfer) {
+                const feeExpense = await DataService.addExpense({ amount: feeAmount, currency: transferFromAccount.currency, date: tf.date, description: `Transfer fee: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`, categoryId: parseInt(tf.categoryId), subcategory: tf.subcategory || '', paidBy: transferFromAccount.person === 'own' ? '' : transferFromAccount.person, accountId: transferFromAccount.id, tags: ['transfer-fee'] });
+                feeExpenseId = feeExpense.id;
+            }
+            let principalExpenseId = null, recipientIncomeId = null;
+            if (isCrossPersonTransfer) {
+                const toPersonLabel = transferToAccount.person === 'own' ? 'Me' : transferToAccount.person;
+                const fromPersonLabel = transferFromAccount.person === 'own' ? 'Me' : transferFromAccount.person;
+                const principalExpense = await DataService.addExpense({ amount: amount + (isOverseasTransfer ? feeAmount : 0), currency: transferFromAccount.currency, date: tf.date, description: `Transfer to ${toPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`, categoryId: parseInt(tf.principalCategoryId), subcategory: tf.principalSubcategory || '', paidBy: transferFromAccount.person === 'own' ? '' : transferFromAccount.person, tags: ['transfer-principal'] });
+                principalExpenseId = principalExpense.id;
+                const recipientIncome = await DataService.addIncome({ amount: toAmount, currency: transferToAccount.currency, date: tf.date, source: `Transfer from ${fromPersonLabel}`, description: `Transfer from ${fromPersonLabel}: ${transferFromAccount.accountName} → ${transferToAccount.accountName}`, paidBy: transferToAccount.person === 'own' ? '' : transferToAccount.person, tags: ['transfer-incoming'] });
+                recipientIncomeId = recipientIncome.id;
+            }
+            DataService.addTransfer({ date: tf.date, fromAccountId: transferFromAccount.id, toAccountId: transferToAccount.id, fromAmount: amount, toAmount, isOverseas: isOverseasTransfer, conversionRate: rate, fee: isOverseasTransfer ? feeAmount : 0, feeExpenseId, principalExpenseId, recipientIncomeId, notes: tf.notes || '' });
+            setTransferForm(null); setTransferErrors({});
+            done(spFmtMoney(amount, transferFromAccount.currency) + ' moved to ' + transferToAccount.accountName);
+        } finally { setTransferSubmitting(false); }
+    };
+
+    // ---- Cash withdrawal (unchanged)
+    const emptyWithdrawForm = { currency: 'GBP', amount: '', fee: '', feeCurrency: 'GBP', deductedAmount: '', date: DateUtils.today() };
+    const [withdrawAccount, setWithdrawAccount] = useState(null);
+    const [withdrawForm, setWithdrawForm] = useState(emptyWithdrawForm);
+    const [withdrawErrors, setWithdrawErrors] = useState({});
+    const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
+    const openWithdraw = (account) => { setWithdrawAccount(account); setWithdrawForm({ ...emptyWithdrawForm, currency: account.currency, feeCurrency: account.currency }); setWithdrawErrors({}); };
+    useEffect(() => {
+        if (!withdrawAccount) return;
+        const amount = parseFloat(withdrawForm.amount) || 0, fee = parseFloat(withdrawForm.fee) || 0;
+        if (!amount && !fee) return;
+        const converted = CurrencyService.convertToDefaultSync(amount, withdrawForm.currency, withdrawAccount.currency);
+        const convertedFee = CurrencyService.convertToDefaultSync(fee, withdrawForm.feeCurrency, withdrawAccount.currency);
+        setWithdrawForm(prev => ({ ...prev, deductedAmount: String(Math.round((converted + convertedFee) * 100) / 100) }));
+    }, [withdrawForm.amount, withdrawForm.fee, withdrawForm.currency, withdrawForm.feeCurrency, withdrawAccount]);
+    const submitWithdraw = async () => {
+        const errors = {};
+        const amount = parseFloat(withdrawForm.amount), deductedAmount = parseFloat(withdrawForm.deductedAmount);
+        if (!withdrawForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
+        if (!withdrawForm.deductedAmount || deductedAmount <= 0) errors.deductedAmount = 'Deducted amount must be greater than 0';
+        if (!withdrawForm.date) errors.date = 'Date is required';
+        if (Object.keys(errors).length > 0) { setWithdrawErrors(errors); return; }
+        setWithdrawSubmitting(true);
+        try {
+            DataService.withdrawCash({ accountId: withdrawAccount.id, currency: withdrawForm.currency, amount, fee: parseFloat(withdrawForm.fee) || 0, feeCurrency: withdrawForm.feeCurrency, deductedAmount, date: withdrawForm.date });
+            const name = withdrawAccount.accountName;
+            setWithdrawAccount(null); setWithdrawErrors({});
+            done(spFmtMoney(amount, withdrawForm.currency) + ' cash taken from ' + name);
+        } finally { setWithdrawSubmitting(false); }
+    };
+
+    // ---- Reconcile: always a balance correction now (approved) — never an Expense/Income.
+    const [reconcile, setReconcile] = useState(null); // { account, to, notes, error }
+    const submitReconcile = () => {
+        const account = reconcile.account;
+        const actualBalance = parseFloat(reconcile.to);
+        if (reconcile.to === '' || isNaN(actualBalance)) { setReconcile(r => ({ ...r, error: 'Enter the actual balance' })); return; }
+        const balanceBefore = bal(account);
+        const delta = Math.round((actualBalance - balanceBefore) * 100) / 100;
+        if (delta === 0) { setReconcile(r => ({ ...r, error: 'Already matches — no adjustment needed.' })); return; }
+        DataService.addReconciliation({ accountId: account.id, person: account.person, date: DateUtils.today(), balanceBefore, delta, balanceAfter: actualBalance, notes: reconcile.notes || '', loggedAsTransaction: false, transactionType: null, transactionId: null });
+        setReconcile(null);
+        done(account.accountName + ' balance set to ' + spFmtMoney(actualBalance, account.currency));
+    };
+
+    // ---- Delete account (records linked to it are left as they are, as before)
+    const accountImpacts = (a) => {
+        const exp = linkableExpenses.filter(e => String(e.accountId) === String(a.id)).length;
+        const inc = linkableIncome.filter(i => String(i.accountId) === String(a.id)).length;
+        const tr = transfers.filter(t => String(t.fromAccountId) === String(a.id) || String(t.toAccountId) === String(a.id)).length;
+        const out = [];
+        if (exp || inc) out.push({ icon: 'fas fa-receipt', text: exp + ' expense' + (exp === 1 ? '' : 's') + ' and ' + inc + ' income record' + (inc === 1 ? '' : 's') + ' linked to it stay in your lists.' });
+        if (tr) out.push({ icon: 'fas fa-right-left', text: tr + ' money movement' + (tr === 1 ? '' : 's') + ' mention it and stay in the log.' });
+        if (a.isPrimary) out.push({ icon: 'fas fa-star', text: 'It is ' + (a.person === 'own' ? 'your' : a.person + "'s") + ' primary account, so new entries won\'t have a default account until you pick another.' });
+        if (!out.length) out.push({ icon: 'fas fa-circle-check', text: 'Nothing is linked to this account.' });
+        return out;
+    };
+    const confirmDeleteAccount = () => { const a = deleteAccount; DataService.deleteBankAccount(a.id); setDeleteAccount(null); setDeleteAck(false); setOpenId(null); done(a.accountName + ' deleted'); };
+
+    // ---- Money movements (moved from Summary; no date filter)
+    const findAccount = (id) => bankAccounts.find(a => String(a.id) === String(id));
+    const shortName = (id) => { const a = findAccount(id); return a ? a.accountName : 'Unknown account'; };
+    const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
+    const visibleTransfers = transfers.filter(t => { const from = findAccount(t.fromAccountId); return from && matchesActiveView(from.person, activeView); }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const isCashRecon = (id) => typeof id === 'string' && id.startsWith('cash-');
+    const reconLabel = (r) => { if (isCashRecon(r.accountId)) { const [p, c] = r.accountId.slice(5).split('|'); return 'Cash (' + (p === 'own' ? 'you' : p) + ' · ' + c + ')'; } return shortName(r.accountId); };
+    const reconCur = (r) => isCashRecon(r.accountId) ? r.accountId.split('|')[1] : currencyOf(r.accountId);
+    const visibleRecons = reconciliations.filter(r => matchesActiveView(r.person, activeView)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const assetItems = DataService.getNetWorthItems();
+    const assetFundingDrop = (t) => {
+        const item = assetItems.find(i => i.id === t.toAssetId);
+        return item ? { item, from: item.value, to: item.value - (Number(t.toAmount) || 0) } : null;
+    };
+    const sections = [
+        { key: 'overseas', title: 'Overseas Transfers', icon: 'fas fa-earth-europe', tint: '#dbeafe', ink: '#2563eb', rows: visibleTransfers.filter(t => t.isOverseas) },
+        { key: 'account', title: 'Account Transfers', icon: 'fas fa-right-left', tint: '#eef2ff', ink: '#4f46e5', rows: visibleTransfers.filter(t => !t.isOverseas && !t.toAssetId) },
+        { key: 'asset', title: 'Asset Funding', icon: 'fas fa-seedling', tint: '#dcfce7', ink: '#16a34a', rows: visibleTransfers.filter(t => t.toAssetId && !t.isCashWithdrawal) },
+        { key: 'cash', title: 'Cash Withdrawals', icon: 'fas fa-money-bill-wave', tint: '#fef3c7', ink: '#d97706', rows: visibleTransfers.filter(t => t.isCashWithdrawal) },
+        { key: 'recon', title: 'Balance Reconciliations', icon: 'fas fa-scale-balanced', tint: '#fae8ff', ink: '#c026d3', rows: visibleRecons }
+    ];
+    const sumBy = (rows, amt, cur) => { const m = {}; rows.forEach(r => { const c = cur(r); m[c] = (m[c] || 0) + amt(r); }); return Object.entries(m).map(([c, v]) => spFmtMoney(v, c, 0)).join(' + '); };
+    const deleteMovement = (sec, row) => {
+        if (sec.key === 'recon') { DataService.deleteReconciliation(row.id); setPendingDelete(null); done('Reconciliation deleted'); return; }
+        const drop = sec.key === 'asset' ? assetFundingDrop(row) : null;
+        DataService.deleteTransfer(row.id);
+        if (drop) DataService.revertAssetFunding(row);
+        setPendingDelete(null);
+        done(sec.key === 'asset' && drop ? 'Funding removed · ' + drop.item.name + ' now ' + spFmtMoney(drop.to, drop.item.currency) : 'Entry deleted');
+    };
+
+    // ---- Edit a cash withdrawal (kept from Summary)
+    const [editWithdraw, setEditWithdraw] = useState(null);
+    const saveEditWithdraw = () => {
+        const w = editWithdraw;
+        const amount = parseFloat(w.amount), deducted = parseFloat(w.deductedAmount);
+        if (!w.amount || amount <= 0) { setEditWithdraw(p => ({ ...p, error: 'Amount must be greater than 0' })); return; }
+        if (!w.deductedAmount || deducted <= 0) { setEditWithdraw(p => ({ ...p, error: 'Deducted amount must be greater than 0' })); return; }
+        if (!w.date) { setEditWithdraw(p => ({ ...p, error: 'Date is required' })); return; }
+        DataService.updateTransfer(w.id, { toAmount: amount, cashWithdrawCurrency: w.currency, fee: parseFloat(w.fee) || 0, feeCurrency: w.feeCurrency, fromAmount: deducted, date: w.date });
+        setEditWithdraw(null);
+        done('Cash withdrawal updated');
+    };
+
+    // ---- Sync conflicts (accounts, transfers, reconciliations)
+    const conflictSets = { bankAccounts: acctSyncConflicts, transfers: transferSyncConflicts, reconciliations: reconciliationSyncConflicts };
+    const conflictLabels = {
+        bankAccounts: { accountName: 'Account Name', accountRef: 'Account ID', accountType: 'Type', country: 'Country', currency: 'Currency', person: 'Person', openingAmount: 'Opening Amount', isPrimary: 'Primary' },
+        transfers: { date: 'Date', fromAccountId: 'From Account', toAccountId: 'To Account', fromAmount: 'From Amount', toAmount: 'To Amount', isOverseas: 'Overseas', conversionRate: 'Conversion Rate', fee: 'Fee', feeCurrency: 'Fee Currency', notes: 'Notes', toAssetId: 'To Asset', toAssetName: 'Asset Name', isCashWithdrawal: 'Cash Withdrawal', cashWithdrawCurrency: 'Withdrawal Currency' },
+        reconciliations: { accountId: 'Account', person: 'Person', date: 'Date', balanceBefore: 'Balance Before', delta: 'Adjustment', balanceAfter: 'Balance After', notes: 'Notes', loggedAsTransaction: 'Logged as Transaction', transactionType: 'Transaction Type' }
+    };
+    const formatConflictValue = (key, value) => {
+        if ((key === 'fromAccountId' || key === 'toAccountId' || key === 'accountId') && value) return findAccount(value) ? shortName(value) : String(value);
         if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-        if (typeof value === 'number') return String(value);
         return value === undefined || value === null || value === '' ? '—' : String(value);
     };
-    const conflictRecord = !showConflictDetail ? null
-        : showConflictDetail.collection === 'transfers' ? transfers.find(t => t.id === showConflictDetail.id)
-        : reconciliations.find(r => r.id === showConflictDetail.id);
-    const conflictRecordSnapshot = !showConflictDetail ? null
-        : (showConflictDetail.collection === 'transfers' ? transferSyncConflicts : reconciliationSyncConflicts)[String(showConflictDetail.id)];
-    const handleResolveTransferOrReconciliationConflict = (useCloud) => {
+    const resolveConflict = (useCloud) => {
         const { collection, id } = showConflictDetail;
-        const updates = useCloud && conflictRecordSnapshot ? conflictRecordSnapshot.cloudSnapshot : {};
-        if (collection === 'transfers') {
-            DataService.updateTransfer(id, updates);
-            setTransfers(DataService.getTransfers());
-        } else {
-            DataService.updateReconciliation(id, updates);
-            setReconciliations(DataService.getReconciliations());
-        }
+        const snap = conflictSets[collection][String(id)];
+        const updates = useCloud && snap ? snap.cloudSnapshot : {};
+        if (collection === 'bankAccounts') DataService.updateBankAccount(id, updates);
+        else if (collection === 'transfers') DataService.updateTransfer(id, updates);
+        else DataService.updateReconciliation(id, updates);
         SyncConflicts.dismiss(collection, id);
         setShowConflictDetail(null);
-        if (onUpdate) onUpdate();
+        done();
     };
-    const filterByDateRange = (data) => data.filter(item => { const d = DateUtils.parseDateStr(item.date); return d >= startDate && d <= endDate; });
-    if (transfers.length === 0 && reconciliations.length === 0) return null;
-    return (
-        <div className="sp-mm">
-            <button type="button" className="sp-mm-head" onClick={onToggle} aria-expanded={open}>
-                <span className="sp-mm-icon"><i className="fas fa-right-left"></i></span>
-                <span className="sp-mm-main"><span className="sp-mm-title">Money movements</span><span className="sp-mm-sub">Transfers, cash withdrawals and reconciliations in this period</span></span>
-                <i className={'fas fa-chevron-' + (open ? 'up' : 'down')}></i>
-            </button>
-            {open && (
-                <div className="sp-mm-body">
-                    {(() => {
-                        // Scoped to the active view via the FROM account's owner, same convention
-                        // Wallet/Net Worth use for "which accounts belong to who's currently active",
-                        // and to the Summary screen's own Time Period filter, same as expenses/income.
-                        const dateFilteredTransfers = filterByDateRange(transfers);
-                        const visibleTransfers = dateFilteredTransfers.filter(t => {
-                            const from = bankAccountsForTransfers.find(a => a.id === t.fromAccountId);
-                            return from && matchesActiveView(from.person, activeView);
-                        });
-                        const sortedVisibleTransfers = [...visibleTransfers].sort((a, b) => new Date(b.date) - new Date(a.date));
-                        const overseasTransfers = sortedVisibleTransfers.filter(t => t.isOverseas);
-                        const accountTransfers = sortedVisibleTransfers.filter(t => !t.isOverseas && !t.toAssetId);
-                        const assetFundingTransfers = sortedVisibleTransfers.filter(t => t.toAssetId && !t.isCashWithdrawal);
-                        const cashWithdrawTransfers = sortedVisibleTransfers.filter(t => t.isCashWithdrawal);
-                        const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
-                        const accountLabel = (id) => { const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account'; };
-                        const ownerLabel = (id) => { const a = findAccount(id); return a ? (a.person === 'own' ? 'Me' : a.person) : '—'; };
-                        const currencyOf = (id) => { const a = findAccount(id); return a ? a.currency : defaultCurrency; };
-                        // Cash Withdrawals shows amounts as symbol+figure only (no ISO code) — bypasses
-                        // ValidationUtils.formatCurrency's Intl-driven style:'currency', which falls back
-                        // to printing the raw code for currencies Intl has no dedicated symbol glyph for.
-                        const symbolAmount = (amount, currency) => `${CurrencyService.getCurrencySymbol(currency)}${Number(amount).toFixed(2)}`;
-                        const accountTransferTotals = accountTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                        const assetFundingTotals = assetFundingTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                        const cashWithdrawAmountTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.cashWithdrawCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.toAmount; return acc; }, {});
-                        const cashWithdrawFeeTotals = cashWithdrawTransfers.reduce((acc, t) => { const c = t.feeCurrency || currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
-                        const overseasTransferAmountTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + t.fromAmount; return acc; }, {});
-                        const overseasTransferFeeTotals = overseasTransfers.reduce((acc, t) => { const c = currencyOf(t.fromAccountId); acc[c] = (acc[c] || 0) + (t.fee || 0); return acc; }, {});
-                        if (transfers.length === 0) return null;
-                        return (
-                            <React.Fragment>
-                                <div style={{marginTop: '1.25rem'}}>
-                                    <h5>Overseas Transfers</h5>
-                                    {overseasTransfers.length > 0 ? (
-                                        <React.Fragment>
-                                        <div style={{overflowX: 'auto'}}>
-                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                                <thead>
-                                                    <tr><th>From Account</th><th>Amount</th><th>Date</th><th>Transferred Amount</th><th>Conversion Rate</th><th>Fee</th><th>To Whom</th><th>Target Account</th><th></th></tr>
-                                                </thead>
-                                                <tbody>
-                                                    {overseasTransfers.map(t => (
-                                                        <tr key={t.id}>
-                                                            <td>{accountLabel(t.fromAccountId)}</td>
-                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                            <td>{ValidationUtils.formatCurrency(t.toAmount, currencyOf(t.toAccountId))}</td>
-                                                            <td>1 {currencyOf(t.fromAccountId)} = {t.conversionRate} {currencyOf(t.toAccountId)}</td>
-                                                            <td>{ValidationUtils.formatCurrency(t.fee || 0, currencyOf(t.fromAccountId))}</td>
-                                                            <td>{ownerLabel(t.toAccountId)}</td>
-                                                            <td>{accountLabel(t.toAccountId)}</td>
-                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                            {Object.keys(overseasTransferAmountTotals).length === 1 ? (
-                                                <div><strong>Total Transferred:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferAmountTotals)[0], Object.keys(overseasTransferAmountTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total Transferred:</strong>
-                                                    {Object.entries(overseasTransferAmountTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                            {Object.keys(overseasTransferFeeTotals).length === 1 ? (
-                                                <div><strong>Total Fees:</strong> {ValidationUtils.formatCurrency(Object.values(overseasTransferFeeTotals)[0], Object.keys(overseasTransferFeeTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total Fees:</strong>
-                                                    {Object.entries(overseasTransferFeeTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                        </div>
-                                        </React.Fragment>
-                                    ) : (
-                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No overseas transfers in the selected period.</div>
-                                    )}
-                                </div>
-                                <div style={{marginTop: '1.25rem'}}>
-                                    <h5>Account Transfers</h5>
-                                    {accountTransfers.length > 0 ? (
-                                        <React.Fragment>
-                                        <div style={{overflowX: 'auto'}}>
-                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                                <thead>
-                                                    <tr><th>From Account</th><th>To Account</th><th>Amount</th><th>Date</th><th>To Whom</th><th></th></tr>
-                                                </thead>
-                                                <tbody>
-                                                    {accountTransfers.map(t => (
-                                                        <tr key={t.id}>
-                                                            <td>{accountLabel(t.fromAccountId)}</td>
-                                                            <td>{accountLabel(t.toAccountId)}</td>
-                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                            <td>{ownerLabel(t.toAccountId)}</td>
-                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                            {Object.keys(accountTransferTotals).length === 1 ? (
-                                                <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(accountTransferTotals)[0], Object.keys(accountTransferTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total:</strong>
-                                                    {Object.entries(accountTransferTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                        </div>
-                                        </React.Fragment>
-                                    ) : (
-                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No account transfers in the selected period.</div>
-                                    )}
-                                </div>
-                                <div style={{marginTop: '1.25rem'}}>
-                                    <h5>Asset Funding</h5>
-                                    {assetFundingTransfers.length > 0 ? (
-                                        <React.Fragment>
-                                        <div style={{overflowX: 'auto'}}>
-                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                                <thead>
-                                                    <tr><th>From Account</th><th>Asset</th><th>Amount</th><th>Date</th><th>Note</th><th></th></tr>
-                                                </thead>
-                                                <tbody>
-                                                    {assetFundingTransfers.map(t => (
-                                                        <tr key={t.id}>
-                                                            <td>{accountLabel(t.fromAccountId)}</td>
-                                                            <td>{t.toAssetName || 'Unknown asset'}</td>
-                                                            <td>{ValidationUtils.formatCurrency(t.fromAmount, currencyOf(t.fromAccountId))}</td>
-                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                            <td><span className="badge bg-secondary">Logged for audit</span></td>
-                                                            <td><SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                            {Object.keys(assetFundingTotals).length === 1 ? (
-                                                <div><strong>Total:</strong> {ValidationUtils.formatCurrency(Object.values(assetFundingTotals)[0], Object.keys(assetFundingTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total:</strong>
-                                                    {Object.entries(assetFundingTotals).map(([currency, total]) => (<span key={currency}>{ValidationUtils.formatCurrency(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                        </div>
-                                        </React.Fragment>
-                                    ) : (
-                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No asset funding transfers in the selected period.</div>
-                                    )}
-                                </div>
-                                <div style={{marginTop: '1.25rem'}}>
-                                    <h5>Cash Withdrawals</h5>
-                                    {cashWithdrawTransfers.length > 0 ? (
-                                        <React.Fragment>
-                                        <div style={{overflowX: 'auto'}}>
-                                            <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                                <thead>
-                                                    <tr><th>From Account</th>{activeView.length > 1 && <th>Person</th>}<th>Amount</th><th>Fee</th><th>Date</th><th></th></tr>
-                                                </thead>
-                                                <tbody>
-                                                    {cashWithdrawTransfers.map(t => (
-                                                        <tr key={t.id}>
-                                                            <td>{accountLabel(t.fromAccountId)}</td>
-                                                            {activeView.length > 1 && <td>{ownerLabel(t.fromAccountId)}</td>}
-                                                            <td>{symbolAmount(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId))}</td>
-                                                            <td>{symbolAmount(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId))}</td>
-                                                            <td>{ValidationUtils.formatDate(t.date)}</td>
-                                                            <td>
-                                                                <SyncConflictBadge conflict={transferSyncConflicts[String(t.id)]} onClick={() => setShowConflictDetail({ collection: 'transfers', id: t.id })} />
-                                                                <button type="button" className="btn btn-sm btn-outline-primary" style={{marginRight: '0.25rem'}} onClick={() => openEditWithdraw(t)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
-                                                                <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteTransfer(t.id)} title="Delete"><i className="fas fa-trash"></i></button>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                        <div style={{marginTop: '0.4rem', fontSize: '0.82rem'}}>
-                                            {Object.keys(cashWithdrawAmountTotals).length === 1 ? (
-                                                <div><strong>Total Withdrawn:</strong> {symbolAmount(Object.values(cashWithdrawAmountTotals)[0], Object.keys(cashWithdrawAmountTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total Withdrawn:</strong>
-                                                    {Object.entries(cashWithdrawAmountTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                            {Object.keys(cashWithdrawFeeTotals).length === 1 ? (
-                                                <div><strong>Total Fees:</strong> {symbolAmount(Object.values(cashWithdrawFeeTotals)[0], Object.keys(cashWithdrawFeeTotals)[0])}</div>
-                                            ) : (
-                                                <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap'}}>
-                                                    <strong>Total Fees:</strong>
-                                                    {Object.entries(cashWithdrawFeeTotals).map(([currency, total]) => (<span key={currency}>{symbolAmount(total, currency)}</span>))}
-                                                </div>
-                                            )}
-                                        </div>
-                                        </React.Fragment>
-                                    ) : (
-                                        <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No cash withdrawals in the selected period.</div>
-                                    )}
-                                </div>
-                            </React.Fragment>
-                        );
-                    })()}
-                    {(() => {
-                        const dateFilteredReconciliations = filterByDateRange(reconciliations);
-                        const visibleReconciliations = dateFilteredReconciliations.filter(r => matchesActiveView(r.person, activeView));
-                        const sortedReconciliations = [...visibleReconciliations].sort((a, b) => new Date(b.date) - new Date(a.date));
-                        const findAccount = (id) => bankAccountsForTransfers.find(a => a.id === id);
-                        const personLabel = (person) => (!person || person === 'own') ? 'Me' : person;
-                        // Cash reconciliations use a synthetic 'cash-{person}|{currency}' accountId (no
-                        // real bank account behind them) instead of a numeric bank account id — see
-                        // NetWorth's cash-update modal, which is the only writer of these.
-                        const isCashRecon = (id) => typeof id === 'string' && id.startsWith('cash-');
-                        const cashRefFromId = (id) => { const [person, currency] = id.slice(5).split('|'); return { person, currency }; };
-                        const accountLabel = (id) => {
-                            if (isCashRecon(id)) { const ref = cashRefFromId(id); return `Cash (${personLabel(ref.person)} · ${ref.currency})`; }
-                            const a = findAccount(id); return a ? `${a.accountName} (${a.currency})` : 'Unknown account';
-                        };
-                        const currencyOf = (id) => {
-                            if (isCashRecon(id)) return cashRefFromId(id).currency;
-                            const a = findAccount(id); return a ? a.currency : defaultCurrency;
-                        };
-                        if (reconciliations.length === 0) return null;
-                        return (
-                            <div style={{marginTop: '1.25rem'}}>
-                                <h5>Balance Reconciliations</h5>
-                                {sortedReconciliations.length > 0 ? (
-                                    <div style={{overflowX: 'auto'}}>
-                                        <table className="table table-sm" style={{fontSize: '0.82rem'}}>
-                                            <thead>
-                                                <tr><th>Account</th><th>User</th><th>Date</th><th>Reconciled Amount</th><th>Balance Before</th><th>Balance After</th><th>Logged?</th><th></th></tr>
-                                            </thead>
-                                            <tbody>
-                                                {sortedReconciliations.map(r => (
-                                                    <tr key={r.id}>
-                                                        <td>{accountLabel(r.accountId)}</td>
-                                                        <td>{personLabel(r.person)}</td>
-                                                        <td>{ValidationUtils.formatDate(r.date)}</td>
-                                                        <td style={{color: r.delta > 0 ? '#198754' : '#dc3545', fontWeight: 600}}>{r.delta > 0 ? '+' : '-'}{ValidationUtils.formatCurrency(Math.abs(r.delta), currencyOf(r.accountId))}</td>
-                                                        <td>{ValidationUtils.formatCurrency(r.balanceBefore, currencyOf(r.accountId))}</td>
-                                                        <td>{ValidationUtils.formatCurrency(r.balanceAfter, currencyOf(r.accountId))}</td>
-                                                        <td>{r.loggedAsTransaction
-                                                            ? <span className={'badge ' + (r.transactionType === 'expense' ? 'bg-danger' : 'bg-success')}>{r.transactionType === 'expense' ? 'Expense' : 'Income'}</span>
-                                                            : <span className="badge bg-secondary">Not logged</span>}
-                                                        </td>
-                                                        <td><SyncConflictBadge conflict={reconciliationSyncConflicts[String(r.id)]} onClick={() => setShowConflictDetail({ collection: 'reconciliations', id: r.id })} /><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => handleDeleteReconciliation(r.id)} title="Delete"><i className="fas fa-trash"></i></button></td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                ) : (
-                                    <div style={{color: '#6c757d', fontSize: '0.85rem'}}>No balance reconciliations in the selected period.</div>
-                                )}
-                            </div>
-                        );
-                    })()}
+    const conflictPanel = (collection, record) => {
+        const snap = conflictSets[collection][String(record.id)];
+        if (!showConflictDetail || showConflictDetail.collection !== collection || showConflictDetail.id !== record.id || !snap) return null;
+        return <div style={{margin: '0 0 10px'}}><ConflictCompare localRecord={record} cloudSnapshot={snap.cloudSnapshot} detectedAt={snap.detectedAt} fieldLabels={conflictLabels[collection]} formatValue={formatConflictValue} onKeepLocal={() => resolveConflict(false)} onUseCloud={() => resolveConflict(true)} /></div>;
+    };
+    const cfButton = (collection, id) => {
+        if (!conflictSets[collection][String(id)]) return null;
+        const open = showConflictDetail && showConflictDetail.collection === collection && showConflictDetail.id === id;
+        return <span role="button" className={'sp-cfbtn' + (open ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(open ? null : { collection, id }); }}><i className="fas fa-code-compare"></i></span>;
+    };
+    const anyConflicts = Object.keys(acctSyncConflicts).length + Object.keys(transferSyncConflicts).length + Object.keys(reconciliationSyncConflicts).length > 0;
+
+    const movementRow = (sec, t) => {
+        const key = sec.key + ':' + t.id;
+        let title, meta, amount, ink;
+        if (sec.key === 'recon') {
+            title = reconLabel(t);
+            meta = [spFmtMoney(t.balanceBefore, reconCur(t)) + ' → ' + spFmtMoney(t.balanceAfter, reconCur(t)), t.notes, t.loggedAsTransaction ? 'logged as ' + t.transactionType : '', spShortDate(t.date)].filter(Boolean).join(' · ');
+            amount = (t.delta > 0 ? '+' : '−') + spFmtMoney(Math.abs(t.delta), reconCur(t)); ink = t.delta > 0 ? '#16a34a' : '#e11d48';
+        } else if (sec.key === 'cash') {
+            title = shortName(t.fromAccountId);
+            meta = 'Fee ' + spFmtMoney(t.fee || 0, t.feeCurrency || currencyOf(t.fromAccountId)) + ' · ' + spShortDate(t.date);
+            amount = spFmtMoney(t.toAmount, t.cashWithdrawCurrency || currencyOf(t.fromAccountId));
+        } else if (sec.key === 'asset') {
+            title = shortName(t.fromAccountId) + ' → ' + (t.toAssetName || 'Asset');
+            meta = 'Logged for audit · ' + spShortDate(t.date);
+            amount = spFmtMoney(t.fromAmount, currencyOf(t.fromAccountId));
+        } else {
+            const to = findAccount(t.toAccountId);
+            title = shortName(t.fromAccountId) + ' → ' + shortName(t.toAccountId);
+            meta = sec.key === 'overseas' ? '1 ' + currencyOf(t.fromAccountId) + ' = ' + t.conversionRate + ' ' + currencyOf(t.toAccountId) + ' · fee ' + spFmtMoney(t.fee || 0, currencyOf(t.fromAccountId)) + ' · ' + spShortDate(t.date)
+                : 'To: ' + (to ? (to.person === 'own' ? 'You' : to.person) : '—') + ' · ' + spShortDate(t.date);
+            amount = spFmtMoney(t.fromAmount, currencyOf(t.fromAccountId));
+        }
+        const drop = sec.key === 'asset' ? assetFundingDrop(t) : null;
+        const confirmText = sec.key === 'recon' ? 'Delete this correction? The balance goes back to ' + spFmtMoney(t.balanceBefore, reconCur(t)) + (t.loggedAsTransaction ? ', and its ' + t.transactionType + ' record is deleted too.' : '.')
+            : sec.key === 'asset' ? 'Delete this funding? ' + shortName(t.fromAccountId) + ' gets ' + amount + ' back' + (drop ? ' and ' + drop.item.name + ' drops from ' + spFmtMoney(drop.from, drop.item.currency) + ' to ' + spFmtMoney(drop.to, drop.item.currency) : '') + '.'
+            : sec.key === 'cash' ? 'Delete this withdrawal? ' + shortName(t.fromAccountId) + ' gets the money back and your cash goes down.'
+            : 'Delete this transfer? Both balances go back' + (t.feeExpenseId || t.principalExpenseId || t.recipientIncomeId ? ', and the expense/income it logged is deleted too.' : '.');
+        return (
+            <div key={key} className="sp-mvrow">
+                <div className="sp-mvrow-line">
+                    <div className="sp-mvrow-main"><div className="sp-schedtitle"><span style={{fontSize: '14px'}}>{title}</span>{cfButton(sec.key === 'recon' ? 'reconciliations' : 'transfers', t.id)}</div><div className="sp-mvrow-meta">{meta}</div></div>
+                    <span className="sp-mvrow-amt" style={{color: ink}}>{amount}</span>
+                    {sec.key === 'cash' && <button type="button" className="sp-mvrow-btn" title="Edit" onClick={() => setEditWithdraw({ id: t.id, amount: String(t.toAmount), currency: t.cashWithdrawCurrency || currencyOf(t.fromAccountId), fee: String(t.fee || 0), feeCurrency: t.feeCurrency || currencyOf(t.fromAccountId), deductedAmount: String(t.fromAmount), date: t.date, accountCurrency: currencyOf(t.fromAccountId), accountName: shortName(t.fromAccountId) })}><i className="fas fa-pen"></i></button>}
+                    <button type="button" className="sp-mvrow-btn" title="Delete" onClick={() => setPendingDelete(pendingDelete === key ? null : key)}><i className="fas fa-trash"></i></button>
                 </div>
+                {conflictPanel(sec.key === 'recon' ? 'reconciliations' : 'transfers', t)}
+                {pendingDelete === key && <InlineConfirm text={confirmText} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => deleteMovement(sec, t)} />}
+            </div>
+        );
+    };
+
+    const hasOthers = bankAccounts.length >= 2;
+    return (
+        <div className="sp-page sp-acctpage">
+            <div className="sp-page-kicker">Banks, cards &amp; transfers</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>Accounts</h2>
+            <div className="sp-hero sp-cathero">
+                <div className="sp-hero-label">Total balance · {curOrder[0] || defaultCurrency}</div>
+                <div className="sp-hero-value">{spFmtMoney(byCur[curOrder[0]] || 0, curOrder[0] || defaultCurrency)}</div>
+                <div className="sp-hero-pills">
+                    <span className="sp-hero-pill is-green">{visible.length} account{visible.length === 1 ? '' : 's'}</span>
+                    {curOrder.slice(1).map(c => <span key={c} className="sp-hero-pill">{byCur[c] >= 0 ? '+ ' : '− '}{spFmtMoney(Math.abs(byCur[c]), c)}</span>)}
+                </div>
+            </div>
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
+            {anyConflicts && (
+                <label className="sp-check" style={{margin: '0 4px 10px'}}>
+                    <input type="checkbox" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i>Sync conflicts only (accounts)
+                </label>
             )}
-            {showConflictDetail && conflictRecord && conflictRecordSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictRecord}
-                    cloudSnapshot={conflictRecordSnapshot.cloudSnapshot}
-                    fieldLabels={showConflictDetail.collection === 'transfers' ? transferConflictFieldLabels : reconciliationConflictFieldLabels}
-                    formatValue={formatSyncConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveTransferOrReconciliationConflict(false)}
-                    onUseCloud={() => handleResolveTransferOrReconciliationConflict(true)}
-                />
-            )}
-            {editingWithdraw && editWithdrawForm && (() => {
-                const account = bankAccountsForTransfers.find(a => a.id === editingWithdraw.fromAccountId);
-                return (
-                    <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                        <div className="modal-dialog modal-dialog-centered">
-                            <form className="modal-content" onSubmit={handleSubmitEditWithdraw}>
-                                <div className="modal-header"><h5 className="modal-title">Edit Cash Withdrawal — {account ? `${account.accountName} (${account.currency})` : 'Unknown account'}</h5></div>
-                                <div className="modal-body">
-                                    <div className="mb-2">
-                                        <label className="form-label">Currency</label>
-                                        <select className="form-select" value={editWithdrawForm.currency} onChange={e => setEditWithdrawForm(f => ({ ...f, currency: e.target.value }))}>
-                                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.code})</option>))}
-                                        </select>
-                                    </div>
-                                    <div className="mb-2">
-                                        <label className="form-label">Amount ({CurrencyService.getCurrencySymbol(editWithdrawForm.currency)})</label>
-                                        <input type="number" step="0.01" className={'form-control' + (editWithdrawErrors.amount ? ' is-invalid' : '')} value={editWithdrawForm.amount} onChange={e => setEditWithdrawForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
-                                        {editWithdrawErrors.amount && <div className="invalid-feedback">{editWithdrawErrors.amount}</div>}
-                                    </div>
-                                    <div className="mb-2">
-                                        <label className="form-label">Fee (optional)</label>
-                                        <div style={{display: 'flex', gap: '0.5rem'}}>
-                                            <input type="number" step="0.01" className="form-control" value={editWithdrawForm.fee} onChange={e => setEditWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
-                                            <select className="form-select" style={{maxWidth: '110px', flexShrink: 0}} value={editWithdrawForm.feeCurrency} onChange={e => setEditWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>
-                                                {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{CurrencyService.getCurrencySymbol(c.code)} {c.code}</option>))}
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div className="mb-2">
-                                        <label className="form-label">Deducted from Account {account && `(${CurrencyService.getCurrencySymbol(account.currency)})`}</label>
-                                        <input type="number" step="0.01" className={'form-control' + (editWithdrawErrors.deductedAmount ? ' is-invalid' : '')} value={editWithdrawForm.deductedAmount} onChange={e => setEditWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} />
-                                        {editWithdrawErrors.deductedAmount && <div className="invalid-feedback">{editWithdrawErrors.deductedAmount}</div>}
-                                    </div>
-                                    <div className="mb-2">
-                                        <label className="form-label">Date</label>
-                                        <input type="date" className={'form-control' + (editWithdrawErrors.date ? ' is-invalid' : '')} max={DateUtils.today()} value={editWithdrawForm.date} onChange={e => setEditWithdrawForm(f => ({ ...f, date: e.target.value }))} />
-                                        {editWithdrawErrors.date && <div className="invalid-feedback">{editWithdrawErrors.date}</div>}
-                                    </div>
-                                </div>
-                                <div className="modal-footer">
-                                    <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelEditWithdraw}>Cancel</button>
-                                    <button type="submit" className="btn btn-success btn-sm" disabled={editWithdrawSubmitting}>
-                                        {editWithdrawSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Saving…</> : <><i className="fas fa-check me-1"></i>Save Changes</>}
+            {form && <AccountFormCard account={form === 'new' ? null : form} bankAccounts={bankAccounts} activeView={activeView} onCancel={() => setForm(null)} onSaved={(msg) => { setForm(null); done(msg); }} />}
+
+            {visible.length === 0 && !form && <div className="sp-empty" style={{marginBottom: '14px'}}><i className="fas fa-building-columns"></i>No accounts yet. Add your bank accounts and cards to track their balances.</div>}
+            {groups.map(g => (
+                <div key={g.cur} style={{marginBottom: '14px'}}>
+                    <div className="sp-group-head" style={{padding: '0 4px 8px'}}><span className="sp-group-label">{g.cur} · {g.name}</span><span className="sp-group-total">{spFmtMoney(g.total, g.cur)}</span></div>
+                    <div className="sp-acctlist">
+                        {g.rows.map(a => {
+                            const look = spAcctLook(a.accountType);
+                            const isOpen = openId === a.id;
+                            const b = bal(a);
+                            const candidate = a.isPrimary ? linkCandidatesAll.find(c => c.person === a.person) : null;
+                            const unlinked = candidate ? candidate.expenseCount + candidate.incomeCount : 0;
+                            const primaryNow = !a.isPrimary && bankAccounts.find(x => x.isPrimary && x.person === a.person);
+                            const last4 = a.accountRef ? ' ·· ' + String(a.accountRef).replace(/\s+/g, '').slice(-4) : '';
+                            return (
+                                <div key={a.id} className="sp-acctitem">
+                                    <button type="button" className="sp-acctrow" onClick={() => { setOpenId(isOpen ? null : a.id); setPendingPrimary(null); }}>
+                                        <span className="sp-schedicon" style={{background: look.tint, color: look.ink}}><i className={look.icon}></i></span>
+                                        <span className="sp-schedmain">
+                                            <span className="sp-schedtitle"><span>{a.accountName}</span>{cfButton('bankAccounts', a.id)}</span>
+                                            <span className="sp-schedmeta">
+                                                {a.isPrimary && <span className="sp-badge-primary">PRIMARY</span>}
+                                                {activeView.length > 1 && spOwnerChip(a.person, people)}
+                                                <span>{a.accountType}{last4}</span>
+                                            </span>
+                                            {!a.isPrimary && !isLiab(a) && <span role="button" className="sp-setprimary" onClick={(e) => { e.stopPropagation(); setPendingPrimary(pendingPrimary === a.id ? null : a.id); }}>Set as primary</span>}
+                                        </span>
+                                        <span className="sp-schedright"><span className="sp-schedamt" style={{color: isLiab(a) ? (b > 0 ? '#e11d48' : undefined) : (b < 0 ? '#e11d48' : undefined)}}>{isLiab(a) && b > 0 ? '−' : ''}{spFmtMoney(isLiab(a) ? Math.abs(b) : b, a.currency)}</span></span>
+                                        <i className={'fas fa-chevron-' + (isOpen ? 'up' : 'down') + ' sp-catchev'}></i>
                                     </button>
+                                    {conflictPanel('bankAccounts', a)}
+                                    {pendingPrimary === a.id && (
+                                        <div style={{padding: '0 0 10px'}}>
+                                            <InlineConfirm text={primaryNow ? 'Make ' + a.accountName + ' the primary account? It replaces ' + primaryNow.accountName + '.' : 'Make ' + a.accountName + ' the primary account?'} keepLabel="Cancel" cta="Set primary" onKeep={() => setPendingPrimary(null)} onConfirm={() => { DataService.updateBankAccount(a.id, { isPrimary: true }); setPendingPrimary(null); done(a.accountName + ' is now primary'); }} />
+                                        </div>
+                                    )}
+                                    {isOpen && (
+                                        <div className="sp-nwitem-open">
+                                            <SpActBar actions={[
+                                                a.isPrimary && { key: 'link', label: unlinked ? 'Link (' + unlinked + ')' : 'Link', icon: 'fas fa-link', tone: 'blue', onClick: () => openLink(a) },
+                                                hasOthers && { key: 'xfer', label: 'Transfer', icon: 'fas fa-right-left', tone: 'slate', onClick: () => { setTransferForm({ ...emptyTransferForm, fromAccountId: String(a.id) }); setTransferErrors({}); } },
+                                                !isLiab(a) && { key: 'cash', label: 'Cash', icon: 'fas fa-money-bill-wave', tone: 'amber', onClick: () => openWithdraw(a) },
+                                                { key: 'bal', label: 'Balance', icon: 'fas fa-scale-balanced', tone: 'slate', onClick: () => setReconcile({ account: a, to: '', notes: '', error: '' }) },
+                                                { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => { setForm(a); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
+                                                { key: 'del', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => { setDeleteAccount(a); setDeleteAck(false); } }
+                                            ]} />
+                                        </div>
+                                    )}
                                 </div>
-                            </form>
-                        </div>
+                            );
+                        })}
                     </div>
-                );
-            })()}
+                </div>
+            ))}
+
+            <div className="sp-group-head" style={{padding: '6px 4px 8px'}}><span className="sp-group-label">Money movements</span></div>
+            {sections.map(sec => (
+                <div key={sec.key} className="sp-mvcard">
+                    <div className="sp-mvcard-head">
+                        <span className="sp-tile" style={{background: sec.tint, color: sec.ink}}><i className={sec.icon}></i></span>
+                        <span className="sp-mvcard-title">{sec.title}</span>
+                        <span className="sp-mvcard-total">{sec.rows.length === 0 ? 'None' : sec.key === 'recon' ? sec.rows.length + ' logged' : sec.key === 'cash' ? sumBy(sec.rows, t => Number(t.toAmount) || 0, t => t.cashWithdrawCurrency || currencyOf(t.fromAccountId)) : sumBy(sec.rows, t => Number(t.fromAmount) || 0, t => currencyOf(t.fromAccountId))}</span>
+                    </div>
+                    {sec.rows.length > 0 && <div className="sp-mvrows">{sec.rows.map(t => movementRow(sec, t))}</div>}
+                </div>
+            ))}
+
+            {!form && <PinnedCta label="Add account" icon="fas fa-plus" onClick={() => { setForm('new'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
+
+            {linkSheet && (
+                <Sheet onClose={() => setLinkSheet(null)}>
+                    <SpSheetHead icon="fas fa-link" tint="#dbeafe" ink="#2563eb" title="Link transactions" sub={linkSheet.account.accountName + ' · ' + (linkSheet.account.person === 'own' ? 'your' : linkSheet.account.person + "'s") + ' primary account'} />
+                    {linkSheet.expenseCount + linkSheet.incomeCount > 0 ? (
+                        <React.Fragment>
+                            <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>{linkSheet.expenseCount} expense{linkSheet.expenseCount === 1 ? '' : 's'} and {linkSheet.incomeCount} income record{linkSheet.incomeCount === 1 ? '' : 's'} for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} have no account. Linking puts them on {linkSheet.account.accountName}, which changes its balance.</span></div>
+                            <div className="sp-sheet-foot"><button type="button" className="sp-btn sp-btn-cancel" onClick={() => setLinkSheet(null)}>Cancel</button><button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={confirmLink}><i className="fas fa-link"></i>Link {linkSheet.expenseCount + linkSheet.incomeCount}</button></div>
+                        </React.Fragment>
+                    ) : (
+                        <React.Fragment>
+                            <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>Nothing to link — every expense and income record for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} already has an account or is cash.</span></div>
+                            <button type="button" className="sp-btn sp-btn-primary" onClick={() => setLinkSheet(null)}>Done</button>
+                        </React.Fragment>
+                    )}
+                </Sheet>
+            )}
+
+            {transferForm && transferFromAccount && (
+                <Sheet onClose={() => setTransferForm(null)} footer={<React.Fragment>
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setTransferForm(null)}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" disabled={transferSubmitting} onClick={submitTransfer}><i className="fas fa-right-left"></i>{transferSubmitting ? 'Moving…' : 'Transfer'}</button>
+                </React.Fragment>}>
+                    <div className="sp-sheet-head"><div className="sp-sheet-title">Transfer money</div>{isOverseasTransfer && <span className="sp-kindtag" style={{background: '#dbeafe', color: '#2563eb', marginLeft: 'auto', alignSelf: 'center'}}><i className="fas fa-earth-europe" style={{marginRight: '4px'}}></i>OVERSEAS</span>}</div>
+                    {Object.values(transferErrors).filter(Boolean)[0] && <div className="sp-alert sp-alert-err" style={{marginTop: '8px'}}><i className="fas fa-circle-exclamation"></i><span>{Object.values(transferErrors).filter(Boolean)[0]}</span></div>}
+                    <div className="sp-xferbox">
+                        <div className="sp-xferbox-k">FROM</div>
+                        <div className="sp-xferbox-from"><span>{transferFromAccount.accountName} · {transferFromAccount.currency}</span><b>{spFmtMoney(bal(transferFromAccount), transferFromAccount.currency)}</b></div>
+                        <div className="sp-xferbox-arrow"><i className="fas fa-arrow-down"></i></div>
+                        <div className="sp-xferbox-k">TO</div>
+                        <select className="sp-fullselect" style={{marginTop: '4px'}} value={tf.toAccountId} onChange={e => setTf('toAccountId', e.target.value)}>
+                            <option value="">Select account</option>
+                            {bankAccounts.filter(a => a.id !== transferFromAccount.id).map(a => <option key={a.id} value={a.id}>{(a.person === 'own' ? 'You' : a.person)} — {a.accountName} ({a.currency})</option>)}
+                        </select>
+                    </div>
+                    <div className="sp-formcard">
+                        <div className="sp-formrow"><span>Date</span><input type="date" value={tf.date} onChange={e => setTf('date', e.target.value)} /></div>
+                        <div className={'sp-formrow' + (transferErrors.amount ? ' is-bad' : '')}><span>Amount</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(transferFromAccount.currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={tf.amount} onChange={e => setTf('amount', e.target.value)} /></span></div>
+                        {isOverseasTransfer && (
+                            <React.Fragment>
+                                <div className="sp-formrow"><span>Fee</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(transferFromAccount.currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={tf.fee} onChange={e => setTf('fee', e.target.value)} /></span></div>
+                                <div className="sp-formrow"><span>Rate<small className="sp-formrow-hint">1 {transferFromAccount.currency} = ? {transferToAccount.currency}{liveConversionRate ? ' · today ' + liveConversionRate : ''}</small></span><input type="number" step="0.0001" placeholder={liveConversionRate ? String(liveConversionRate) : "today's rate"} value={tf.conversionRate} onChange={e => setTf('conversionRate', e.target.value)} /></div>
+                                <div className="sp-formrow"><span>They receive<small className="sp-formrow-hint">(amount − fee) × rate · you can change it</small></span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(transferToAccount.currency)}</span><input type="number" step="0.01" inputMode="decimal" value={tf.toAmount} onChange={e => setTf('toAmount', e.target.value)} /></span></div>
+                            </React.Fragment>
+                        )}
+                        <div className="sp-formrow"><span>Note</span><input type="text" value={tf.notes} placeholder="Optional" onChange={e => setTf('notes', e.target.value)} /></div>
+                    </div>
+                    {isCrossPersonTransfer && (
+                        <div className="sp-panel">
+                            <div className="sp-row-title">Logged as an expense and income</div>
+                            <div className="sp-row-sub" style={{marginBottom: '8px'}}>Money to another person is recorded as an expense for {transferFromAccount.person === 'own' ? 'you' : transferFromAccount.person} and income for {transferToAccount.person === 'own' ? 'you' : transferToAccount.person}.</div>
+                            <SpCategoryPicker categories={categories} categoryId={tf.principalCategoryId} subcategory={tf.principalSubcategory} required bad={!!(transferErrors.principalCategoryId || transferErrors.principalSubcategory)} onChange={(c, s) => setTransferForm(p => ({ ...p, principalCategoryId: c, principalSubcategory: s }))} />
+                        </div>
+                    )}
+                    {isOverseasTransfer && !isCrossPersonTransfer && parseFloat(tf.fee) > 0 && (
+                        <div className="sp-panel">
+                            <div className="sp-row-title">Fee logged as an expense</div>
+                            <div className="sp-row-sub" style={{marginBottom: '8px'}}>The {spFmtMoney(parseFloat(tf.fee) || 0, transferFromAccount.currency)} fee is recorded as an expense paid from {transferFromAccount.accountName}.</div>
+                            <SpCategoryPicker categories={categories} categoryId={tf.categoryId} subcategory={tf.subcategory} required bad={!!(transferErrors.categoryId || transferErrors.subcategory)} onChange={(c, s) => setTransferForm(p => ({ ...p, categoryId: c, subcategory: s }))} />
+                        </div>
+                    )}
+                    {transferToAccount && <div className="sp-hint" style={{fontSize: '12px', margin: '10px 4px 0'}}>{spFmtMoney(parseFloat(tf.amount) || 0, transferFromAccount.currency)} leaves {transferFromAccount.accountName}; {transferToAccount.accountName} gets {spFmtMoney(isOverseasTransfer ? (parseFloat(tf.toAmount) || 0) : (parseFloat(tf.amount) || 0), transferToAccount.currency)}.</div>}
+                </Sheet>
+            )}
+
+            {withdrawAccount && (
+                <Sheet onClose={() => setWithdrawAccount(null)} footer={<React.Fragment>
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setWithdrawAccount(null)}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" disabled={withdrawSubmitting} onClick={submitWithdraw}><i className="fas fa-money-bill-wave"></i>Withdraw</button>
+                </React.Fragment>}>
+                    <SpSheetHead icon="fas fa-money-bill-wave" tint="#fef3c7" ink="#d97706" title="Cash withdrawal" sub={withdrawAccount.accountName + ' · ' + spFmtMoney(bal(withdrawAccount), withdrawAccount.currency)} />
+                    {Object.values(withdrawErrors).filter(Boolean)[0] && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{Object.values(withdrawErrors).filter(Boolean)[0]}</span></div>}
+                    <div className="sp-formcard" style={{marginTop: 0}}>
+                        <div className="sp-formrow"><span>Amount</span><span className="sp-moneyin"><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={withdrawForm.amount} autoFocus onChange={e => setWithdrawForm(f => ({ ...f, amount: e.target.value }))} /><select value={withdrawForm.currency} onChange={e => setWithdrawForm(f => ({ ...f, currency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        <div className="sp-formrow"><span>Fee<small className="sp-formrow-hint">Optional</small></span><span className="sp-moneyin"><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} /><select value={withdrawForm.feeCurrency} onChange={e => setWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        <div className="sp-formrow"><span>Date</span><input type="date" max={DateUtils.today()} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} /></div>
+                        <div className="sp-formrow"><span>Deducted from account<small className="sp-formrow-hint">Amount + fee in {withdrawAccount.currency} · edit to match your statement</small></span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(withdrawAccount.currency)}</span><input type="number" step="0.01" inputMode="decimal" value={withdrawForm.deductedAmount} onChange={e => setWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} /></span></div>
+                    </div>
+                    <div className="sp-hint" style={{fontSize: '11px', margin: '8px 4px 0'}}>Adds to your cash in hand for {withdrawForm.currency}. Not logged as an expense.</div>
+                </Sheet>
+            )}
+
+            {reconcile && (
+                <Sheet onClose={() => setReconcile(null)} footer={<React.Fragment>
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setReconcile(null)}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={submitReconcile}><i className="fas fa-check"></i>Update balance</button>
+                </React.Fragment>}>
+                    <SpSheetHead icon="fas fa-scale-balanced" tint="#fae8ff" ink="#c026d3" title="Reconcile balance" sub={reconcile.account.accountName + ' · ' + reconcile.account.currency} />
+                    {reconcile.error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{reconcile.error}</span></div>}
+                    <div className="sp-formcard" style={{marginTop: 0}}>
+                        <div className="sp-formrow"><span>Current balance</span><b>{spFmtMoney(bal(reconcile.account), reconcile.account.currency)}</b></div>
+                        <div className="sp-formrow"><span>Update to</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(reconcile.account.currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={reconcile.to} autoFocus onChange={e => setReconcile(r => ({ ...r, to: e.target.value, error: '' }))} /></span></div>
+                        <div className="sp-formrow"><span>Note</span><input type="text" value={reconcile.notes} placeholder="e.g. Matched bank statement" onChange={e => setReconcile(r => ({ ...r, notes: e.target.value }))} /></div>
+                    </div>
+                    {reconcile.to !== '' && !isNaN(parseFloat(reconcile.to)) && (() => {
+                        const d = Math.round((parseFloat(reconcile.to) - bal(reconcile.account)) * 100) / 100;
+                        return <div className="sp-nwtiles"><div><span>Change · today</span><b style={{color: d === 0 ? undefined : d > 0 ? '#16a34a' : '#e11d48'}}>{d > 0 ? '+' : d < 0 ? '−' : ''}{spFmtMoney(Math.abs(d), reconcile.account.currency)}</b></div></div>;
+                    })()}
+                    <div className="sp-hint" style={{fontSize: '11px', margin: '8px 4px 0'}}>Saved as a balance correction in Money movements. It isn't added to your expenses or income.</div>
+                </Sheet>
+            )}
+
+            {deleteAccount && (
+                <Sheet onClose={() => setDeleteAccount(null)} danger footer={<React.Fragment>
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setDeleteAccount(null)}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-danger sp-btn-grow" disabled={!deleteAck} onClick={confirmDeleteAccount}><i className="fas fa-trash"></i>Delete account</button>
+                </React.Fragment>}>
+                    <SpSheetHead icon="fas fa-triangle-exclamation" tint="#fee2e2" ink="#e11d48" title={'Delete ' + deleteAccount.accountName + '?'} sub={'This can\'t be undone. The account and its ' + spFmtMoney(bal(deleteAccount), deleteAccount.currency) + ' balance will be removed.'} />
+                    <div className="sp-formcard" style={{marginTop: 0}}>
+                        {accountImpacts(deleteAccount).map((i, n) => <div key={n} className="sp-formrow" style={{justifyContent: 'flex-start'}}><i className={i.icon} style={{color: 'var(--sp-slate-400)', width: '16px'}}></i><span style={{whiteSpace: 'normal', fontSize: '13px'}}>{i.text}</span></div>)}
+                    </div>
+                    <button type="button" className="sp-checkrow" onClick={() => setDeleteAck(v => !v)}>
+                        <span className={'sp-checkbox' + (deleteAck ? ' is-on is-danger' : '')}>{deleteAck && <i className="fas fa-check"></i>}</span>
+                        <span className="sp-row-title" style={{fontSize: '13px'}}>I understand this permanently deletes the account</span>
+                    </button>
+                </Sheet>
+            )}
+
+            {editWithdraw && (
+                <Sheet onClose={() => setEditWithdraw(null)} footer={<React.Fragment>
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={() => setEditWithdraw(null)}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={saveEditWithdraw}><i className="fas fa-check"></i>Save changes</button>
+                </React.Fragment>}>
+                    <SpSheetHead icon="fas fa-money-bill-wave" tint="#fef3c7" ink="#d97706" title="Edit cash withdrawal" sub={editWithdraw.accountName} />
+                    {editWithdraw.error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{editWithdraw.error}</span></div>}
+                    <div className="sp-formcard" style={{marginTop: 0}}>
+                        <div className="sp-formrow"><span>Amount</span><span className="sp-moneyin"><input type="number" step="0.01" value={editWithdraw.amount} onChange={e => setEditWithdraw(p => ({ ...p, amount: e.target.value, error: '' }))} /><select value={editWithdraw.currency} onChange={e => setEditWithdraw(p => ({ ...p, currency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        <div className="sp-formrow"><span>Fee</span><span className="sp-moneyin"><input type="number" step="0.01" value={editWithdraw.fee} onChange={e => setEditWithdraw(p => ({ ...p, fee: e.target.value }))} /><select value={editWithdraw.feeCurrency} onChange={e => setEditWithdraw(p => ({ ...p, feeCurrency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        {/* Not recomputed from amount + fee on purpose: that would overwrite the historical figure at today's rate. */}
+                        <div className="sp-formrow"><span>Deducted from account</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(editWithdraw.accountCurrency)}</span><input type="number" step="0.01" value={editWithdraw.deductedAmount} onChange={e => setEditWithdraw(p => ({ ...p, deductedAmount: e.target.value, error: '' }))} /></span></div>
+                        <div className="sp-formrow"><span>Date</span><input type="date" max={DateUtils.today()} value={editWithdraw.date} onChange={e => setEditWithdraw(p => ({ ...p, date: e.target.value }))} /></div>
+                    </div>
+                </Sheet>
+            )}
         </div>
     );
 }
@@ -6965,458 +7129,7 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             )}
             </React.Fragment>)}
 
-            <hr style={{margin: '1.5rem 0'}} />
-
-            <div style={{marginBottom: '1.5rem'}}>
-                {renderSectionHeader('bankAccounts', 'fas fa-university', 'Bank Accounts')}
-            </div>
-            {expandedSection === 'bankAccounts' && (<React.Fragment>
-            <div style={{marginBottom: '1.5rem'}}>
-                <p className="text-muted" style={{fontSize: '0.9rem', marginBottom: '1rem'}}>
-                    Manage bank accounts and link them to expenses and income
-                </p>
-            </div>
-
-            {Object.keys(bankAccountSyncConflicts).length > 0 && (
-                <div className="form-check mb-2">
-                    <input type="checkbox" className="form-check-input" id="filterBankAccountSyncConflict" checked={filterBankAccountSyncConflict} onChange={(e) => setFilterBankAccountSyncConflict(e.target.checked)} />
-                    <label className="form-check-label" htmlFor="filterBankAccountSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                </div>
-            )}
-
-            <form onSubmit={handleAddAccount} style={{marginBottom: '1rem'}}>
-                <div className="row g-2 align-items-end">
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Account Name *</label>
-                        <input type="text" className={'form-control ' + (accountErrors.accountName ? 'is-invalid' : '')} value={accountForm.accountName} onChange={(e) => { setAccountForm(prev => ({ ...prev, accountName: e.target.value })); if (accountErrors.accountName) setAccountErrors({}); }} placeholder="e.g., Chase Checking" />
-                        {accountErrors.accountName && <div className="invalid-feedback">{accountErrors.accountName}</div>}
-                    </div>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Account Id</label>
-                        <input type="text" className="form-control" value={accountForm.accountRef} onChange={(e) => setAccountForm(prev => ({ ...prev, accountRef: e.target.value }))} placeholder="Optional" />
-                    </div>
-                </div>
-                <div className="row g-2 align-items-end" style={{marginTop: '0.5rem'}}>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Type *</label>
-                        <select className="form-select" value={accountForm.accountType} onChange={(e) => setAccountForm(prev => ({ ...prev, accountType: e.target.value }))}>
-                            {BANK_ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                    </div>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Country *</label>
-                        <select className="form-select" value={accountForm.country} onChange={(e) => setAccountForm(prev => ({ ...prev, country: e.target.value }))}>
-                            {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                    </div>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Currency *</label>
-                        <select className="form-select" value={accountForm.currency} onChange={(e) => setAccountForm(prev => ({ ...prev, currency: e.target.value }))}>
-                            {supportedCurrencies.map(c => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}
-                        </select>
-                    </div>
-                </div>
-                <div className="row g-2 align-items-end" style={{marginTop: '0.5rem'}}>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Person *</label>
-                        <select className="form-select" value={accountForm.person} onChange={(e) => setAccountForm(prev => ({ ...prev, person: e.target.value }))}>
-                            <option value="own">— Me / My Own —</option>
-                            {people.filter(p => !p.systemManaged).map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                        </select>
-                    </div>
-                    <div className="col">
-                        <label style={{fontWeight: '600', fontSize: '0.85rem', marginBottom: '0.25rem', display: 'block'}}>Opening Amount *</label>
-                        <input type="number" step="0.01" className="form-control" value={accountForm.openingAmount} onChange={(e) => setAccountForm(prev => ({ ...prev, openingAmount: e.target.value }))} placeholder="0.00" />
-                    </div>
-                    <div className="col-auto d-flex align-items-center">
-                        <div className="form-check">
-                            <input className="form-check-input" type="checkbox" id="isPrimaryAccount" checked={accountForm.isPrimary} onChange={(e) => setAccountForm(prev => ({ ...prev, isPrimary: e.target.checked }))} />
-                            <label className="form-check-label" htmlFor="isPrimaryAccount" style={{fontSize: '0.85rem'}}>Primary</label>
-                        </div>
-                    </div>
-                </div>
-                {accountForm.isPrimary && (() => {
-                    const existingPrimary = bankAccounts.find(a => a.isPrimary && a.person === accountForm.person && (!editingAccount || a.id !== editingAccount.id));
-                    if (!existingPrimary) return null;
-                    const personLabel = accountForm.person === 'own' ? 'your' : `${accountForm.person}'s`;
-                    return (
-                        <div className="text-warning" style={{fontSize: '0.8rem', marginTop: '0.4rem'}}>
-                            <i className="fas fa-exclamation-triangle me-1"></i>
-                            This will replace '{existingPrimary.accountName}' as {personLabel} primary account.
-                        </div>
-                    );
-                })()}
-                <div style={{marginTop: '0.5rem', display: 'flex', gap: '0.5rem'}}>
-                    <button type="submit" className="btn btn-primary btn-sm">
-                        <i className={'fas fa-' + (editingAccount ? 'save' : 'plus') + ' me-1'}></i>{editingAccount ? 'Save' : 'Add'}
-                    </button>
-                    {editingAccount && (
-                        <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelEditAccount}>Cancel</button>
-                    )}
-                </div>
-            </form>
-
-            <div>
-                {bankAccounts.length === 0 ? (
-                    <div className="text-muted text-center" style={{padding: '1rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                        <i className="fas fa-university fa-2x" style={{marginBottom: '0.5rem', display: 'block', opacity: 0.5}}></i>
-                        No bank accounts added yet.
-                    </div>
-                ) : (() => {
-                    const displayAccounts = filterBankAccountSyncConflict ? bankAccounts.filter(a => !!bankAccountSyncConflicts[String(a.id)]) : bankAccounts;
-                    const byPerson = new Map();
-                    displayAccounts.forEach(a => {
-                        if (!byPerson.has(a.person)) byPerson.set(a.person, []);
-                        byPerson.get(a.person).push(a);
-                    });
-                    const orderedPersons = ['own', ...people.filter(p => !p.systemManaged).map(p => p.name)].filter(p => byPerson.has(p));
-                    byPerson.forEach((_, p) => { if (!orderedPersons.includes(p)) orderedPersons.push(p); });
-                    return orderedPersons.map(person => (
-                        <div key={person} style={{marginBottom: '1rem'}}>
-                            <div style={{fontWeight: '700', fontSize: '0.8rem', color: '#6c757d', textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: '0.35rem'}}>
-                                {person === 'own' ? 'Me / My Own' : person}
-                            </div>
-                            {byPerson.get(person).map(account => {
-                                const candidate = account.isPrimary ? linkCandidatesAll.find(c => c.person === account.person) : null;
-                                const hasUnlinked = !!candidate && (candidate.expenseCount + candidate.incomeCount) > 0;
-                                return (
-                                    <div key={account.id} style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', background: account.isPrimary ? '#fff3cd' : '#f8f9fa', borderRadius: '8px', border: '1px solid ' + (account.isPrimary ? '#ffc107' : '#e9ecef')}}>
-                                        <div>
-                                            <span style={{fontWeight: '600'}}>{account.accountName}</span>
-                                            {account.isPrimary && <span style={{marginLeft: '0.5rem', color: '#ffc107', fontSize: '0.9rem'}} title="Primary">★</span>}
-                                            <SyncConflictBadge conflict={bankAccountSyncConflicts[String(account.id)]} onClick={() => setShowAccountConflictDetail(account.id)} />
-                                            <br />
-                                            <span style={{color: '#6c757d', fontSize: '0.85rem'}}>
-                                                {account.accountType} · {account.currency} · {account.country}
-                                                {account.accountRef && ` · ${account.accountRef}`}
-                                            </span>
-                                        </div>
-                                        <div style={{display: 'flex', gap: '0.25rem'}}>
-                                            {account.isPrimary && (
-                                                <button className="btn btn-sm btn-outline-primary" disabled={!hasUnlinked} onClick={() => handleOpenLinkAccounts(account.person)} title={hasUnlinked ? 'Link existing transactions' : 'No unlinked transactions'}><i className="fas fa-link"></i></button>
-                                            )}
-                                            {bankAccounts.length >= 2 && (
-                                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickTransfer(account)} title="Transfer money"><i className="fas fa-exchange-alt"></i></button>
-                                            )}
-                                            <button className="btn btn-sm btn-outline-primary" onClick={() => handleQuickReconcile(account)} title="Reconcile balance"><i className="fas fa-balance-scale"></i></button>
-                                            {!DataService.LIABILITY_ACCOUNT_TYPES.includes(account.accountType) && (
-                                                <button className="btn btn-sm btn-outline-primary" onClick={() => handleOpenWithdraw(account)} title="Withdraw cash"><i className="fas fa-money-bill-wave"></i></button>
-                                            )}
-                                            <button className="btn btn-sm btn-outline-primary" onClick={() => handleEditAccount(account)} title="Edit"><i className="fas fa-pencil-alt"></i></button>
-                                            <button className="btn btn-sm btn-outline-danger" onClick={() => setShowDeleteAccountConfirm(account)} title="Delete"><i className="fas fa-trash"></i></button>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    ));
-                })()}
-            </div>
-
-            {showDeleteAccountConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Remove Bank Account</h5></div>
-                            <div className="modal-body"><p>Remove <strong>{showDeleteAccountConfirm.accountName}</strong>? Existing expenses and income linked to this account will not be affected.</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowDeleteAccountConfirm(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => handleDeleteAccount(showDeleteAccountConfirm.id)}>Remove</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {withdrawAccount && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <form className="modal-content" onSubmit={handleSubmitWithdraw}>
-                            <div className="modal-header"><h5 className="modal-title">Withdraw Cash — {withdrawAccount.accountName}</h5></div>
-                            <div className="modal-body">
-                                <div className="mb-2">
-                                    <label className="form-label">Currency</label>
-                                    <select className="form-select" value={withdrawForm.currency} onChange={e => setWithdrawForm(f => ({ ...f, currency: e.target.value }))}>
-                                        {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{c.name} ({c.code})</option>))}
-                                    </select>
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Amount ({CurrencyService.getCurrencySymbol(withdrawForm.currency)})</label>
-                                    <input type="number" step="0.01" className={'form-control' + (withdrawErrors.amount ? ' is-invalid' : '')} value={withdrawForm.amount} onChange={e => setWithdrawForm(f => ({ ...f, amount: e.target.value }))} autoFocus />
-                                    {withdrawErrors.amount && <div className="invalid-feedback">{withdrawErrors.amount}</div>}
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Fee (optional)</label>
-                                    <div style={{display: 'flex', gap: '0.5rem'}}>
-                                        <input type="number" step="0.01" className="form-control" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} />
-                                        <select className="form-select" style={{maxWidth: '110px', flexShrink: 0}} value={withdrawForm.feeCurrency} onChange={e => setWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>
-                                            {CurrencyService.getAllCurrencies().map(c => (<option key={c.code} value={c.code}>{CurrencyService.getCurrencySymbol(c.code)} {c.code}</option>))}
-                                        </select>
-                                    </div>
-                                    <div className="form-text">Charged in a different currency than the withdrawal? Change it here.</div>
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Deducted from Account ({CurrencyService.getCurrencySymbol(withdrawAccount.currency)})</label>
-                                    <input type="number" step="0.01" className={'form-control' + (withdrawErrors.deductedAmount ? ' is-invalid' : '')} value={withdrawForm.deductedAmount} onChange={e => setWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} />
-                                    {withdrawErrors.deductedAmount && <div className="invalid-feedback">{withdrawErrors.deductedAmount}</div>}
-                                    <div className="form-text">Defaults to the converted amount + fee — edit if your statement shows a different figure.</div>
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Date</label>
-                                    <input type="date" className={'form-control' + (withdrawErrors.date ? ' is-invalid' : '')} max={DateUtils.today()} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} />
-                                    {withdrawErrors.date && <div className="invalid-feedback">{withdrawErrors.date}</div>}
-                                </div>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={handleCancelWithdraw}>Cancel</button>
-                                <button type="submit" className="btn btn-success btn-sm" disabled={withdrawSubmitting}>
-                                    {withdrawSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Withdrawing…</> : <><i className="fas fa-money-bill-wave me-1"></i>Withdraw</>}
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {showLinkAccountsConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Link Existing Transactions</h5></div>
-                            <div className="modal-body">
-                                {linkCandidates.length === 0 ? (
-                                    <p>No unlinked expenses or income found for anyone with a primary account.</p>
-                                ) : (
-                                    <React.Fragment>
-                                        <p>Link past expenses/income to each person's primary account? Uncheck anyone you'd rather leave unlinked.</p>
-                                        {linkCandidates.map(c => (
-                                            <div key={c.person} className="form-check">
-                                                <input className="form-check-input" type="checkbox" id={'link-' + c.person} checked={c.selected} onChange={() => handleToggleLinkCandidate(c.person)} />
-                                                <label className="form-check-label" htmlFor={'link-' + c.person}>
-                                                    {c.person === 'own' ? 'Me / My Own' : c.person} — {c.expenseCount} expense{c.expenseCount === 1 ? '' : 's'}, {c.incomeCount} income record{c.incomeCount === 1 ? '' : 's'}
-                                                </label>
-                                            </div>
-                                        ))}
-                                    </React.Fragment>
-                                )}
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowLinkAccountsConfirm(false)}>Cancel</button>
-                                {linkCandidates.length > 0 && (
-                                    <button type="button" className="btn btn-primary" onClick={handleConfirmLinkAccounts}>Link Selected</button>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {bankAccounts.length >= 2 && (
-                <div style={{marginTop: '0.5rem'}}>
-                    <button type="button" className={'btn btn-sm ' + (showTransferForm ? 'btn-secondary' : 'btn-outline-primary')} onClick={() => (showTransferForm ? handleCancelTransfer() : setShowTransferForm(true))}>
-                        <i className={'fas ' + (showTransferForm ? 'fa-times' : 'fa-exchange-alt') + ' me-1'}></i>{showTransferForm ? 'Cancel Transfer' : 'Transfer Money'}
-                    </button>
-                </div>
-            )}
-
-            {showTransferForm && (
-                <div ref={transferFormRef} style={{marginTop: '0.75rem', background: '#f8f9fa', borderRadius: '10px', padding: '0.75rem'}}>
-                    <h6 style={{marginBottom: '0.6rem', fontSize: '0.9rem', fontWeight: 600}}>Transfer Money</h6>
-                    <form onSubmit={handleSubmitTransfer}>
-                        <div className="form-group mb-2">
-                            <label>From Account</label>
-                            <select className={'form-select ' + (transferErrors.fromAccountId ? 'is-invalid' : '')} value={transferForm.fromAccountId} onChange={e => handleTransferFieldChange('fromAccountId', e.target.value)}>
-                                <option value="">Select account</option>
-                                {bankAccounts.map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency}) — {ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(a), a.currency)}</option>))}
-                            </select>
-                            {transferErrors.fromAccountId && <div className="invalid-feedback d-block">{transferErrors.fromAccountId}</div>}
-                        </div>
-                        <div className="form-group mb-2">
-                            <label>To Account</label>
-                            <select className={'form-select ' + (transferErrors.toAccountId ? 'is-invalid' : '')} value={transferForm.toAccountId} onChange={e => handleTransferFieldChange('toAccountId', e.target.value)}>
-                                <option value="">Select account</option>
-                                {bankAccounts.filter(a => String(a.id) !== String(transferForm.fromAccountId)).map(a => (<option key={a.id} value={a.id}>{(a.person === 'own' ? 'Me' : a.person)} — {a.accountName} ({a.currency}) — {ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(a), a.currency)}</option>))}
-                            </select>
-                            {transferErrors.toAccountId && <div className="invalid-feedback d-block">{transferErrors.toAccountId}</div>}
-                        </div>
-                        <div className="form-group mb-2">
-                            <label>Date</label>
-                            <input type="date" className="form-control" value={transferForm.date} onChange={e => handleTransferFieldChange('date', e.target.value)} />
-                        </div>
-                        <div className="form-group mb-2">
-                            <label>Transfer Amount {transferFromAccount ? `(${transferFromAccount.currency})` : ''}</label>
-                            <input type="number" step="0.01" className={'form-control ' + (transferErrors.amount ? 'is-invalid' : '')} value={transferForm.amount} onChange={e => handleTransferFieldChange('amount', e.target.value)} />
-                            {transferErrors.amount && <div className="invalid-feedback d-block">{transferErrors.amount}</div>}
-                        </div>
-                        {isCrossPersonTransfer && (
-                            <React.Fragment>
-                                <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>
-                                    <i className="fas fa-user-friends me-1"></i>Transfer to {transferToAccount.person === 'own' ? 'Me' : transferToAccount.person} — logged as an expense for you and income for them
-                                </div>
-                                <div className="form-group mb-2">
-                                    <label>Category</label>
-                                    <select className={'form-select ' + (transferErrors.principalCategoryId ? 'is-invalid' : '')} value={transferForm.principalCategoryId} onChange={e => handleTransferFieldChange('principalCategoryId', e.target.value)}>
-                                        <option value="">Select a category</option>
-                                        {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
-                                    </select>
-                                    {transferErrors.principalCategoryId && <div className="invalid-feedback d-block">{transferErrors.principalCategoryId}</div>}
-                                </div>
-                                {transferPrincipalCategory && transferPrincipalCategory.subcategories.length > 0 && (
-                                    <div className="form-group mb-2">
-                                        <label>Subcategory</label>
-                                        <select className={'form-select ' + (transferErrors.principalSubcategory ? 'is-invalid' : '')} value={transferForm.principalSubcategory} onChange={e => handleTransferFieldChange('principalSubcategory', e.target.value)}>
-                                            <option value="">Select a subcategory</option>
-                                            {transferPrincipalCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
-                                        </select>
-                                        {transferErrors.principalSubcategory && <div className="invalid-feedback d-block">{transferErrors.principalSubcategory}</div>}
-                                    </div>
-                                )}
-                            </React.Fragment>
-                        )}
-                        {isOverseasTransfer && (
-                            <React.Fragment>
-                                <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>
-                                    <i className="fas fa-globe me-1"></i>Overseas transfer — {transferFromAccount.currency} → {transferToAccount.currency}
-                                </div>
-                                <div className="form-group mb-2">
-                                    <label>Conversion Rate (1 {transferFromAccount.currency} = ? {transferToAccount.currency}) <span className="text-muted">(optional{liveConversionRate ? ` — today's: ${liveConversionRate}` : ''})</span></label>
-                                    <input type="number" step="0.0001" className="form-control" placeholder={liveConversionRate ? String(liveConversionRate) : "today's rate"} value={transferForm.conversionRate} onChange={e => handleTransferFieldChange('conversionRate', e.target.value)} />
-                                </div>
-                                <div className="form-group mb-2">
-                                    <label>Fee {transferFromAccount ? `(${transferFromAccount.currency})` : ''}</label>
-                                    <input type="number" step="0.01" className="form-control" placeholder="0" value={transferForm.fee} onChange={e => handleTransferFieldChange('fee', e.target.value)} />
-                                </div>
-                                <div className="form-group mb-2">
-                                    <label>Transferred Amount {transferToAccount ? `(${transferToAccount.currency})` : ''}</label>
-                                    <input type="number" step="0.01" className="form-control" value={transferForm.toAmount} onChange={e => handleTransferFieldChange('toAmount', e.target.value)} />
-                                    <small className="text-muted">Auto-calculated as (Amount − Fee) × Conversion Rate; you can override it.</small>
-                                </div>
-                                {!isCrossPersonTransfer && parseFloat(transferForm.fee) > 0 && (
-                                    <React.Fragment>
-                                        <div className="form-group mb-2">
-                                            <label>Fee Category</label>
-                                            <select className={'form-select ' + (transferErrors.categoryId ? 'is-invalid' : '')} value={transferForm.categoryId} onChange={e => handleTransferFieldChange('categoryId', e.target.value)}>
-                                                <option value="">Select a category</option>
-                                                {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
-                                            </select>
-                                            {transferErrors.categoryId && <div className="invalid-feedback d-block">{transferErrors.categoryId}</div>}
-                                        </div>
-                                        {transferFeeCategory && transferFeeCategory.subcategories.length > 0 && (
-                                            <div className="form-group mb-2">
-                                                <label>Fee Subcategory</label>
-                                                <select className={'form-select ' + (transferErrors.subcategory ? 'is-invalid' : '')} value={transferForm.subcategory} onChange={e => handleTransferFieldChange('subcategory', e.target.value)}>
-                                                    <option value="">Select a subcategory</option>
-                                                    {transferFeeCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
-                                                </select>
-                                                {transferErrors.subcategory && <div className="invalid-feedback d-block">{transferErrors.subcategory}</div>}
-                                            </div>
-                                        )}
-                                    </React.Fragment>
-                                )}
-                            </React.Fragment>
-                        )}
-                        <div className="form-group mb-2">
-                            <label>Notes (optional)</label>
-                            <input type="text" className="form-control" value={transferForm.notes} onChange={e => handleTransferFieldChange('notes', e.target.value)} />
-                        </div>
-                        <button type="submit" className="btn btn-primary btn-sm" disabled={transferSubmitting}>
-                            {transferSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Transferring…</> : 'Transfer'}
-                        </button>
-                    </form>
-                </div>
-            )}
-
-            {showReconcileForm && (
-                <div ref={reconcileFormRef} style={{marginTop: '0.75rem', background: '#f8f9fa', borderRadius: '10px', padding: '0.75rem'}}>
-                    <h6 style={{marginBottom: '0.6rem', fontSize: '0.9rem', fontWeight: 600}}>Reconcile Balance</h6>
-                    <form onSubmit={handleSubmitReconcile}>
-                        <div className="form-group mb-2">
-                            <label>Account</label>
-                            <input type="text" className="form-control" value={reconcileAccount ? `${reconcileAccount.accountName} (${reconcileAccount.currency})` : ''} disabled />
-                        </div>
-                        <div className="form-group mb-2">
-                            <label>Currently Tracked Balance</label>
-                            <input type="text" className="form-control" value={reconcileAccount ? ValidationUtils.formatCurrency(DataService.computeBankAccountBalance(reconcileAccount), reconcileAccount.currency) : ''} disabled />
-                        </div>
-                        <div className="form-group mb-2">
-                            <label>Actual Balance {reconcileAccount ? `(${reconcileAccount.currency})` : ''}</label>
-                            <input type="number" step="0.01" className={'form-control ' + (reconcileErrors.actualBalance ? 'is-invalid' : '')} value={reconcileForm.actualBalance} onChange={e => handleReconcileFieldChange('actualBalance', e.target.value)} />
-                            {reconcileErrors.actualBalance && <div className="invalid-feedback d-block">{reconcileErrors.actualBalance}</div>}
-                        </div>
-                        <div className="form-check mb-2">
-                            <input className="form-check-input" type="checkbox" id="reconcileLogAsTransaction" checked={reconcileForm.logAsTransaction} onChange={e => handleReconcileFieldChange('logAsTransaction', e.target.checked)} />
-                            <label className="form-check-label" htmlFor="reconcileLogAsTransaction">Also record this as an Expense/Income transaction</label>
-                        </div>
-                        {reconcileAccount && reconcileForm.actualBalance !== '' && !isNaN(parseFloat(reconcileForm.actualBalance)) && (() => {
-                            const computedBalance = DataService.computeBankAccountBalance(reconcileAccount);
-                            const delta = Math.round((parseFloat(reconcileForm.actualBalance) - computedBalance) * 100) / 100;
-                            if (delta === 0) {
-                                return <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}><i className="fas fa-check me-1"></i>Already matches — no adjustment needed.</div>;
-                            }
-                            const isLiability = DataService.LIABILITY_ACCOUNT_TYPES.includes(reconcileAccount.accountType);
-                            const asExpense = isLiability ? delta > 0 : delta < 0;
-                            if (!reconcileForm.logAsTransaction) {
-                                return (
-                                    <div className="alert alert-secondary py-2" style={{fontSize: '0.82rem'}}>
-                                        <i className="fas fa-info-circle me-1"></i>This will adjust the tracked balance by {ValidationUtils.formatCurrency(Math.abs(delta), reconcileAccount.currency)} and update Net Worth — it won't appear in your Expense/Income history.
-                                    </div>
-                                );
-                            }
-                            return (
-                                <React.Fragment>
-                                    <div className="alert alert-warning py-2" style={{fontSize: '0.82rem'}}>
-                                        <i className="fas fa-exclamation-triangle me-1"></i>This will record {asExpense ? 'an expense' : 'an income'} of {ValidationUtils.formatCurrency(Math.abs(delta), reconcileAccount.currency)}.
-                                    </div>
-                                    {asExpense && (
-                                        <React.Fragment>
-                                            <div className="form-group mb-2">
-                                                <label>Category</label>
-                                                <select className={'form-select ' + (reconcileErrors.categoryId ? 'is-invalid' : '')} value={reconcileForm.categoryId} onChange={e => handleReconcileFieldChange('categoryId', e.target.value)}>
-                                                    <option value="">Select a category</option>
-                                                    {categories.map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}
-                                                </select>
-                                                {reconcileErrors.categoryId && <div className="invalid-feedback d-block">{reconcileErrors.categoryId}</div>}
-                                            </div>
-                                            {reconcileCategory && reconcileCategory.subcategories.length > 0 && (
-                                                <div className="form-group mb-2">
-                                                    <label>Subcategory</label>
-                                                    <select className={'form-select ' + (reconcileErrors.subcategory ? 'is-invalid' : '')} value={reconcileForm.subcategory} onChange={e => handleReconcileFieldChange('subcategory', e.target.value)}>
-                                                        <option value="">Select a subcategory</option>
-                                                        {reconcileCategory.subcategories.map(sub => (<option key={sub} value={sub}>{sub}</option>))}
-                                                    </select>
-                                                    {reconcileErrors.subcategory && <div className="invalid-feedback d-block">{reconcileErrors.subcategory}</div>}
-                                                </div>
-                                            )}
-                                        </React.Fragment>
-                                    )}
-                                </React.Fragment>
-                            );
-                        })()}
-                        {reconcileErrors.general && <div className="alert alert-info py-2" style={{fontSize: '0.82rem'}}>{reconcileErrors.general}</div>}
-                        <div className="form-group mb-2">
-                            <label>Notes (optional)</label>
-                            <input type="text" className="form-control" value={reconcileForm.notes} onChange={e => handleReconcileFieldChange('notes', e.target.value)} />
-                        </div>
-                        <button type="submit" className="btn btn-primary btn-sm" disabled={reconcileSubmitting}>
-                            {reconcileSubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Reconciling…</> : 'Reconcile'}
-                        </button>{' '}
-                        <button type="button" className="btn btn-secondary btn-sm" onClick={handleCancelReconcile}>Cancel</button>
-                    </form>
-                </div>
-            )}
-            {showAccountConflictDetail && conflictAccount && accountConflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictAccount}
-                    cloudSnapshot={accountConflictSnapshot.cloudSnapshot}
-                    fieldLabels={bankAccountConflictFieldLabels}
-                    formatValue={formatBankAccountConflictValue}
-                    onClose={() => setShowAccountConflictDetail(null)}
-                    onKeepLocal={() => handleResolveAccountConflict(false)}
-                    onUseCloud={() => handleResolveAccountConflict(true)}
-                />
-            )}
-            </React.Fragment>)}
-
+            {/* Bank accounts moved to their own Accounts screen (More → Accounts). */}
             <hr style={{margin: '1.5rem 0'}} />
             <div ref={activeViewSectionRef} style={{marginBottom: '1.5rem'}}>
                 {renderSectionHeader('activeView', 'fas fa-user', 'Active View')}
@@ -11374,7 +11087,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                                 {sch && <React.Fragment> · Repeats {spFmtMoney(sch.templateExpense.amount, item.currency)} {sch.frequency}</React.Fragment>}
                             </div>
                         )}
-                        {kind === 'bank' && <div className="sp-nwdetail">Worked out from this account's linked transactions. Adjust it with Reconcile in Settings → Bank Accounts.</div>}
+                        {kind === 'bank' && <div className="sp-nwdetail">Worked out from this account's linked transactions. Adjust it with Balance (reconcile) in More → Accounts.</div>}
                         {kind === 'primary' && <div className="sp-nwdetail">Your primary account. Its balance is counted in "In wallet" above, so it isn't added again here.</div>}
                         {kind === 'cash' && <div className="sp-nwdetail">Cash withdrawals minus cash spending, plus any cash corrections.</div>}
                         {kind === 'debt' && <div className="sp-nwdetail">Settle or edit it in Scheduled → Debts.</div>}
@@ -12019,13 +11732,14 @@ function QuickAddSheet({ onClose, onPick }) {
     );
 }
 
-// "More" tab. Accounts stays inside Settings until the Accounts phase. Trends is now part of Summary.
+// "More" tab. Trends is now part of Summary; Accounts has its own screen.
 function MoreScreen({ onNavigate }) {
     const tiles = [
         ['categories', 'Categories', 'fas fa-tags', '#dcfce7', '#16a34a'],
         ['income', 'Income', 'fas fa-wallet', '#dbeafe', '#2563eb'],
         ['goals', 'Goals', 'fas fa-piggy-bank', '#fae8ff', '#c026d3'],
         ['networth', 'Net Worth', 'fas fa-scale-balanced', '#eef2ff', '#6366f1'],
+        ['accounts', 'Accounts', 'fas fa-building-columns', '#dbeafe', '#2563eb'],
         ['bulk-upload', 'Upload', 'fas fa-upload', '#fee2e2', '#e11d48'],
         ['export', 'Export', 'fas fa-file-export', '#f1f5f9', '#0f172a'],
         ['settings', 'Settings', 'fas fa-sliders', '#f1f5f9', '#475569']
@@ -12789,6 +12503,7 @@ function App() {
             case 'manage': case 'bills': case 'recurring': case 'debts':
                 return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} initialTab={currentScreen} />;
             case 'bulk-upload': return <BulkUpload categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} activeView={activeView} onUpdate={handleDataUpdate} />;
+            case 'accounts': return <AccountsScreen categories={categories} activeView={activeView} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
             case 'export': return <ExportData expenses={expenses} income={income} categories={categories} netWorthItems={netWorthItems} assetCategories={assetCategories} liabilityCategories={liabilityCategories} defaultCurrency={defaultCurrency} activeView={activeView} onNavigate={setCurrentScreen} />;
@@ -12851,8 +12566,8 @@ function App() {
         expenses: ['Expenses', 'expenses'], income: ['Income', 'income'], goals: ['Goals', 'goals'],
         bills: ['Bills', 'manage'], recurring: ['Recurring', 'manage'], debts: ['Debts', 'manage'],
         categories: ['Categories', 'categories'], assetCategories: ['Asset categories', 'categories'], liabilityCategories: ['Liability categories', 'categories'],
-        networth: ['Net Worth', 'networth'], bankAccounts: ['Bank accounts', 'settings'],
-        transfers: ['Transfers', 'summary'], reconciliations: ['Reconciliations', 'summary']
+        networth: ['Net Worth', 'networth'], bankAccounts: ['Bank accounts', 'accounts'],
+        transfers: ['Transfers', 'accounts'], reconciliations: ['Reconciliations', 'accounts']
     };
     const conflictGroups = Object.keys(CONFLICT_SCREENS)
         .map(k => ({ key: k, label: CONFLICT_SCREENS[k][0], screen: CONFLICT_SCREENS[k][1], count: Object.keys(storedConflicts[k] || {}).length }))

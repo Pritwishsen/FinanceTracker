@@ -102,3 +102,24 @@ test('a scheduled top-up paid from cash deducts cash each time it runs', async (
     const cash = DataService.getCashWithdrawItems(null).find(i => i.person === 'own' && i.currency === 'GBP');
     expect(cash.value).toBe(450);
 });
+
+test('deleting an Asset Funding entry takes the amount back off the asset (approved)', () => {
+    store.setItem('financeApp_bankAccounts', JSON.stringify([{ id: 7, accountName: 'Main', accountType: 'Checking', currency: 'GBP', person: 'own', openingAmount: 5000 }]));
+    const a = asset();
+    DataService._applyNetWorthIncrement({ netWorthItemId: a.id, amount: 200, accountId: 7 }, '2026-09-03', { notes: 'Investment funding — logged for audit' });
+    const t = DataService.getTransfers()[0];
+    DataService.deleteTransfer(t.id);
+    DataService.revertAssetFunding(t);
+    const it = getItem(a.id);
+    expect(it.value).toBe(1000);
+    expect(it.originalAmount).toBe(1000);
+    expect(it.history).toEqual([]);
+    expect(DataService.getTransfers()).toHaveLength(0);
+});
+
+test('reverting ignores cash withdrawals and unknown assets', () => {
+    const a = asset();
+    DataService.revertAssetFunding({ toAssetId: 'cash-own-GBP', isCashWithdrawal: true, toAmount: 50 });
+    DataService.revertAssetFunding({ toAssetId: 999999, toAmount: 50 });
+    expect(getItem(a.id).value).toBe(1000);
+});
