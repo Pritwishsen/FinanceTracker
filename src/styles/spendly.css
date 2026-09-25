@@ -790,3 +790,47 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 .sp-goalactions { display: flex; gap: 6px; margin-top: 12px; }
 .sp-goalactions input { flex: 1; min-width: 0; border: none; background: var(--sp-slate-50); border-radius: 12px; padding: 0 10px; height: 42px; font-size: 13px; font-weight: 600; color: var(--sp-navy); font-family: inherit; outline: none; color-scheme: light; }
 .sp-goaladd { border: none; color: #fff; border-radius: 12px; padding: 0 14px; height: 42px; font-size: 14px; font-weight: 800; cursor: pointer; font-family: inherit; }
+
+/* ---------- Net Worth (Phase 8) ---------- */
+.sp-nwpage { padding-bottom: 40px; }
+.sp-nwhero { background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 22px; padding: 18px; color: #fff; margin-bottom: 12px; }
+.sp-nwhero-label { font-size: 12px; color: var(--sp-slate-400); font-weight: 600; margin-bottom: 4px; }
+.sp-nwhero-empty { font-size: 13px; color: var(--sp-slate-300); font-weight: 600; padding: 8px 0 12px; }
+.sp-nwhero-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.sp-nwhero-row.is-wallet { border-top: 1px solid #ffffff1a; margin-top: 6px; padding-top: 14px; }
+.sp-nwhero-cc { width: 38px; height: 38px; border-radius: 12px; background: #ffffff14; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; flex-shrink: 0; }
+.sp-nwhero-main { flex: 1; min-width: 0; }
+.sp-nwhero-name { font-size: 14px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-nwhero-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; font-weight: 700; margin-top: 2px; }
+.sp-nwhero-val { font-size: 18px; font-weight: 800; letter-spacing: -.01em; margin-left: auto; text-align: right; white-space: nowrap; flex-shrink: 0; }
+.sp-nwhero-note { display: flex; gap: 6px; align-items: flex-start; font-size: 10px; color: var(--sp-slate-400); font-weight: 600; margin-top: 8px; }
+.sp-nwgroup { background: #fff; border-radius: 16px; margin-bottom: 10px; overflow: hidden; }
+.sp-nwgroup-head { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 15px 10px; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; color: inherit; }
+.sp-nwchev { width: 32px; height: 32px; border-radius: 10px; background: var(--sp-slate-50); color: var(--sp-slate-400); display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }
+.sp-nwtotals { margin: 0 15px 14px; background: var(--sp-slate-50); border-radius: 12px; padding: 4px 12px; }
+.sp-nwtotals > div { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; }
+.sp-nwtotals > div + div { border-top: 1px solid var(--sp-slate-100); }
+.sp-nwtotals b { font-size: 15px; font-weight: 800; color: var(--sp-navy); }
+.sp-nwcc { font-size: 10px; font-weight: 800; color: var(--sp-slate-500); border: 1px solid var(--sp-slate-200); background: #fff; border-radius: 7px; padding: 2px 6px; }
+.sp-nwitems { border-top: 1px solid var(--sp-slate-100); padding: 0 15px; }
+.sp-nwitem + .sp-nwitem { border-top: 1px solid var(--sp-slate-100); }
+.sp-nwitem-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; color: inherit; }
+.sp-nwitem-main { flex: 1; min-width: 0; display: block; }
+.sp-nwitem-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sp-nwitem-row .sp-schedright { display: flex; flex-direction: column; align-items: flex-end; }
+.sp-nwitem-open { padding: 0 0 12px; }
+.sp-nwnote { background: var(--sp-slate-50); border-radius: 10px; padding: 8px 10px; font-size: 12px; font-weight: 600; color: var(--sp-slate-600); margin-bottom: 8px; }
+.sp-nwdetail { font-size: 12px; font-weight: 600; color: var(--sp-slate-500); line-height: 1.55; margin-bottom: 8px; }
+.sp-nwdetail b { color: var(--sp-navy); font-weight: 800; }
+.sp-nwitem-open .sp-actbar { background: var(--sp-slate-50); border-radius: 12px; padding: 4px; }
+.sp-nwtiles { display: flex; gap: 8px; margin-top: 12px; }
+.sp-nwtiles > div { flex: 1; min-width: 0; background: #fff; border-radius: 14px; padding: 10px 12px; }
+.sp-nwtiles span { display: block; font-size: 11px; font-weight: 700; color: var(--sp-slate-500); }
+.sp-nwtiles b { display: block; font-size: 15px; font-weight: 800; color: var(--sp-navy); margin-top: 2px; }
+.sp-fullselect { width: 100%; margin-top: 8px; border: 1px solid var(--sp-slate-200); border-radius: 12px; background: var(--sp-slate-50); padding: 11px 12px; font-size: 14px; font-weight: 700; color: var(--sp-navy); font-family: inherit; color-scheme: light; }
+.sp-toggleline { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #fff; border-radius: 16px; padding: 12px 14px; margin-top: 12px; }
+.sp-linkbtn { display: inline-flex; align-items: center; gap: 7px; background: none; border: none; color: var(--sp-green-link); font-size: 12px; font-weight: 800; cursor: pointer; font-family: inherit; padding: 2px 4px 6px; }
+.sp-nwitem-metaline { display: block; font-size: 12px; font-weight: 600; color: var(--sp-slate-400); margin-top: 3px; }
+.sp-nwitem-main .sp-schedtitle .sp-ownerchip { flex-shrink: 0; }
+.sp-schedpay { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--sp-slate-500); margin-top: 3px; }
+.sp-schedpay i { font-size: 10px; color: var(--sp-slate-400); }

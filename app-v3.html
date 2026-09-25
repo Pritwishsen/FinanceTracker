@@ -1823,6 +1823,11 @@ class DataService {
     // Primary account balance (only when it's an asset-type account — a Primary Credit
     // Card/Loan stays purely a Liability, it's not "spending money").
     static computeWallet(activeView, defaultCurrency) {
+        const { unlinkedIncome, unlinkedExpenses, primaryBalances } = this.computeWalletParts(activeView, defaultCurrency);
+        return (unlinkedIncome - unlinkedExpenses) + primaryBalances;
+    }
+    // The three pieces computeWallet adds up, for the Net Worth "In wallet" breakdown line.
+    static computeWalletParts(activeView, defaultCurrency) {
         const convert = (amount, currency) => CurrencyService.convertToDefaultSync(amount, currency, defaultCurrency);
         const unlinkedIncome = this.data.income.filter(i => !i.accountId && (!activeView || matchesActiveView(i.paidBy, activeView))).reduce((s, i) => s + convert(i.amount, i.currency || 'GBP'), 0);
         const unlinkedExpenses = this.data.expenses.filter(e => !e.accountId && (!activeView || matchesActiveView(e.paidBy, activeView))).reduce((s, e) => s + convert(e.amount, e.currency || 'GBP'), 0);
@@ -1830,7 +1835,7 @@ class DataService {
             .filter(a => a.isPrimary && !this.LIABILITY_ACCOUNT_TYPES.includes(a.accountType))
             .filter(a => !activeView || matchesActiveView(a.person, activeView))
             .reduce((s, a) => s + convert(this.computeBankAccountBalance(a), a.currency), 0);
-        return (unlinkedIncome - unlinkedExpenses) + primaryBalances;
+        return { unlinkedIncome, unlinkedExpenses, primaryBalances };
     }
 
     static async getExpenses() { await this.initialize(); return [...this.data.expenses].sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id); }
@@ -2232,17 +2237,38 @@ class DataService {
     static pauseRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = false; s.updatedAt = new Date().toISOString(); this.saveRecurring(r); } }
     static resumeRecurring(id) { const r = this.getRecurring(); const s = r.find(x => x.id === id); if (s) { s.isActive = true; s.updatedAt = new Date().toISOString(); this.saveRecurring(r); } }
     static deleteRecurring(id) { const r = this.getRecurring(); const i = r.findIndex(x => x.id === id); if (i !== -1) { r.splice(i, 1); this.saveRecurring(r); this.recordDeletion('recurring', id); } }
+    // Paying into an asset from cash in hand. The funding "account" is the cash bucket's own id
+    // ('cash-{person}|{currency}'), and the deduction is recorded as the existing cash-correction
+    // record (an unlogged reconciliation with a negative delta) — the same record Update cash /
+    // Add cash write, so computed cash stays right on every app version and nothing is logged as
+    // an expense. Deleting that correction puts the cash back (the asset keeps its top-up).
+    static isCashFundingRef(ref) { return typeof ref === 'string' && ref.startsWith('cash-'); }
+    static deductCashForAsset(cashRef, amount, date, assetName) {
+        const [person, currency] = cashRef.slice(5).split('|');
+        const bucket = this.getCashWithdrawItems(null).find(i => i.person === (person || 'own') && i.currency === currency);
+        const before = bucket ? bucket.value : 0;
+        return this.addReconciliation({
+            accountId: 'cash-' + (person || 'own') + '|' + currency, person: person || 'own', date: date || DateUtils.today(),
+            balanceBefore: before, delta: -Math.round(amount * 100) / 100, balanceAfter: Math.round((before - amount) * 100) / 100,
+            notes: 'Asset funding: ' + assetName, loggedAsTransaction: false, transactionType: null, transactionId: null
+        });
+    }
     // Shared by the interactive "Add Money" modal and the recurring processor below, so a
     // recurring asset/liability contribution behaves identically to a manual one — same
     // originalAmount/value increment, same optional bank-account deduction logged as a
     // transfer. Silently no-ops if the target item was deleted since the schedule was made.
-    static _applyNetWorthIncrement({ netWorthItemId, amount, accountId }, date) {
+    // opts.activeView scopes the snapshot (interactive top-up); opts.notes labels the transfer.
+    // Each top-up is also appended to the item's history (approved change), dated `date`.
+    static _applyNetWorthIncrement({ netWorthItemId, amount, accountId }, date, opts = {}) {
         const items = this.getNetWorthItems();
         const item = items.find(i => i.id === netWorthItemId);
         if (!item) return;
         const currentOriginal = item.originalAmount != null ? item.originalAmount : item.value;
-        this.updateNetWorthItem(item.id, { originalAmount: currentOriginal + amount, value: item.value + amount });
-        if (accountId) {
+        const history = [...(item.history || []), { id: this._uniqueId(), type: 'topup', amount, date: date || DateUtils.today() }];
+        this.updateNetWorthItem(item.id, { originalAmount: currentOriginal + amount, value: item.value + amount, history }, { activeView: opts.activeView });
+        if (this.isCashFundingRef(accountId)) {
+            this.deductCashForAsset(accountId, amount, date, item.name);
+        } else if (accountId) {
             const account = this.getBankAccounts().find(a => a.id === accountId);
             if (account) {
                 this.addTransfer({
@@ -2251,7 +2277,7 @@ class DataService {
                     isOverseas: false, conversionRate: 1, fee: 0,
                     feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
                     toAssetId: item.id, toAssetName: item.name,
-                    notes: 'Recurring investment funding — logged for audit'
+                    notes: opts.notes || 'Recurring investment funding — logged for audit'
                 });
             }
         }
@@ -2493,8 +2519,10 @@ class DataService {
     // originalAmount: optional — defaults to value (a fresh item's gain/loss basis is itself),
     // but the Bulk Upload re-import path needs to seed a different original amount when the
     // exported row's Original Amount had already diverged from Value (a prior valuation update).
-    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person, country, originalAmount }, activeView) {
+    // openDate: optional, additive (items created before it existed simply have none).
+    static addNetWorthItem({ name, value, currency, categoryId, subcategory, type, notes, person, country, originalAmount, openDate }, activeView) {
         const item = { id: DataService._uniqueId(), name, value: parseFloat(value), originalAmount: originalAmount != null && originalAmount !== '' ? parseFloat(originalAmount) : parseFloat(value), currency, categoryId, subcategory: subcategory || '', type, notes: notes||'', person: person||'own', country: country || '', updatedAt: new Date().toISOString() };
+        if (openDate) item.openDate = openDate;
         const items = this.getNetWorthItems(); items.push(item); this.saveNetWorthItems(items);
         this.autoSaveNetWorthSnapshot(activeView); return item;
     }
@@ -2505,10 +2533,21 @@ class DataService {
         if (i !== -1) { items[i] = { ...items[i], ...updates, updatedAt: new Date().toISOString() }; this.saveNetWorthItems(items); }
         if (!skipHistory) this.autoSaveNetWorthSnapshot(activeView);
     }
+    // Deleting an item also removes its repeat schedule(s) (approved change) — otherwise the
+    // schedule is left behind pointing at nothing. Funding transfers already logged stay.
     static deleteNetWorthItem(id, activeView) {
         const items = this.getNetWorthItems(); const i = items.findIndex(x => x.id === id);
         if (i !== -1) { items.splice(i, 1); this.saveNetWorthItems(items); this.recordDeletion('networth', id); }
+        this.getRecurring().filter(r => (r.type === 'asset' || r.type === 'liability') && r.templateExpense && r.templateExpense.netWorthItemId === id).forEach(r => this.deleteRecurring(r.id));
         this.autoSaveNetWorthSnapshot(activeView);
+    }
+    // Update value (asset) / Update balance (liability): sets value, valuedOn and appends a
+    // history entry (approved change). The first history entry locks opening balance/currency.
+    static recordNetWorthValuation(id, value, date, activeView) {
+        const item = this.getNetWorthItems().find(x => x.id === id);
+        if (!item) return;
+        const entry = { id: this._uniqueId(), type: item.type === 'liability' ? 'balance' : 'value', from: item.value, value: parseFloat(value), date: date || DateUtils.today() };
+        this.updateNetWorthItem(id, { value: parseFloat(value), valuedOn: entry.date, history: [...(item.history || []), entry] }, { activeView });
     }
     // activeView, when passed, scopes the total to items belonging to the currently selected
     // person(s) — matching what's actually shown on screen — instead of summing everyone combined.
@@ -3865,7 +3904,7 @@ const SP_CAT_ICON_CHOICES = [
 const SP_NW_ICON_GUESS = [
     [/invest|stock|share|fund/i, 'fas fa-chart-line', '#dcfce7', '#16a34a'], [/property|house|home|real estate/i, 'fas fa-house', '#e0e7ff', '#4f46e5'],
     [/pension|retire/i, 'fas fa-umbrella', '#ede9fe', '#7c3aed'], [/bank|saving/i, 'fas fa-building-columns', '#dbeafe', '#2563eb'],
-    [/vehicle|car/i, 'fas fa-car', '#e0f2fe', '#0284c7'], [/cash/i, 'fas fa-money-bill-wave', '#dcfce7', '#15803d'],
+    [/vehicle|\bcars?\b/i, 'fas fa-car', '#e0f2fe', '#0284c7'], [/cash/i, 'fas fa-money-bill-wave', '#dcfce7', '#15803d'],
     [/mortgage/i, 'fas fa-house-chimney', '#fee2e2', '#e11d48'], [/loan/i, 'fas fa-hand-holding-dollar', '#ffedd5', '#ea580c'],
     [/credit/i, 'fas fa-credit-card', '#fce7f3', '#db2777'], [/overdraft/i, 'fas fa-building-columns', '#fef3c7', '#d97706'],
     [/owed|debt/i, 'fas fa-handshake', '#fef3c7', '#b45309']
@@ -8973,11 +9012,55 @@ const SP_SCHED_KIND = {
 };
 const spFreqWord = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
 const spScheduleName = (s) => { const t = s.templateExpense || {}; return (s.type === 'asset' || s.type === 'liability') ? (t.netWorthItemName || '—') : (t.description || t.source || '—'); };
+// How a repeat is paid, read from its template (display only): the expense's card/account or
+// cash, the account income lands in, or where an asset top-up is taken from.
+const spSchedulePay = (s, accountNameById) => {
+    const t = s.templateExpense || {};
+    const acc = (id) => (accountNameById && accountNameById.get(String(id))) || 'an account';
+    if (s.type === 'expense') return t.isCashPayment ? { icon: 'fas fa-money-bill-wave', label: 'Paid in cash' } : t.accountId ? { icon: 'fas fa-credit-card', label: 'Card · ' + acc(t.accountId) } : { icon: 'fas fa-link-slash', label: 'No account linked' };
+    if (s.type === 'income') return t.accountId ? { icon: 'fas fa-building-columns', label: 'Into ' + acc(t.accountId) } : { icon: 'fas fa-money-bill-wave', label: 'Received as cash' };
+    if (s.type === 'asset') return DataService.isCashFundingRef(t.accountId) ? { icon: 'fas fa-money-bill-wave', label: 'From cash in hand' } : t.accountId ? { icon: 'fas fa-building-columns', label: 'From ' + acc(t.accountId) } : { icon: 'fas fa-arrow-right-to-bracket', label: 'External funds' };
+    return null;
+};
+
+// Payment choices for a repeat, matching what its add form offers: an expense can use any of
+// the payer's accounts, cash, or no account; income lands in one of the earner's accounts or
+// as cash; an asset top-up comes from an account, cash in hand or external funds.
+// Each choice carries the templateExpense fields it writes. Only future entries use a change.
+const spSchedulePayChoices = (schedule) => {
+    const t = schedule.templateExpense || {};
+    const accts = DataService.getBankAccounts();
+    const named = (a) => a.accountName + (a.isPrimary ? ' (primary)' : '') + ' · ' + a.currency;
+    if (schedule.type === 'expense') {
+        const mine = DataService.getAccountsForPerson((t.paidBy || '').trim() || 'own');
+        const opts = [...mine.map(a => ({ value: 'acct:' + a.id, label: 'Card / bank · ' + named(a), patch: { accountId: a.id, isCashPayment: false } })),
+            { value: 'cash', label: 'Cash', patch: { accountId: '', isCashPayment: true } },
+            { value: 'none', label: 'Not linked to an account', patch: { accountId: '', isCashPayment: false } }];
+        return { label: 'Paid from', opts, current: t.isCashPayment ? 'cash' : t.accountId ? 'acct:' + t.accountId : 'none' };
+    }
+    if (schedule.type === 'income') {
+        const mine = DataService.getAccountsForPerson((t.paidBy || '').trim() || 'own');
+        const opts = [...mine.map(a => ({ value: 'acct:' + a.id, label: named(a), patch: { accountId: a.id } })),
+            { value: 'cash', label: 'Cash (no account)', patch: { accountId: '' } }];
+        return { label: 'Paid into', opts, current: t.accountId ? 'acct:' + t.accountId : 'cash' };
+    }
+    if (schedule.type === 'asset') {
+        const opts = spNwPayOptions(accts, t.currency || 'GBP', t.person || 'own').map(o => ({ ...o, patch: { accountId: spNwPayResolve(o.value, accts).accountId } }));
+        return { label: 'Pay each time from', opts, current: DataService.isCashFundingRef(t.accountId) ? t.accountId : t.accountId ? String(t.accountId) : '' };
+    }
+    return null;
+};
 
 function RecurringEditSheet({ schedule, onClose, onSaved }) {
     const t = schedule.templateExpense || {};
     const kind = SP_SCHED_KIND[schedule.type] || SP_SCHED_KIND.expense;
-    const [f, setF] = useState({ amount: String(t.amount || ''), frequency: schedule.frequency, endDate: schedule.endDate || '', nextDue: schedule.nextDue });
+    const payChoices = useMemo(() => {
+        const c = spSchedulePayChoices(schedule);
+        // A saved account that has since been deleted still shows, so nothing changes silently.
+        if (c && !c.opts.some(o => o.value === c.current)) c.opts.unshift({ value: c.current, label: 'Current account (no longer available)', patch: {} });
+        return c;
+    }, [schedule]);
+    const [f, setF] = useState({ amount: String(t.amount || ''), frequency: schedule.frequency, endDate: schedule.endDate || '', nextDue: schedule.nextDue, pay: payChoices ? payChoices.current : '' });
     const [endMode, setEndMode] = useState(schedule.endDate ? 'date' : 'never');
     const [errors, setErrors] = useState({});
     const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -8986,7 +9069,7 @@ function RecurringEditSheet({ schedule, onClose, onSaved }) {
         if (!f.amount || isNaN(amount) || amount <= 0) { setErrors({ amount: 'Amount must be greater than 0' }); return; }
         if (!f.nextDue) { setErrors({ nextDue: 'Next payment date is required' }); return; }
         DataService.updateRecurring(schedule.id, {
-            templateExpense: { ...schedule.templateExpense, amount },
+            templateExpense: { ...schedule.templateExpense, amount, ...(payChoices && f.pay !== payChoices.current ? ((payChoices.opts.find(o => o.value === f.pay) || {}).patch || {}) : {}) },
             frequency: f.frequency,
             endDate: endMode === 'date' ? (f.endDate || '') : '',
             nextDue: f.nextDue
@@ -9010,6 +9093,15 @@ function RecurringEditSheet({ schedule, onClose, onSaved }) {
                     <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(t.currency || 'GBP')}</span><input type="number" step="0.01" inputMode="decimal" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
                 </div>
                 <div className={'sp-formrow' + (errors.nextDue ? ' is-bad' : '')}><span>Next processing date</span><input type="date" value={f.nextDue} onChange={e => set('nextDue', e.target.value)} /></div>
+                {payChoices && (
+                    <div className="sp-formblock">
+                        <div className="sp-formblock-label">{payChoices.label}</div>
+                        <select className="sp-fullselect" value={f.pay} onChange={e => set('pay', e.target.value)}>
+                            {payChoices.opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        {f.pay !== payChoices.current && <div className="sp-hint" style={{fontSize: '11px', marginTop: '6px'}}>Applies to entries created from now on. Ones already logged keep their original {schedule.type === 'income' ? 'account' : 'payment method'}.</div>}
+                    </div>
+                )}
             </div>
             <div className="sp-panel">
                 <div className="sp-panel-label">Repeat every</div>
@@ -9130,7 +9222,7 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                 const ended = spScheduleEnded(s, today);
                 const paused = !ended && !s.isActive;
                 const netWorth = isNetWorthType(s.type);
-                const fromAcc = netWorth && t.accountId ? accountNameById.get(String(t.accountId)) : '';
+                const pay = spSchedulePay(s, accountNameById);
                 const isOpen = openId === s.id;
                 const conflict = syncConflicts[String(s.id)];
                 const cfOpen = showConflictDetail === s.id;
@@ -9149,8 +9241,9 @@ function RecurringList({ onUpdate, activeView, embedded }) {
                                 </span>
                                 <span className="sp-schedmeta">
                                     {activeView.length > 1 && spOwnerChip(owner, people)}
-                                    <span>{paused ? 'Paused · ' + spFreqWord(s.frequency) : ended ? spFreqWord(s.frequency) : spFreqWord(s.frequency) + ' · next ' + spDueDate(s.nextDue)}{fromAcc ? ' · from ' + fromAcc : ''}</span>
+                                    <span>{paused ? 'Paused · ' + spFreqWord(s.frequency) : ended ? spFreqWord(s.frequency) : spFreqWord(s.frequency) + ' · next ' + spDueDate(s.nextDue)}</span>
                                 </span>
+                                {pay && <span className="sp-schedpay"><i className={pay.icon}></i>{pay.label}</span>}
                                 <span className="sp-schedend" style={{color: s.endDate && !ended ? '#d97706' : 'var(--sp-slate-400)'}}>{endLabel}</span>
                             </span>
                             <span className="sp-schedright"><span className="sp-schedamt">{netWorth ? '+' : ''}{ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')}</span></span>
@@ -10702,56 +10795,439 @@ function MonthlyTrends({ expenses, income, categories, defaultCurrency, onMonthS
     );
 }
 
+// ── Net Worth (Phase 8) ──────────────────────────────────────────────────────
+const SP_COUNTRY_CODE = {
+    'United Kingdom': 'GB', 'United States': 'US', 'India': 'IN', 'Ireland': 'IE', 'Germany': 'DE', 'France': 'FR', 'Spain': 'ES', 'Italy': 'IT',
+    'Netherlands': 'NL', 'Belgium': 'BE', 'Portugal': 'PT', 'Switzerland': 'CH', 'Austria': 'AT', 'Sweden': 'SE', 'Norway': 'NO', 'Denmark': 'DK',
+    'Finland': 'FI', 'Poland': 'PL', 'Greece': 'GR', 'Luxembourg': 'LU', 'Canada': 'CA', 'Mexico': 'MX', 'Brazil': 'BR', 'Argentina': 'AR',
+    'Australia': 'AU', 'New Zealand': 'NZ', 'Japan': 'JP', 'China': 'CN', 'South Korea': 'KR', 'Singapore': 'SG', 'Hong Kong': 'HK',
+    'United Arab Emirates': 'AE', 'Saudi Arabia': 'SA', 'Qatar': 'QA', 'South Africa': 'ZA', 'Nigeria': 'NG', 'Kenya': 'KE', 'Egypt': 'EG',
+    'Turkey': 'TR', 'Russia': 'RU', 'Pakistan': 'PK', 'Bangladesh': 'BD', 'Sri Lanka': 'LK', 'Philippines': 'PH', 'Indonesia': 'ID',
+    'Malaysia': 'MY', 'Thailand': 'TH', 'Vietnam': 'VN', 'Israel': 'IL', 'Czech Republic': 'CZ', 'Romania': 'RO', 'Hungary': 'HU'
+};
+const spCountryCode = (c) => !c ? '—' : SP_COUNTRY_CODE[c] || c.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+const SP_NW_FREQS = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
+const spNwFund = (a) => !DataService.LIABILITY_ACCOUNT_TYPES.includes(a.accountType); // accounts money can come out of
+const spFmtMoney = (amount, currency, dp = 2) => {
+    const num = Number(amount) || 0;
+    return (num < 0 ? '−' : '') + CurrencyService.getCurrencySymbol(currency) + Math.abs(num).toLocaleString(currency === 'INR' ? 'en-IN' : 'en-GB', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+};
+
+function SpCountrySelect({ value, currency, onChange }) {
+    const matching = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === currency);
+    const rest = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] !== currency);
+    return (
+        <select value={value} onChange={e => onChange(e.target.value)}>
+            <option value="">Not specified</option>
+            {matching.length > 0 ? (
+                <React.Fragment>
+                    <optgroup label={'Countries using ' + currency}>{matching.map(c => <option key={c} value={c}>{c}</option>)}</optgroup>
+                    <optgroup label="Other countries">{rest.map(c => <option key={c} value={c}>{c}</option>)}</optgroup>
+                </React.Fragment>
+            ) : COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+    );
+}
+
+// Where money for an asset comes from: nothing (external funds), a same-currency account that
+// isn't a Credit Card/Loan, or the owner's cash in hand (DataService.deductCashForAsset).
+const spNwPayOptions = (bankAccounts, currency, person) => [
+    { value: '', label: 'None · external funds' },
+    ...bankAccounts.filter(a => a.currency === currency && spNwFund(a)).map(a => ({ value: String(a.id), label: a.accountName + (a.isPrimary && (a.person || 'own') === (person || 'own') ? ' (primary)' : '') + ' · ' + a.currency })),
+    { value: 'cash-' + (person || 'own') + '|' + currency, label: 'Cash in hand · ' + currency }
+];
+// -> { accountId: stored value ('' | account id | cash ref), label: how it reads in sentences }
+const spNwPayResolve = (value, bankAccounts) => {
+    if (!value) return { accountId: '', label: '' };
+    if (DataService.isCashFundingRef(value)) return { accountId: value, label: 'cash in hand' };
+    const a = bankAccounts.find(x => String(x.id) === String(value));
+    return a ? { accountId: a.id, label: a.accountName } : { accountId: '', label: '' };
+};
+
+function SpRepeatPanel({ repeat, setRepeat, currency, payOptions, tint = '#ede9fe', ink = '#7c3aed', bankAccounts = [] }) {
+    const first = computeNextDue(repeat.start || DateUtils.today(), repeat.freq);
+    const pay = spNwPayResolve(repeat.pay, bankAccounts);
+    return (
+        <div className="sp-panel" style={{marginTop: '10px'}}>
+            <div className="sp-formrow" style={{paddingTop: 0}}>
+                <span>Amount each time</span>
+                <span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={repeat.amount} onChange={e => setRepeat(r => ({ ...r, amount: e.target.value }))} /></span>
+            </div>
+            {payOptions && (
+                <div className="sp-formblock" style={{borderTop: '1px solid #f1f5f9'}}>
+                    <div className="sp-formblock-label">Pay each time from</div>
+                    <select className="sp-fullselect" value={repeat.pay || ''} onChange={e => setRepeat(r => ({ ...r, pay: e.target.value, payTouched: true }))}>
+                        {payOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                </div>
+            )}
+            <div className="sp-panel-label" style={{margin: '8px 0'}}>Repeat every</div>
+            <div className="sp-seg is-light">
+                {SP_NW_FREQS.map(f => <button key={f} type="button" className={repeat.freq === f ? 'is-active' : ''} onClick={() => setRepeat(r => ({ ...r, freq: f }))}>{f === 'quarterly' ? 'Quarter' : f.charAt(0).toUpperCase() + f.slice(1)}</button>)}
+            </div>
+            <div className="sp-formrow" style={{borderTop: '1px solid #f1f5f9', marginTop: '8px'}}><span>Starts</span><input type="date" value={repeat.start} onChange={e => setRepeat(r => ({ ...r, start: e.target.value }))} /></div>
+            <div className="sp-formrow" style={{borderTop: '1px solid #f1f5f9'}}>
+                <span>Ends (optional)</span>
+                <span style={{display: 'inline-flex', alignItems: 'center', gap: '6px'}}>
+                    <input type="date" value={repeat.end} min={first} onChange={e => setRepeat(r => ({ ...r, end: e.target.value }))} />
+                    {repeat.end && <button type="button" className="sp-row-btn" onClick={() => setRepeat(r => ({ ...r, end: '' }))} title="Clear end date"><i className="fas fa-xmark"></i></button>}
+                </span>
+            </div>
+            <div className="sp-infobox" style={{background: tint}}>
+                <div className="sp-infobox-foot" style={{color: ink, paddingLeft: 0, marginTop: 0}}>
+                    {spFmtMoney(parseFloat(repeat.amount) || 0, currency)} every {repeat.freq === 'daily' ? 'day' : repeat.freq === 'weekly' ? 'week' : repeat.freq === 'quarterly' ? 'quarter' : repeat.freq === 'yearly' ? 'year' : 'month'}, first on {spLongDate(first)}{repeat.end ? ', until ' + spLongDate(repeat.end) : ''}{payOptions ? (pay.label ? ', taken from ' + pay.label : ', from external funds (nothing deducted)') : ''}.
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function NetWorthItemSheet({ type, item, assetCategories, liabilityCategories, bankAccounts, defaultCurrency, activeView, onClose, onSaved }) {
+    const isAsset = type === 'asset';
+    const cats = (isAsset ? assetCategories : liabilityCategories) || [];
+    const people = DataService.getPeople();
+    const locked = !!(item && item.history && item.history.length > 0);
+    const [f, setF] = useState(() => item
+        ? { name: item.name, value: String(item.value), currency: item.currency, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', openDate: item.openDate || '', fundAccountId: '' }
+        : { name: '', value: '', currency: defaultCurrency || 'GBP', categoryId: '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView) || 'own', country: defaultCountryForCurrency(defaultCurrency || 'GBP'), openDate: DateUtils.today(), fundAccountId: '' });
+    const [repeatOn, setRepeatOn] = useState(false);
+    const [repeat, setRepeat] = useState({ amount: '', freq: 'monthly', start: DateUtils.today(), end: '', pay: '', payTouched: false });
+    const [errors, setErrors] = useState({});
+    const [showCurrency, setShowCurrency] = useState(false);
+    const set = (k, v) => { setF(p => ({ ...p, [k]: v })); if (errors[k]) setErrors(p => { const n = { ...p }; delete n[k]; return n; }); };
+    const setCurrency = (cur) => { setF(p => {
+        const matches = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === cur);
+        let country = p.country;
+        if (matches.length === 1) country = matches[0];
+        else if (COUNTRY_CURRENCY_MAP[p.country] !== cur) country = '';
+        return { ...p, currency: cur, country, fundAccountId: '' };
+    }); setRepeat(r => ({ ...r, pay: '', payTouched: false })); };
+    const cat = cats.find(c => String(c.id) === String(f.categoryId));
+    const payOptions = spNwPayOptions(bankAccounts, f.currency, f.person);
+    const fund = spNwPayResolve(f.fundAccountId, bankAccounts);
+    // The repeat pays from the same place as the opening balance until the user picks otherwise.
+    const setFund = (v) => { set('fundAccountId', v); setRepeat(r => r.payTouched ? r : ({ ...r, pay: v })); };
+    useEffect(() => { if (!payOptions.some(o => o.value === f.fundAccountId)) set('fundAccountId', ''); }, [f.person, f.currency]);
+
+    const save = () => {
+        const e = {};
+        if (!f.name.trim()) e.name = 'Name is required';
+        if (!f.categoryId) e.categoryId = 'Pick a category';
+        if (!f.value || parseFloat(f.value) <= 0) e.value = 'Value must be greater than 0';
+        if (!item && repeatOn && (!repeat.amount || parseFloat(repeat.amount) <= 0)) e.repeat = 'Enter the amount to repeat';
+        if (Object.keys(e).length > 0) { setErrors(e); return; }
+        if (item) {
+            // Corrections (not a valuation) — not logged as a net-worth movement, as before.
+            const updates = { name: f.name.trim(), categoryId: parseInt(f.categoryId), subcategory: f.subcategory || '', notes: f.notes, person: f.person || 'own', country: f.country || '', openDate: f.openDate || '' };
+            if (!locked) { updates.value = parseFloat(f.value); updates.currency = f.currency; }
+            DataService.updateNetWorthItem(item.id, updates, { skipHistory: true });
+            onSaved(f.name.trim() + ' updated');
+            return;
+        }
+        const newItem = DataService.addNetWorthItem({ name: f.name.trim(), value: f.value, currency: f.currency, type, categoryId: parseInt(f.categoryId), subcategory: f.subcategory || '', notes: f.notes, person: f.person || 'own', country: f.country || '', openDate: f.openDate || '' }, activeView);
+        if (isAsset && fund.accountId) {
+            const amount = parseFloat(f.value);
+            if (DataService.isCashFundingRef(fund.accountId)) {
+                DataService.deductCashForAsset(fund.accountId, amount, DateUtils.today(), newItem.name);
+            } else {
+                // Funded via the Transfer ledger (not an Expense) — logged under Asset Funding.
+                DataService.addTransfer({
+                    date: DateUtils.today(), fromAccountId: fund.accountId, toAccountId: null,
+                    fromAmount: amount, toAmount: amount, isOverseas: false, conversionRate: 1, fee: 0,
+                    feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
+                    toAssetId: newItem.id, toAssetName: newItem.name, notes: 'Investment funding — logged for audit'
+                });
+            }
+        }
+        if (repeatOn) {
+            const pay = isAsset ? spNwPayResolve(repeat.pay, bankAccounts) : { accountId: '' };
+            DataService.addRecurring({
+                templateExpense: { netWorthItemId: newItem.id, netWorthItemName: newItem.name, amount: parseFloat(repeat.amount), currency: f.currency, accountId: pay.accountId, person: f.person || 'own' },
+                frequency: repeat.freq, endDate: repeat.end, type, startDate: repeat.start
+            });
+        }
+        onSaved(newItem.name + ' added');
+    };
+    const err = errors.name || errors.categoryId || errors.value || errors.repeat;
+    const noun = isAsset ? 'asset' : 'liability';
+    const amountFmt = spFmtMoney(parseFloat(f.value) || 0, f.currency);
+
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{item ? 'Save changes' : 'Save ' + noun}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon={isAsset ? 'fas fa-arrow-trend-up' : 'fas fa-arrow-trend-down'} tint={isAsset ? '#dcfce7' : '#fee2e2'} ink={isAsset ? '#16a34a' : '#e11d48'} title={(item ? 'Edit ' : 'Add ') + noun} sub={isAsset ? 'Something you own' : 'Something you owe'} />
+            {err && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{err}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className={'sp-formrow' + (errors.name ? ' is-bad' : '')}><span>{isAsset ? 'Asset name' : 'Name'}</span><input type="text" value={f.name} placeholder={isAsset ? 'e.g. Vanguard ISA' : 'e.g. Car loan'} onChange={e => set('name', e.target.value)} /></div>
+                <div className={'sp-formrow' + (errors.categoryId ? ' is-bad' : '')}>
+                    <span>Category</span>
+                    <select value={f.categoryId} onChange={e => setF(p => ({ ...p, categoryId: e.target.value, subcategory: '' }))}>
+                        <option value="">Select</option>
+                        {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                </div>
+                <div className="sp-formrow">
+                    <span>Sub category</span>
+                    <select value={f.subcategory} disabled={!cat || !cat.subcategories.length} onChange={e => set('subcategory', e.target.value)}>
+                        <option value="">{!cat ? 'Pick a category first' : cat.subcategories.length ? 'None' : 'No sub categories'}</option>
+                        {cat && cat.subcategories.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                </div>
+                <div className="sp-formrow">
+                    <span>Owner</span>
+                    {activeView.length > 1
+                        ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
+                        : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
+                </div>
+                <div className="sp-formrow"><span>Date of opening</span><input type="date" value={f.openDate} max={DateUtils.today()} onChange={e => set('openDate', e.target.value)} /></div>
+                <div className="sp-formrow"><span>Country</span><SpCountrySelect value={f.country} currency={f.currency} onChange={v => set('country', v)} /></div>
+                <div className="sp-formrow">
+                    <span>Currency</span>
+                    {locked
+                        ? <span className="sp-lockedval"><b>{f.currency}</b><i className="fas fa-lock"></i></span>
+                        : <button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button>}
+                </div>
+            </div>
+            <div className="sp-formlabel">{item ? 'Opening balance' : isAsset ? 'Opening balance' : 'Amount owed'}</div>
+            <div className="sp-formcard" style={{marginTop: '8px'}}>
+                <div className={'sp-formrow' + (errors.value ? ' is-bad' : '')}>
+                    <span>{item ? 'Amount' : isAsset ? 'Value today' : 'Owed today'}</span>
+                    {locked
+                        ? <span className="sp-lockedval"><b>{spFmtMoney(item.value, item.currency)}</b><i className="fas fa-lock"></i></span>
+                        : <span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.value} onChange={e => set('value', e.target.value)} /></span>}
+                </div>
+                {locked && <div className="sp-hint" style={{fontSize: '11px', padding: '0 0 10px'}}><i className="fas fa-lock" style={{marginRight: '5px'}}></i>Locked because this {noun} has {isAsset ? 'top-ups or valuations' : 'balance updates'}. Use {isAsset ? 'Top up or Update value' : 'Update balance'} instead.</div>}
+                {!item && isAsset && (
+                    <div className="sp-formblock">
+                        <div className="sp-formblock-label">Deducted from <span style={{color: 'var(--sp-slate-400)', fontSize: '12px'}}>(optional)</span></div>
+                        <select className="sp-fullselect" value={f.fundAccountId} onChange={e => setFund(e.target.value)}>
+                            {payOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        <div className="sp-hint" style={{fontSize: '11px', marginTop: '6px'}}>{!fund.accountId ? 'Nothing is deducted.' : DataService.isCashFundingRef(fund.accountId) ? 'Takes ' + amountFmt + ' from your cash in hand (saved as a cash correction, not an expense).' : 'Takes ' + amountFmt + ' from ' + fund.label + ' and logs it in Asset Funding (not an expense).'}</div>
+                    </div>
+                )}
+            </div>
+            {!item && (
+                <React.Fragment>
+                    <div className="sp-toggleline">
+                        <div><div className="sp-row-title">{isAsset ? 'Recurring investment' : 'Repeat this amount'}</div><div className="sp-row-sub">{isAsset ? 'Optional · regular top-ups to this asset' : 'Optional · adds to the balance on a schedule'}</div></div>
+                        <SpSwitch on={repeatOn} onToggle={() => { setRepeatOn(v => !v); setRepeat(r => ({ ...r, amount: r.amount || f.value, pay: r.payTouched ? r.pay : f.fundAccountId })); }} label="Repeat" />
+                    </div>
+                    {repeatOn && <SpRepeatPanel repeat={repeat} setRepeat={setRepeat} currency={f.currency} payOptions={isAsset ? payOptions : null} bankAccounts={bankAccounts} />}
+                </React.Fragment>
+            )}
+            <div className="sp-formcard">
+                <div className="sp-formblock">
+                    <div className="sp-formblock-label">Note <span style={{color: 'var(--sp-slate-400)', fontSize: '12px'}}>(optional)</span></div>
+                    <textarea className="sp-textarea" rows={2} style={{marginTop: '8px'}} value={f.notes} placeholder="e.g. Account number, platform, who manages it" onChange={e => set('notes', e.target.value)} />
+                </div>
+            </div>
+            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { setCurrency(c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
+        </Sheet>
+    );
+}
+
+function NetWorthTopUpSheet({ item, bankAccounts, schedule, activeView, onClose, onSaved }) {
+    const today = DateUtils.today();
+    const payOptions = spNwPayOptions(bankAccounts, item.currency, item.person);
+    const primary = bankAccounts.find(a => a.currency === item.currency && spNwFund(a) && a.isPrimary && (a.person || 'own') === (item.person || 'own'));
+    const [amount, setAmount] = useState('');
+    const [date, setDate] = useState(today);
+    const [source, setSource] = useState(primary ? String(primary.id) : '');
+    const [repeatOn, setRepeatOn] = useState(false);
+    const [repeat, setRepeat] = useState({ amount: '', freq: 'monthly', start: today, end: '', pay: primary ? String(primary.id) : '', payTouched: false });
+    const [error, setError] = useState('');
+    const pay = spNwPayResolve(source, bankAccounts);
+    const invested = item.originalAmount != null ? item.originalAmount : item.value;
+    const amt = parseFloat(amount) || 0;
+    const setSourceAndRepeat = (v) => { setSource(v); setRepeat(r => r.payTouched ? r : ({ ...r, pay: v })); };
+    const save = () => {
+        if (!amount || amt <= 0) { setError('Amount must be greater than 0'); return; }
+        if (!date || date > today) { setError('Pick a date up to today'); return; }
+        if (repeatOn && (!repeat.amount || parseFloat(repeat.amount) <= 0)) { setError('Enter the amount to repeat'); return; }
+        DataService._applyNetWorthIncrement({ netWorthItemId: item.id, amount: amt, accountId: pay.accountId }, date, { activeView, notes: 'Investment funding — logged for audit' });
+        if (repeatOn) {
+            DataService.addRecurring({
+                templateExpense: { netWorthItemId: item.id, netWorthItemName: item.name, amount: parseFloat(repeat.amount), currency: item.currency, accountId: spNwPayResolve(repeat.pay, bankAccounts).accountId, person: item.person || 'own' },
+                frequency: repeat.freq, endDate: repeat.end, type: item.type, startDate: repeat.start
+            });
+        }
+        onSaved(spFmtMoney(amt, item.currency) + ' added to ' + item.name);
+    };
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-plus"></i>Top up</button>
+        </React.Fragment>}>
+            <SpSheetHead icon="fas fa-plus" tint="#dcfce7" ink="#16a34a" title="Add more money" sub={item.name + ' · ' + item.currency} />
+            {error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className="sp-formrow"><span>Amount</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(item.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={amount} autoFocus onChange={e => { setAmount(e.target.value); setError(''); }} /></span></div>
+                <div className="sp-formrow"><span>Date</span><input type="date" value={date} max={today} onChange={e => setDate(e.target.value)} /></div>
+                <div className="sp-formblock">
+                    <div className="sp-formblock-label">Deduct from <span style={{color: 'var(--sp-slate-400)', fontSize: '12px'}}>(optional)</span></div>
+                    <select className="sp-fullselect" value={source} onChange={e => setSourceAndRepeat(e.target.value)}>
+                        {payOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                </div>
+            </div>
+            <div className="sp-hint" style={{fontSize: '12px', margin: '10px 4px 0'}}>Invested becomes <b style={{color: 'var(--sp-navy)'}}>{spFmtMoney(invested + amt, item.currency)}</b> · value <b style={{color: 'var(--sp-navy)'}}>{spFmtMoney(item.value + amt, item.currency)}</b>{pay.label ? ' · ' + (DataService.isCashFundingRef(pay.accountId) ? 'your cash in hand' : pay.label) + ' goes down by the same amount' : ' · nothing is deducted'}</div>
+            {schedule ? (
+                <div className="sp-alert sp-alert-info" style={{marginTop: '12px', fontWeight: 600}}><i className="fas fa-rotate"></i><span>Already repeating {spFmtMoney(schedule.templateExpense.amount, item.currency)} {schedule.frequency} · next {spLongDate(schedule.nextDue)}. Change it in Scheduled → Recurring.</span></div>
+            ) : (
+                <React.Fragment>
+                    <div className="sp-toggleline">
+                        <div><div className="sp-row-title">Make this recurring?</div><div className="sp-row-sub">Regular top-ups to this asset</div></div>
+                        <SpSwitch on={repeatOn} onToggle={() => { setRepeatOn(v => !v); setRepeat(r => ({ ...r, amount: r.amount || amount })); }} label="Repeat" />
+                    </div>
+                    {repeatOn && <SpRepeatPanel repeat={repeat} setRepeat={setRepeat} currency={item.currency} payOptions={payOptions} bankAccounts={bankAccounts} />}
+                </React.Fragment>
+            )}
+        </Sheet>
+    );
+}
+
+function NetWorthValueSheet({ item, activeView, onClose, onSaved }) {
+    const today = DateUtils.today();
+    const isAsset = item.type === 'asset';
+    const [value, setValue] = useState(String(item.value));
+    const [date, setDate] = useState(today);
+    const [error, setError] = useState('');
+    const base = item.originalAmount != null ? item.originalAmount : item.value;
+    const v = parseFloat(value);
+    const valid = !isNaN(v) && (isAsset ? v > 0 : v >= 0);
+    const recent = (item.history || []).filter(h => h.type === (isAsset ? 'value' : 'balance')).slice(-3).reverse();
+    const pctOf = (a, b) => b ? Math.round(((a - b) / b) * 1000) / 10 : 0;
+    const tone = (good) => good ? { bg: '#dcfce7', ink: '#15803d' } : { bg: '#ffe4e6', ink: '#be123c' };
+    const save = () => {
+        if (!valid) { setError(isAsset ? 'Value must be greater than 0' : 'Enter the outstanding balance (0 or more)'); return; }
+        if (!date || date > today) { setError('Pick a date up to today'); return; }
+        DataService.recordNetWorthValuation(item.id, v, date, activeView);
+        onSaved(item.name + (isAsset ? ' valued at ' : ' balance set to ') + spFmtMoney(v, item.currency));
+    };
+    const vsBase = valid ? v - base : 0, vsLast = valid ? v - item.value : 0;
+    const accent = isAsset ? { tint: '#dbeafe', ink: '#2563eb', icon: 'fas fa-chart-line' } : { tint: '#ede9fe', ink: '#7c3aed', icon: 'fas fa-scale-balanced' };
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{isAsset ? 'Save value' : 'Save balance'}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon={accent.icon} tint={accent.tint} ink={accent.ink} title={isAsset ? 'Update value' : 'Update balance'} sub={item.name + ' · ' + item.currency} />
+            {error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
+            <div className="sp-nwtiles">
+                <div><span>{isAsset ? 'Total invested' : 'Originally borrowed'}</span><b>{spFmtMoney(base, item.currency)}</b></div>
+                <div><span>{isAsset ? 'Last value' : 'Owed ' + (item.valuedOn ? 'on ' + spShortDate(item.valuedOn) : 'now')}</span><b>{spFmtMoney(item.value, item.currency)}</b></div>
+            </div>
+            <div className="sp-formcard">
+                <div className="sp-formrow"><span>{isAsset ? 'Current value' : 'Outstanding balance'}</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(item.currency)}</span><input type="number" step="0.01" min="0" inputMode="decimal" value={value} autoFocus onChange={e => { setValue(e.target.value); setError(''); }} /></span></div>
+                <div className="sp-formrow"><span>{isAsset ? 'Valued on' : 'As of'}</span><input type="date" value={date} max={today} onChange={e => setDate(e.target.value)} /></div>
+            </div>
+            {valid && (
+                <div className="sp-nwtiles">
+                    {isAsset ? (
+                        <div style={{background: tone(vsBase >= 0).bg}}><span style={{color: tone(vsBase >= 0).ink}}>vs invested</span><b style={{color: tone(vsBase >= 0).ink}}>{vsBase >= 0 ? '+' : ''}{pctOf(v, base)}% · {vsBase >= 0 ? '+' : ''}{spFmtMoney(vsBase, item.currency)}</b></div>
+                    ) : (
+                        <div style={{background: tone(base - v >= 0).bg}}><span style={{color: tone(base - v >= 0).ink}}>Repaid so far</span><b style={{color: tone(base - v >= 0).ink}}>{spFmtMoney(base - v, item.currency)}{base > 0 ? ' · ' + Math.round(((base - v) / base) * 100) + '%' : ''}</b></div>
+                    )}
+                    <div style={{background: tone(isAsset ? vsLast >= 0 : vsLast <= 0).bg}}><span style={{color: tone(isAsset ? vsLast >= 0 : vsLast <= 0).ink}}>vs last {isAsset ? 'value' : 'balance'}</span><b style={{color: tone(isAsset ? vsLast >= 0 : vsLast <= 0).ink}}>{vsLast >= 0 ? '+' : ''}{spFmtMoney(vsLast, item.currency)}</b></div>
+                </div>
+            )}
+            {recent.length > 0 && (
+                <React.Fragment>
+                    <div className="sp-formlabel">Recent {isAsset ? 'valuations' : 'balances'}</div>
+                    <div className="sp-formcard" style={{marginTop: '8px'}}>
+                        {recent.map(h => (
+                            <div key={h.id} className="sp-formrow"><span>{spLongDate(h.date)}</span><b>{spFmtMoney(h.value, item.currency)} <small style={{color: (h.value - h.from) >= 0 === isAsset ? '#15803d' : '#be123c', fontWeight: 700}}>{h.value - h.from >= 0 ? '+' : ''}{spFmtMoney(h.value - h.from, item.currency)}</small></b></div>
+                        ))}
+                    </div>
+                </React.Fragment>
+            )}
+        </Sheet>
+    );
+}
+
+// Cash is computed; both actions write the existing cash-correction record
+// (accountId 'cash-{person}|{currency}', never an Expense/Income). Add cash (approved change)
+// is the same record with a positive delta, for cash received outside an ATM withdrawal.
+function NetWorthCashSheet({ mode, target, activeView, defaultCurrency, onClose, onSaved }) {
+    const today = DateUtils.today();
+    const [person, setPerson] = useState(target.person || 'own');
+    const [currency, setCurrency] = useState(target.currency || defaultCurrency || 'GBP');
+    const [amount, setAmount] = useState('');
+    const [date, setDate] = useState(today);
+    const [notes, setNotes] = useState('');
+    const [error, setError] = useState('');
+    const [showCurrency, setShowCurrency] = useState(false);
+    const found = DataService.getCashWithdrawItems(null).find(i => i.person === (person || 'own') && i.currency === currency);
+    const current = found ? found.value : 0;
+    const isAdd = mode === 'add';
+    const save = () => {
+        const n = parseFloat(amount);
+        if (amount === '' || isNaN(n)) { setError(isAdd ? 'Enter the amount received' : 'Enter the actual cash amount'); return; }
+        if (isAdd && n <= 0) { setError('Amount must be greater than 0'); return; }
+        if (isAdd && (!date || date > today)) { setError('Pick a date up to today'); return; }
+        const delta = Math.round((isAdd ? n : n - current) * 100) / 100;
+        if (delta === 0) { setError('Already matches — no adjustment needed.'); return; }
+        const p = person || 'own';
+        DataService.addReconciliation({
+            accountId: 'cash-' + p + '|' + currency, person: p, date: isAdd ? date : today,
+            balanceBefore: current, delta, balanceAfter: Math.round((current + delta) * 100) / 100,
+            notes: notes || (isAdd ? 'Cash received' : ''), loggedAsTransaction: false, transactionType: null, transactionId: null
+        });
+        onSaved(isAdd ? spFmtMoney(n, currency) + ' cash added' : 'Cash set to ' + spFmtMoney(n, currency));
+    };
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{isAdd ? 'Add cash' : 'Save'}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon="fas fa-money-bill-wave" tint="#dcfce7" ink="#15803d" title={isAdd ? 'Add cash' : 'Update cash'} sub={isAdd ? 'Cash you received outside an ATM withdrawal' : 'Set the cash you actually have'} />
+            {error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                {!target.locked && activeView.length > 1 && <div className="sp-formrow"><span>Whose cash</span><PersonSelect value={person === 'own' ? '' : person} onChange={v => setPerson(v || 'own')} activeView={activeView} className="" ownLabel="You" /></div>}
+                <div className="sp-formrow">
+                    <span>Currency</span>
+                    {target.locked ? <b>{currency}</b> : <button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{currency}<i className="fas fa-chevron-down"></i></button>}
+                </div>
+                <div className="sp-formrow"><span>Cash now (computed)</span><b>{spFmtMoney(current, currency)}</b></div>
+                <div className="sp-formrow"><span>{isAdd ? 'Amount received' : 'Actual cash'}</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={amount} autoFocus onChange={e => { setAmount(e.target.value); setError(''); }} /></span></div>
+                {isAdd && <div className="sp-formrow"><span>Date</span><input type="date" value={date} max={today} onChange={e => setDate(e.target.value)} /></div>}
+                <div className="sp-formrow"><span>Note</span><input type="text" value={notes} placeholder={isAdd ? 'e.g. Birthday money' : 'Optional'} onChange={e => setNotes(e.target.value)} /></div>
+            </div>
+            <div className="sp-hint" style={{fontSize: '11px', margin: '8px 4px 0'}}>Saved as a cash correction (shown with balance reconciliations). It isn't counted as income or spending.</div>
+            {showCurrency && <CurrencySheet value={currency} onPick={c => { setCurrency(c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
+        </Sheet>
+    );
+}
+
 function NetWorth({ defaultCurrency, activeView, assetCategories = [], liabilityCategories = [], onUpdate }) {
     const [items, setItems] = useState(() => DataService.getNetWorthItems());
-    const [history, setHistory] = useState(() => DataService.getNetWorthHistory());
-    const [showForm, setShowForm] = useState(false);
-    const [editingItem, setEditingItem] = useState(null);
-    const [form, setForm] = useState({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: (assetCategories && assetCategories[0] && assetCategories[0].id) || '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
-    const [formErrors, setFormErrors] = useState({});
-    const [showDeleteModal, setShowDeleteModal] = useState(null);
-    const [showHistory, setShowHistory] = useState(true);
-    const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
-    const [valuationItem, setValuationItem] = useState(null);
-    const [valuationValue, setValuationValue] = useState('');
-    const [valuationError, setValuationError] = useState('');
-    const [bankAccounts] = useState(() => DataService.getBankAccounts());
-    const [addMoneyItem, setAddMoneyItem] = useState(null);
-    const [addMoneyForm, setAddMoneyForm] = useState({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
-    const [addMoneyErrors, setAddMoneyErrors] = useState({});
-    const [addMoneySubmitting, setAddMoneySubmitting] = useState(false);
-    // cashUpdateTarget.locked is true when opened from an existing Cash item card (person/
-    // currency fixed to that item) vs. the "Update Cash Balance" button (both editable, for
-    // setting a balance where no withdrawal history/item exists yet).
-    const [cashUpdateTarget, setCashUpdateTarget] = useState(null);
-    const [cashUpdateForm, setCashUpdateForm] = useState({ amount: '', notes: '' });
-    const [cashUpdateError, setCashUpdateError] = useState('');
+    const [tick, setTick] = useState(0);
+    const [bankAccounts, setBankAccounts] = useState(() => DataService.getBankAccounts());
+    const [openGroups, setOpenGroups] = useState({});
+    const [openItem, setOpenItem] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null);
+    const [sheet, setSheet] = useState(null); // { kind: 'add'|'edit'|'topup'|'value'|'cash', ... }
+    const [toast, setToast] = useState('');
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('networth').syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
+    const people = DataService.getPeople();
+    useEffect(() => { FilterMemory.save('networth', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3500); return () => clearTimeout(t); }, [toast]);
 
-    // Reseed the form's person whenever the active view changes (only when not mid-edit),
-    // so a freshly-opened Add form defaults to whoever's view is currently active.
-    useEffect(() => {
-        if (!editingItem) setForm(f => ({...f, person: resolveActiveViewValue(activeView)}));
-    }, [activeView]);
-
-    const CURRENCIES = CurrencyService.getAllCurrencies().map(c => c.code);
-    const categoriesForType = (type) => (type === 'asset' ? assetCategories : liabilityCategories) || [];
-
-    const reload = () => { setItems(DataService.getNetWorthItems()); setHistory(DataService.getNetWorthHistory()); };
+    const reload = () => { setItems(DataService.getNetWorthItems()); setBankAccounts(DataService.getBankAccounts()); setTick(t => t + 1); };
+    const done = (msg) => { setSheet(null); if (msg) setToast(msg); reload(); if (onUpdate) onUpdate(); };
 
     const syncConflicts = useMemo(() => SyncConflicts.read('networth'), [items]);
-    useEffect(() => { FilterMemory.save('networth', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
-    const netWorthConflictFieldLabels = { name: 'Name', value: 'Value', originalAmount: 'Original Amount', currency: 'Currency', categoryId: 'Category', subcategory: 'Subcategory', notes: 'Notes', person: 'Person', country: 'Country' };
+    const netWorthConflictFieldLabels = { name: 'Name', value: 'Value', originalAmount: 'Original Amount', currency: 'Currency', categoryId: 'Category', subcategory: 'Subcategory', notes: 'Notes', person: 'Person', country: 'Country', openDate: 'Opened', valuedOn: 'Valued on', history: 'History' };
     const conflictItem = showConflictDetail ? items.find(i => i.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const formatNetWorthConflictValue = (key, value) => {
-        if ((key === 'value' || key === 'originalAmount') && value !== undefined && value !== null) return fmt(value, (conflictItem && conflictItem.currency) || defaultCurrency);
-        if (key === 'categoryId') {
-            const cats = [...assetCategories, ...liabilityCategories];
-            const cat = cats.find(c => c.id === value);
-            return cat ? cat.name : (value ? String(value) : '—');
-        }
+        if ((key === 'value' || key === 'originalAmount') && value !== undefined && value !== null) return spFmtMoney(value, (conflictItem && conflictItem.currency) || defaultCurrency);
+        if (key === 'categoryId') { const cat = [...assetCategories, ...liabilityCategories].find(c => c.id === value); return cat ? cat.name : (value ? String(value) : '—'); }
+        if (key === 'history') return Array.isArray(value) ? value.length + ' entr' + (value.length === 1 ? 'y' : 'ies') : '—';
         return value === undefined || value === null || value === '' ? '—' : String(value);
     };
     const handleResolveConflict = (useCloud) => {
@@ -10760,930 +11236,245 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         DataService.updateNetWorthItem(itemId, updates, { activeView });
         SyncConflicts.dismiss('networth', itemId);
         setShowConflictDetail(null);
-        reload(); if (onUpdate) onUpdate();
+        done();
     };
 
     const convertToDefault = (value, currency) => CurrencyService.convertToDefaultSync(value, currency, defaultCurrency);
-
-    // Symbol-only, never the ISO code — Intl.NumberFormat's style:'currency' falls back to
-    // printing the raw code (e.g. "HUF 40.00") for currencies it has no dedicated symbol
-    // glyph for in this locale. CurrencyService.getCurrencySymbol always resolves to a
-    // symbol (worst case, a narrow/best-effort one), so the amount reads as £/€/Ft/etc.
-    // everywhere on this screen, not just for majors. Grouping/decimals done manually since
-    // we're no longer going through Intl's currency formatter.
-    const fmt = (amount, currency) => {
-        const symbol = CurrencyService.getCurrencySymbol(currency);
-        const num = Number(amount) || 0;
-        const sign = num < 0 ? '-' : '';
-        return `${sign}${symbol}${Math.abs(num).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    };
-
-    // Wallet: unlinked income/expenses + each active person's Primary account balance —
-    // deliberately excludes non-primary bank accounts (those show as their own Asset/
-    // Liability rows below) so nothing gets counted twice. Replaces the old blunt
-    // "Cash Flow" (all-time income − all-time expenses) now that bank-linked money has
-    // a more precise home.
-    const wallet = DataService.computeWallet(activeView, defaultCurrency);
-
-    // Debts "I Owe" → shown as liabilities, filtered by the global active view
+    const walletParts = DataService.computeWalletParts(activeView, defaultCurrency);
+    const wallet = walletParts.unlinkedIncome - walletParts.unlinkedExpenses + walletParts.primaryBalances;
     const debtLiabilities = DataService.getDebts().filter(d => d.direction === 'owe' && !d.isSettled && (matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v))));
+    const storedItems = items.filter(i => matchesActiveView(i.person, activeView));
+    const bankAssetItems = DataService.getBankAssetItems(activeView);
+    const bankLiabilityItems = DataService.getBankLiabilityItems(activeView);
+    const cashItems = DataService.getCashWithdrawItems(activeView);
+    // Primary accounts are display-only here: their balance is already in "In wallet".
+    const primaryWalletItems = DataService.getPrimaryWalletBankItems(activeView);
+    const counted = [...storedItems, ...bankAssetItems, ...bankLiabilityItems, ...cashItems];
+    const schedules = DataService.getRecurring();
+    const today = DateUtils.today();
+    const scheduleFor = (id) => schedules.find(s => (s.type === 'asset' || s.type === 'liability') && s.templateExpense && s.templateExpense.netWorthItemId === id && s.isActive && !(s.endDate && today > s.endDate)) || null;
 
-    // Filter items by the global active view, merged with read-only rows computed live from
-    // linked bank accounts (see DataService.getBankAssetItems/getBankLiabilityItems) so they
-    // flow through the same totals/grouping/rendering as manually-added items.
-    const visibleItems = [
-        ...items.filter(i => matchesActiveView(i.person, activeView)),
-        ...DataService.getBankAssetItems(activeView),
-        ...DataService.getBankLiabilityItems(activeView),
-        ...DataService.getCashWithdrawItems(activeView)
-    ];
-
-    // Whether any figure folded into the totals below actually went through a currency
-    // conversion — those conversions always use CurrencyService.fallbackRates (a fixed,
-    // hardcoded table), never a live rate, so this drives a visible disclaimer rather than
-    // letting cross-currency totals look like precise, current numbers.
-    const hasForeignCurrency = bankAccounts.some(a => a.currency !== defaultCurrency)
-        || visibleItems.some(i => i.currency !== defaultCurrency)
-        || debtLiabilities.some(d => d.currency !== defaultCurrency);
-
-    const totalAssets = visibleItems.filter(i => i.type === 'asset').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-    const totalManualLiabilities = visibleItems.filter(i => i.type === 'liability').reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-    const totalDebtLiabilities = debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
-    const totalLiabilities = totalManualLiabilities + totalDebtLiabilities;
-    // Net Worth = Total Assets + Wallet − Total Liabilities
-    const netWorth = totalAssets + wallet - totalLiabilities;
-
-    // Per-category Total Assets breakdown for the summary tiles — matches default asset
-    // category names case-insensitively (categories are user-renameable, so this degrades
-    // gracefully: a renamed/deleted category's items just fall into "Other Asset" below).
-    const findAssetCatId = (name) => {
-        const c = assetCategories.find(c => c.name.trim().toLowerCase() === name.toLowerCase());
-        return c ? c.id : null;
-    };
-    const sumAssetsInCat = (catId) => catId == null ? 0 :
-        visibleItems.filter(i => i.type === 'asset' && i.categoryId === catId)
-            .reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-
-    const savingsValue = sumAssetsInCat(findAssetCatId('Bank & Savings'));
-    const investmentValue = sumAssetsInCat(findAssetCatId('Investment'));
-    const propertyValue = sumAssetsInCat(findAssetCatId('Property'));
-    const pensionValue = sumAssetsInCat(findAssetCatId('Pension & Retirement'));
-    // Remainder, not a name-matched sum — guarantees the tiles always foot to totalAssets
-    // and automatically covers "Vehicles & Other Asset" plus any user-added categories.
-    // Rounded to cents so floating-point subtraction of near-equal sums (e.g. an exact
-    // wash to zero) can't leave a residue like -1e-11 that displays as "-£0.00" in red.
-    const otherAssetValueRaw = totalAssets - savingsValue - investmentValue - propertyValue - pensionValue;
-    const otherAssetValue = Math.round(otherAssetValueRaw * 100) / 100 === 0 ? 0 : otherAssetValueRaw;
-
-    const openAddForm = () => {
-        setEditingItem(null);
-        const firstAssetCat = assetCategories && assetCategories[0];
-        setForm({ name: '', value: '', currency: defaultCurrency || 'GBP', type: 'asset', categoryId: firstAssetCat ? firstAssetCat.id : '', subcategory: '', notes: '', person: resolveActiveViewValue(activeView), country: defaultCountryForCurrency(defaultCurrency || 'GBP'), fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
-        setFormErrors({});
-        setShowForm(true);
-    };
-
-    const openEditForm = (item) => {
-        setEditingItem(item);
-        setForm({ name: item.name, value: String(item.value), currency: item.currency, type: item.type, categoryId: item.categoryId, subcategory: item.subcategory || '', notes: item.notes || '', person: item.person || 'own', country: item.country || '', fundAccountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
-        setFormErrors({});
-        setShowForm(true);
-    };
-
-    const handleTypeChange = (type) => {
-        const firstCat = categoriesForType(type)[0];
-        setForm(f => ({ ...f, type, categoryId: firstCat ? firstCat.id : '', subcategory: '', fundAccountId: '' }));
-    };
-
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        if (!form.name.trim()) errors.name = 'Name is required';
-        if (!form.value || parseFloat(form.value) <= 0) errors.value = 'Value must be greater than 0';
-        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-        if (editingItem) {
-            // Base-amount correction (typo/data-entry fix) — not a real valuation movement,
-            // so it must not show up as a gain/loss in the history "Change" column.
-            DataService.updateNetWorthItem(editingItem.id, { name: form.name.trim(), value: parseFloat(form.value), currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own', country: form.country || '' }, { skipHistory: true });
-        } else {
-            const newItem = DataService.addNetWorthItem({ name: form.name.trim(), value: form.value, currency: form.currency, type: form.type, categoryId: parseInt(form.categoryId), subcategory: form.subcategory || '', notes: form.notes, person: form.person || 'own', country: form.country || '' }, activeView);
-            if (form.type === 'asset' && form.fundAccountId) {
-                const account = bankAccounts.find(a => a.id === parseInt(form.fundAccountId));
-                if (account) {
-                    const amount = parseFloat(form.value);
-                    // Funded via the Transfer ledger (not an Expense) — this is an investment
-                    // move, not spending; it's logged in Summary's Asset Funding table instead.
-                    DataService.addTransfer({
-                        date: DateUtils.today(),
-                        fromAccountId: account.id, toAccountId: null,
-                        fromAmount: amount, toAmount: amount,
-                        isOverseas: false, conversionRate: 1, fee: 0,
-                        feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
-                        toAssetId: newItem.id, toAssetName: newItem.name,
-                        notes: 'Investment funding — logged for audit'
-                    });
-                }
-            }
-            if (form.isRecurring) {
-                DataService.addRecurring({
-                    templateExpense: { netWorthItemId: newItem.id, netWorthItemName: newItem.name, amount: parseFloat(form.value), currency: form.currency, accountId: form.type === 'asset' && form.fundAccountId ? parseInt(form.fundAccountId) : '', person: form.person || 'own' },
-                    frequency: form.recurringFreq,
-                    endDate: form.recurringEndDate,
-                    type: form.type,
-                    startDate: form.recurringStartDate
-                });
-            }
-        }
-        setShowForm(false);
-        setEditingItem(null);
-        // reload() refreshes this screen's own items/history state; onUpdate() refreshes
-        // the top-level netWorthItems state Export/Bulk Upload read from — both are needed,
-        // since neither one covers what the other does (a real gap: before Export/Import
-        // existed, only this screen ever read Net Worth data, so onUpdate() being skipped
-        // here was invisible).
-        reload();
-        if (onUpdate) onUpdate();
-    };
-
-    const handleDelete = (id) => { DataService.deleteNetWorthItem(id, activeView); setShowDeleteModal(null); reload(); if (onUpdate) onUpdate(); };
-
-    const openValuationForm = (item) => { setValuationItem(item); setValuationValue(String(item.value)); setValuationError(''); };
-
-    const handleValuationSubmit = (e) => {
-        e.preventDefault();
-        if (!valuationValue || parseFloat(valuationValue) <= 0) { setValuationError('Value must be greater than 0'); return; }
-        // A real valuation update — logged to history so the change shows as a gain/loss.
-        DataService.updateNetWorthItem(valuationItem.id, { value: parseFloat(valuationValue) }, { activeView });
-        setValuationItem(null);
-        setValuationValue('');
-        reload();
-        if (onUpdate) onUpdate();
-    };
-
-    const openAddMoneyForm = (item) => { setAddMoneyItem(item); setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' }); setAddMoneyErrors({}); };
-
-    const handleAddMoneySubmit = async (e) => {
-        e.preventDefault();
-        const errors = {};
-        const amount = parseFloat(addMoneyForm.amount);
-        if (!addMoneyForm.amount || amount <= 0) errors.amount = 'Amount must be greater than 0';
-        if (Object.keys(errors).length > 0) { setAddMoneyErrors(errors); return; }
-        setAddMoneySubmitting(true);
-        try {
-            const currentOriginal = addMoneyItem.originalAmount != null ? addMoneyItem.originalAmount : addMoneyItem.value;
-            DataService.updateNetWorthItem(addMoneyItem.id, { originalAmount: currentOriginal + amount, value: addMoneyItem.value + amount }, { activeView });
-            if (addMoneyForm.accountId) {
-                const account = bankAccounts.find(a => a.id === parseInt(addMoneyForm.accountId));
-                if (account) {
-                    DataService.addTransfer({
-                        date: DateUtils.today(),
-                        fromAccountId: account.id, toAccountId: null,
-                        fromAmount: amount, toAmount: amount,
-                        isOverseas: false, conversionRate: 1, fee: 0,
-                        feeExpenseId: null, principalExpenseId: null, recipientIncomeId: null,
-                        toAssetId: addMoneyItem.id, toAssetName: addMoneyItem.name,
-                        notes: 'Investment funding — logged for audit'
-                    });
-                }
-            }
-            if (addMoneyForm.isRecurring) {
-                DataService.addRecurring({
-                    templateExpense: { netWorthItemId: addMoneyItem.id, netWorthItemName: addMoneyItem.name, amount, currency: addMoneyItem.currency, accountId: addMoneyForm.accountId ? parseInt(addMoneyForm.accountId) : '', person: addMoneyItem.person || 'own' },
-                    frequency: addMoneyForm.recurringFreq,
-                    endDate: addMoneyForm.recurringEndDate,
-                    type: addMoneyItem.type,
-                    startDate: addMoneyForm.recurringStartDate
-                });
-            }
-            setAddMoneyItem(null);
-            setAddMoneyForm({ amount: '', accountId: '', isRecurring: false, recurringFreq: 'monthly', recurringStartDate: DateUtils.today(), recurringEndDate: '' });
-            setAddMoneyErrors({});
-            reload();
-            if (onUpdate) onUpdate();
-        } finally {
-            setAddMoneySubmitting(false);
-        }
-    };
-
-    // person/currency are fixed (not user-editable in the modal) when opened from an existing
-    // Cash item card; both are editable when opened via "Update Cash Balance" for a person/
-    // currency with no computed item yet — see cashUpdateTarget.locked.
-    const openCashUpdate = (person, currency, locked) => {
-        setCashUpdateTarget({ person: person || '', currency: currency || defaultCurrency || 'GBP', locked: !!locked });
-        setCashUpdateForm({ amount: '', notes: '' });
-        setCashUpdateError('');
-    };
-
-    const cashUpdateCurrentValue = (() => {
-        if (!cashUpdateTarget) return 0;
-        const found = DataService.getCashWithdrawItems(null).find(i => i.person === (cashUpdateTarget.person || 'own') && i.currency === cashUpdateTarget.currency);
-        return found ? found.value : 0;
+    // Hero: one row per country + currency, in the original currency (never converted).
+    const countryRows = (() => {
+        const map = {};
+        const add = (country, currency, type, value) => {
+            const k = (country || '') + '|' + currency;
+            if (!map[k]) map[k] = { country: country || '', currency, assets: 0, owed: 0 };
+            if (type === 'asset') map[k].assets += value; else map[k].owed += value;
+        };
+        counted.forEach(i => add(i.country, i.currency, i.type, i.value));
+        debtLiabilities.forEach(d => add('', d.currency, 'liability', d.amount));
+        return Object.values(map).map(r => ({ ...r, net: r.assets - r.owed })).sort((a, b) => convertToDefault(b.net, b.currency) - convertToDefault(a.net, a.currency));
     })();
+    const hasForeign = [...counted, ...primaryWalletItems].some(i => i.currency !== defaultCurrency);
 
-    const handleCashUpdateSubmit = (e) => {
-        e.preventDefault();
-        const actual = parseFloat(cashUpdateForm.amount);
-        if (cashUpdateForm.amount === '' || isNaN(actual)) { setCashUpdateError('Enter the actual cash amount'); return; }
-        const balanceBefore = cashUpdateCurrentValue;
-        const delta = Math.round((actual - balanceBefore) * 100) / 100;
-        if (delta === 0) { setCashUpdateError('Already matches — no adjustment needed.'); return; }
-        const person = cashUpdateTarget.person || 'own';
-        // Always unlogged — a Cash balance correction must never create an Expense/Income,
-        // unlike the bank reconcile form's optional "log as transaction" checkbox.
-        DataService.addReconciliation({
-            accountId: 'cash-' + person + '|' + cashUpdateTarget.currency,
-            person, date: DateUtils.today(),
-            balanceBefore, delta, balanceAfter: actual,
-            notes: cashUpdateForm.notes || '',
-            loggedAsTransaction: false, transactionType: null, transactionId: null
-        });
-        setCashUpdateTarget(null);
-        setCashUpdateForm({ amount: '', notes: '' });
-        setCashUpdateError('');
-        reload();
-        if (onUpdate) onUpdate();
-    };
-
-    const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {});
-    const assetItems = visibleItems.filter(i => i.type === 'asset');
-    const liabilityItems = visibleItems.filter(i => i.type === 'liability');
-    // Sync-conflict filter only narrows what's *listed* below — never the totals above,
-    // which are always computed from the unfiltered assetItems/liabilityItems/visibleItems.
-    const displayAssetItems = filterSyncConflict ? assetItems.filter(i => !!syncConflicts[String(i.id)]) : assetItems;
-    const displayLiabilityItems = filterSyncConflict ? liabilityItems.filter(i => !!syncConflicts[String(i.id)]) : liabilityItems;
-    const assetsByCat = groupBy(displayAssetItems, 'categoryId');
-    const liabsByCat = groupBy(displayLiabilityItems, 'categoryId');
-    // Display-only — see getPrimaryWalletBankItems's comment. Never fold into assetItems/totalAssets.
-    const primaryWalletItems = filterSyncConflict ? [] : DataService.getPrimaryWalletBankItems(activeView);
-    const primaryWalletItemsByCat = groupBy(primaryWalletItems, 'categoryId');
-
-    // Country breakdown: a new categorization axis, separate from totalAssets/netWorth, so
-    // primaryWalletItems (normally excluded elsewhere to avoid double-counting into Wallet) is
-    // safe to include here — it's real money in a real country. Debts have no country field
-    // (out of scope) so "I Owe" liabilities aren't represented here. No currency conversion —
-    // summed per country per currency, using the same fmt() every item card already uses.
-    const countryBreakdown = {};
-    [...visibleItems, ...primaryWalletItems].forEach(item => {
-        const country = item.country || 'Not specified';
-        if (!countryBreakdown[country]) countryBreakdown[country] = {};
-        if (!countryBreakdown[country][item.currency]) countryBreakdown[country][item.currency] = { asset: 0, liability: 0 };
-        countryBreakdown[country][item.currency][item.type] += item.value;
-    });
-    const countryNames = Object.keys(countryBreakdown).sort((a, b) => {
-        if (a === 'Not specified') return 1;
-        if (b === 'Not specified') return -1;
-        return a.localeCompare(b);
-    });
-
-    // Only show snapshots taken under a view that overlaps the currently active one — same
-    // pattern as debts' createdInView — so switching person doesn't surface the other
-    // person's net-worth movements. Legacy entries with no view tag predate per-person
-    // tracking and were combined totals across everyone, so they can't be truthfully
-    // attributed to any one person — treat them as belonging to the account owner ('own')
-    // rather than showing them under every person's view, which produced the same
-    // mismatched-jump symptom this fix was meant to eliminate.
-    const sortedHistory = [...history].filter(entry => entry.view ? entry.view.some(v => activeView.includes(v)) : activeView.includes('own')).reverse();
-
-    // Collapse the (already newest-first) sortedHistory into one row per calendar month, capped
-    // to the 6 most recent months. The first entry seen per month is its most recent snapshot —
-    // i.e. that month's ending balance — so diffing adjacent groups' netWorth below telescopes
-    // to the sum of that month's individual changes, without a separate summing pass.
-    const monthlyHistory = (() => {
+    const conflictOnly = (list) => filterSyncConflict ? list.filter(i => !!syncConflicts[String(i.id)]) : list;
+    const buildGroups = (type) => {
+        const cats = type === 'asset' ? assetCategories : liabilityCategories;
+        const members = [...(type === 'asset' ? [...storedItems.filter(i => i.type === 'asset'), ...bankAssetItems, ...cashItems] : [...storedItems.filter(i => i.type === 'liability'), ...bankLiabilityItems])];
+        const display = type === 'asset' ? primaryWalletItems : [];
         const groups = [];
-        const seen = new Set();
-        for (const entry of sortedHistory) {
-            const key = entry.date.slice(0, 7); // YYYY-MM
-            if (!seen.has(key)) { seen.add(key); groups.push({ key, date: entry.date, netWorth: entry.netWorth }); }
-            if (groups.length === 6) break;
+        const other = { key: type + '-other', name: type === 'asset' ? 'Other assets' : 'Other liabilities', look: { icon: 'fas fa-shapes', tint: '#f1f5f9', ink: '#475569' }, items: [], extra: [] };
+        cats.forEach(c => {
+            const its = conflictOnly(members.filter(i => i.categoryId === c.id));
+            const ex = filterSyncConflict ? [] : display.filter(i => i.categoryId === c.id);
+            if (!its.length && !ex.length) return;
+            // System categories get their own group, and so does any category holding computed rows (e.g. Cash).
+            if (c.locked || its.some(i => i.isBankAccount) || ex.length) groups.push({ key: 'c' + c.id, name: c.name, look: spNetWorthCatLook(c, type), items: its, extra: ex });
+            else { other.items.push(...its.map(i => ({ ...i, _catName: c.name }))); other.extra.push(...ex); }
+        });
+        const orphans = conflictOnly(members.filter(i => !cats.some(c => c.id === i.categoryId)));
+        if (orphans.length) other.items.push(...orphans);
+        if (other.items.length || other.extra.length) groups.push(other);
+        if (type === 'liability' && debtLiabilities.length && !filterSyncConflict) {
+            groups.push({ key: 'debts', name: 'Debts I owe', look: { icon: 'fas fa-handshake', tint: '#fef3c7', ink: '#b45309' }, items: debtLiabilities.map(d => ({ id: 'debt-' + d.id, name: d.counterparty, value: d.amount, currency: d.currency, type: 'liability', person: d.person, country: '', isDebt: true, debt: d })), extra: [] });
         }
-        return groups;
-    })();
+        return groups.map(g => {
+            const totals = {};
+            g.items.forEach(i => { const k = (i.country || '') + '|' + i.currency; totals[k] = totals[k] || { country: i.country || '', currency: i.currency, value: 0 }; totals[k].value += i.value; });
+            return { ...g, totals: Object.values(totals) };
+        });
+    };
+    const assetGroups = buildGroups('asset');
+    const liabilityGroups = buildGroups('liability');
+    const sumConverted = (list) => list.reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
+    const totalAssetsConv = sumConverted(counted.filter(i => i.type === 'asset'));
+    const totalLiabConv = sumConverted(counted.filter(i => i.type === 'liability')) + debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
+    const fmt0 = (v) => spFmtMoney(v, defaultCurrency, 0);
 
-    const catColor = { Cash:'#0dcaf0', Investments:'#6f42c1', Property:'#198754', Vehicle:'#fd7e14', Other:'#6c757d', Mortgage:'#dc3545', Loan:'#e83e8c', 'Credit Card':'#fd7e14' };
+    const itemKind = (i) => i.isDebt ? 'debt' : i.isPrimaryWallet ? 'primary' : i.isComputedCash ? 'cash' : i.isBankAccount ? 'bank' : 'stored';
+    const deleteText = (item) => {
+        if (item.type === 'liability') return 'Delete ' + item.name + '? Its balance history goes too. This can\'t be undone.';
+        const sch = scheduleFor(item.id);
+        return 'Delete ' + item.name + '? Its valuation history' + (sch ? ' and the ' + spFmtMoney(sch.templateExpense.amount, item.currency) + ' ' + sch.frequency + ' repeat in Scheduled' : '') + ' will be removed. Top-ups already logged in Accounts stay. This can\'t be undone.';
+    };
+    const doDelete = (item) => { DataService.deleteNetWorthItem(item.id, activeView); setPendingDelete(null); setOpenItem(null); done(item.name + ' deleted'); };
 
-    // 'own' stores as the literal string 'own' on Net Worth items/bank accounts (unlike
-    // expenses/income, which use '' for own) — normalize both to a friendly "Me" label.
-    const personDisplayLabel = (p) => (!p || p === 'own') ? 'Me' : p;
-
-    const renderItemCard = (item, colorClass) => (
-        <div key={item.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid ' + (item.isPrimaryWallet ? '#ffc107' : '#e9ecef'),background:item.isPrimaryWallet ? '#fff3cd' : '#fff',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
-            <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{item.name}{item.isPrimaryWallet && <span style={{marginLeft:'0.35rem',color:'#ffc107',fontSize:'0.8rem'}} title="Primary account">★</span>}{item.subcategory && <span style={{fontWeight:400,color:'#6c757d'}}> · {item.subcategory}</span>}{activeView.length > 1 && <span className="person-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={personDisplayLabel(item.person)}>{personDisplayLabel(item.person)}</span>}{item.country && <span className="country-badge" style={{marginLeft:'0.4rem',display:'inline-block',verticalAlign:'middle'}} title={item.country}><i className="fas fa-map-marker-alt"></i>{item.country}</span>}{!item.isPrimaryWallet && !item.isComputedCash && !item.isBankAccount && <SyncConflictBadge conflict={syncConflicts[String(item.id)]} onClick={() => setShowConflictDetail(item.id)} />}</div>
-                {/* A linked account can compute negative (overdrawn) — the asset total still
-                    correctly negates by the full amount (unchanged), but showing e.g. "-£50"
-                    as the headline reads as if that's cash on hand. Show £0 with the shortfall
-                    called out separately instead, banking-statement style. */}
-                {item.isBankAccount && item.type === 'asset' && item.value < 0 ? (
-                    <div style={{fontSize:'0.92rem',fontWeight:700,color:'#dc3545'}}>{fmt(0, item.currency)} <span style={{fontSize:'0.8rem',fontWeight:600}}>(Overdraft {fmt(Math.abs(item.value), item.currency)})</span></div>
-                ) : (
-                    <div style={{fontSize:'0.92rem',fontWeight:700,color:item.value < 0 ? '#dc3545' : colorClass}}>{fmt(item.value, item.currency)}</div>
-                )}
-                {item.currency !== defaultCurrency && (
-                    item.isBankAccount && item.type === 'asset' && item.value < 0 ? (
-                        <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(0, defaultCurrency)} (Overdraft {fmt(Math.abs(convertToDefault(item.value, item.currency)), defaultCurrency)})</div>
-                    ) : (
-                        <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(convertToDefault(item.value, item.currency), defaultCurrency)}</div>
-                    )
-                )}
-                {item.type === 'asset' && !item.isBankAccount && !item.isPrimaryWallet && item.originalAmount != null && (() => {
-                    const original = item.originalAmount;
-                    const pnlPct = original > 0 ? ((item.value - original) / original) * 100 : null;
-                    return (
-                        <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>
-                            Original: {fmt(original, item.currency)}
-                            {pnlPct !== null && (
-                                <span style={{marginLeft:'6px',fontWeight:600,color: pnlPct > 0 ? '#198754' : pnlPct < 0 ? '#dc3545' : '#6c757d'}}>
-                                    {pnlPct > 0 ? '+' : ''}{pnlPct.toFixed(1)}%
-                                </span>
-                            )}
-                        </div>
-                    );
-                })()}
-                {item.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{item.notes}</div>}
-            </div>
-            {item.isPrimaryWallet ? (
-                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="This account's balance is already included in the Wallet total above — not added again to Total Assets">
-                    <i className="fas fa-wallet me-1"></i>In Wallet
-                </div>
-            ) : item.isComputedCash ? (
-                <button type="button" className="btn btn-sm btn-outline-secondary" style={{fontSize:'0.68rem',padding:'2px 7px',flexShrink:0}} title="Computed from your cash withdrawals minus expenses marked Paid by Cash — click to correct it" onClick={() => openCashUpdate(item.person, item.currency, true)}>
-                    <i className="fas fa-link me-1"></i>Computed
+    const renderItem = (item, groupKey) => {
+        const kind = itemKind(item);
+        const isOpen = openItem === groupKey + ':' + item.id;
+        const isAsset = item.type === 'asset';
+        const invested = item.originalAmount != null ? item.originalAmount : null;
+        const pct = kind === 'stored' && isAsset && invested > 0 ? Math.round(((item.value - invested) / invested) * 1000) / 10 : null;
+        const chip = pct === null ? null : pct > 0 ? ['#dcfce7', '#15803d', '+' + pct + '%'] : pct < 0 ? ['#ffe4e6', '#be123c', pct + '%'] : ['#f1f5f9', '#64748b', '0%'];
+        const overdrawn = kind === 'bank' && isAsset && item.value < 0;
+        const negCash = kind === 'cash' && item.value < 0;
+        const meta = kind === 'debt' ? ['From Scheduled → Debts', item.debt.dueDate ? 'due ' + spLongDate(item.debt.dueDate) : '']
+            : kind === 'primary' ? ['Primary account', 'In wallet']
+            : kind === 'bank' ? ['Linked account', item.subcategory]
+            : kind === 'cash' ? ['Cash in hand']
+            : [item._catName, item.subcategory, item.country, item.openDate ? 'Opened ' + spLongDate(item.openDate) : ''];
+        const conflict = kind === 'stored' && syncConflicts[String(item.id)];
+        const cfOpen = showConflictDetail === item.id;
+        const sch = kind === 'stored' ? scheduleFor(item.id) : null;
+        const topups = (item.history || []).filter(h => h.type === 'topup').length;
+        return (
+            <div key={item.id} className="sp-nwitem">
+                <button type="button" className="sp-nwitem-row" onClick={() => { setOpenItem(isOpen ? null : groupKey + ':' + item.id); setPendingDelete(null); }}>
+                    <span className="sp-nwitem-main">
+                        <span className="sp-schedtitle">
+                            <span>{item.name}</span>
+                            {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></span>}
+                            {activeView.length > 1 && spOwnerChip(item.person, people)}
+                            {sch && <i className="fas fa-rotate" style={{color: '#7c3aed', fontSize: '10px', flexShrink: 0}} title="Recurring investment"></i>}
+                        </span>
+                        <span className="sp-nwitem-meta sp-nwitem-metaline">{meta.filter(Boolean).join(' · ') || '—'}</span>
+                        {negCash && <span className="sp-kindtag" style={{background: '#fef3c7', color: '#92400e', marginTop: '4px'}}>Spent more than withdrawn</span>}
+                    </span>
+                    <span className="sp-schedright">
+                        <span className="sp-schedamt" style={{color: !isAsset || negCash || overdrawn ? '#e11d48' : undefined}}>{overdrawn ? spFmtMoney(0, item.currency) : (!isAsset ? '−' : '') + spFmtMoney(isAsset ? item.value : Math.abs(item.value), item.currency)}</span>
+                        {overdrawn && <span className="sp-schedsub" style={{color: '#e11d48'}}>Overdraft {spFmtMoney(Math.abs(item.value), item.currency)}</span>}
+                        {chip && <span className="sp-kindtag" style={{background: chip[0], color: chip[1], marginTop: '4px'}}>{chip[2]}</span>}
+                        {item.currency !== defaultCurrency && <span className="sp-schedsub">≈ {spFmtMoney(convertToDefault(item.value, item.currency), defaultCurrency)}</span>}
+                    </span>
+                    <i className={'fas fa-chevron-' + (isOpen ? 'up' : 'down') + ' sp-catchev'}></i>
                 </button>
-            ) : item.isBankAccount ? (
-                <div style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,textAlign:'right',maxWidth:'90px'}} title="Computed from this account's linked transactions — edit its Opening Amount in Settings → Bank Accounts to adjust">
-                    <i className="fas fa-link me-1"></i>Linked account
-                </div>
-            ) : (
-                <div style={{display:'flex',gap:'4px',flexShrink:0}}>
-                    {item.type === 'asset' && (
-                        <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Add money" onClick={() => openAddMoneyForm(item)}>
-                            <i className="fas fa-piggy-bank"></i>
-                        </button>
-                    )}
-                    <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Update valuation (logs a change)" onClick={() => openValuationForm(item)}>
-                        <i className="fas fa-chart-line"></i>
-                    </button>
-                    <button type="button" className="btn btn-sm btn-outline-primary" style={{fontSize:'0.7rem',padding:'2px 7px'}} title="Edit base amount (no change logged)" onClick={() => openEditForm(item)}>
-                        <i className="fas fa-pencil-alt"></i>
-                    </button>
-                    <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(item.id)}>
-                        <i className="fas fa-trash"></i>
-                    </button>
-                </div>
-            )}
-        </div>
-    );
+                {cfOpen && conflictItem && conflictSnapshot && (
+                    <div style={{padding: '0 0 10px'}}>
+                        <ConflictCompare localRecord={conflictItem} cloudSnapshot={conflictSnapshot.cloudSnapshot} detectedAt={conflictSnapshot.detectedAt} fieldLabels={netWorthConflictFieldLabels} formatValue={formatNetWorthConflictValue} onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
+                    </div>
+                )}
+                {isOpen && (
+                    <div className="sp-nwitem-open">
+                        {item.notes && <div className="sp-nwnote">{item.notes}</div>}
+                        {kind === 'stored' && isAsset && (
+                            <div className="sp-nwdetail">
+                                Invested <b>{spFmtMoney(invested != null ? invested : item.value, item.currency)}</b>
+                                {invested != null && <React.Fragment> · {item.value - invested >= 0 ? 'Gain' : 'Loss'} <b style={{color: item.value - invested >= 0 ? '#15803d' : '#be123c'}}>{spFmtMoney(Math.abs(item.value - invested), item.currency)}</b></React.Fragment>}
+                                {item.valuedOn && <React.Fragment> · Last valued {spLongDate(item.valuedOn)}</React.Fragment>}
+                                {topups > 0 && <React.Fragment> · {topups} top-up{topups === 1 ? '' : 's'} recorded</React.Fragment>}
+                                {sch && <React.Fragment> · Repeats {spFmtMoney(sch.templateExpense.amount, item.currency)} {sch.frequency}, next {spLongDate(sch.nextDue)}</React.Fragment>}
+                            </div>
+                        )}
+                        {kind === 'stored' && !isAsset && (
+                            <div className="sp-nwdetail">
+                                Originally <b>{spFmtMoney(invested != null ? invested : item.value, item.currency)}</b>
+                                {invested != null && invested - item.value > 0 && <React.Fragment> · Repaid <b style={{color: '#15803d'}}>{spFmtMoney(invested - item.value, item.currency)}</b></React.Fragment>}
+                                {item.valuedOn && <React.Fragment> · As of {spLongDate(item.valuedOn)}</React.Fragment>}
+                                {sch && <React.Fragment> · Repeats {spFmtMoney(sch.templateExpense.amount, item.currency)} {sch.frequency}</React.Fragment>}
+                            </div>
+                        )}
+                        {kind === 'bank' && <div className="sp-nwdetail">Worked out from this account's linked transactions. Adjust it with Reconcile in Settings → Bank Accounts.</div>}
+                        {kind === 'primary' && <div className="sp-nwdetail">Your primary account. Its balance is counted in "In wallet" above, so it isn't added again here.</div>}
+                        {kind === 'cash' && <div className="sp-nwdetail">Cash withdrawals minus cash spending, plus any cash corrections.</div>}
+                        {kind === 'debt' && <div className="sp-nwdetail">Settle or edit it in Scheduled → Debts.</div>}
+                        {kind === 'stored' && (
+                            <SpActBar actions={[
+                                isAsset && { key: 'topup', label: 'Top up', icon: 'fas fa-plus', tone: 'green', onClick: () => setSheet({ kind: 'topup', item }) },
+                                { key: 'value', label: isAsset ? 'Update value' : 'Update balance', icon: isAsset ? 'fas fa-chart-line' : 'fas fa-scale-balanced', tone: isAsset ? 'blue' : 'slate', onClick: () => setSheet({ kind: 'value', item }) },
+                                { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => setSheet({ kind: 'edit', item }) },
+                                { key: 'delete', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => setPendingDelete(item.id) }
+                            ]} />
+                        )}
+                        {kind === 'cash' && (
+                            <SpActBar actions={[
+                                { key: 'update', label: 'Update cash', icon: 'fas fa-pen', tone: 'slate', onClick: () => setSheet({ kind: 'cash', mode: 'update', target: { person: item.person, currency: item.currency, locked: true } }) },
+                                { key: 'add', label: 'Add cash', icon: 'fas fa-plus', tone: 'green', onClick: () => setSheet({ kind: 'cash', mode: 'add', target: { person: item.person, currency: item.currency, locked: true } }) }
+                            ]} />
+                        )}
+                        {pendingDelete === item.id && <div style={{marginTop: '8px'}}><InlineConfirm text={deleteText(item)} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => doDelete(item)} /></div>}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderGroup = (g, type) => {
+        const open = !!openGroups[g.key];
+        const n = g.items.length + g.extra.length;
+        return (
+            <div key={g.key} className="sp-nwgroup">
+                <button type="button" className="sp-nwgroup-head" onClick={() => setOpenGroups(p => ({ ...p, [g.key]: !open }))} aria-expanded={open}>
+                    <span className="sp-schedicon" style={{background: g.look.tint, color: g.look.ink}}><i className={g.look.icon}></i></span>
+                    <span className="sp-schedmain"><span className="sp-schedtitle"><span style={{fontSize: '16px'}}>{g.name}</span></span><span className="sp-schedmeta">{n} {type === 'asset' ? 'asset' : 'liabilit'}{type === 'asset' ? (n === 1 ? '' : 's') : (n === 1 ? 'y' : 'ies')}</span></span>
+                    <span className="sp-nwchev"><i className={'fas fa-chevron-' + (open ? 'up' : 'down')}></i></span>
+                </button>
+                {g.totals.length > 0 && (
+                    <div className="sp-nwtotals">
+                        {g.totals.map(t => (
+                            <div key={t.country + t.currency}><span className="sp-nwcc">{spCountryCode(t.country)}</span><b style={{color: type === 'liability' || t.value < 0 ? '#e11d48' : undefined}}>{type === 'liability' ? '−' : ''}{spFmtMoney(type === 'liability' ? Math.abs(t.value) : t.value, t.currency)}</b></div>
+                        ))}
+                    </div>
+                )}
+                {open && <div className="sp-nwitems">{g.items.map(i => renderItem(i, g.key))}{g.extra.map(i => renderItem(i, g.key))}</div>}
+            </div>
+        );
+    };
 
     return (
-        <div className="screen">
-            <div className="screen-header"><h2><i className="fas fa-balance-scale me-2"></i>Net Worth</h2></div>
-
+        <div className="sp-page sp-nwpage">
+            <div className="sp-page-kicker">Where you stand</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>Net Worth</h2>
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
             {Object.keys(syncConflicts).length > 0 && (
-                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
-                    <input type="checkbox" className="form-check-input" id="filterNetWorthSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
-                    <label className="form-check-label" htmlFor="filterNetWorthSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                </div>
+                <label className="sp-check" style={{margin: '0 4px 10px'}}>
+                    <input type="checkbox" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i>Sync conflicts only
+                </label>
             )}
 
-            {/* Summary banner — Net Worth on top, then Wallet/Savings/Investment,
-                Property/Pension/Other Asset, then Liabilities on its own row */}
-            <div style={{padding:'0 1rem 0.5rem'}}>
-                <div style={{display:'flex',justifyContent:'center',marginBottom:'8px'}}>
-                    <div style={{background:netWorth>=0?'#f0fff4':'#fff5f5',border:`1px solid ${netWorth>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'12px',padding:'10px 32px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.65rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.05em',marginBottom:'3px'}}>NET WORTH</div>
-                        <div style={{fontSize:'1.2rem',fontWeight:800,color:netWorth>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(netWorth, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.6rem',color:'#adb5bd',marginTop:'3px'}}>Assets + Wallet − Liabilities</div>
-                    </div>
-                </div>
-                {hasForeignCurrency && (
-                    <div style={{display:'flex',justifyContent:'center',marginBottom:'8px'}}>
-                        <div style={{fontSize:'0.68rem',color:'#adb5bd',textAlign:'center'}} title="Cross-currency amounts (marked with ≈) are converted using a fixed offline exchange rate table, not live market rates, and may not reflect current rates">
-                            <i className="fas fa-info-circle" style={{marginRight:'3px'}}></i>Includes amounts converted at approximate offline exchange rates
+            <div className="sp-nwhero">
+                <div className="sp-nwhero-label">Net worth by country</div>
+                {countryRows.length === 0 && <div className="sp-nwhero-empty">Add an asset or liability to see where you stand.</div>}
+                {countryRows.map(r => (
+                    <div key={r.country + r.currency} className="sp-nwhero-row">
+                        <span className="sp-nwhero-cc">{spCountryCode(r.country)}</span>
+                        <div className="sp-nwhero-main">
+                            <div className="sp-nwhero-name">{r.country || 'No country set'}{r.country && COUNTRY_CURRENCY_MAP[r.country] === r.currency ? '' : ' · ' + r.currency}</div>
+                            <div className="sp-nwhero-sub"><span style={{color: '#34d399'}}>▲ {spFmtMoney(r.assets, r.currency)}</span>{r.owed > 0 && <span style={{color: '#fb7185'}}>▼ {spFmtMoney(r.owed, r.currency)}</span>}</div>
                         </div>
+                        <div className="sp-nwhero-val" style={{color: r.net < 0 ? '#fb7185' : undefined}}>{spFmtMoney(r.net, r.currency)}</div>
                     </div>
-                )}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
-                    <div style={{background:wallet>=0?'#f0fff4':'#fff5f5',border:`1px solid ${wallet>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>WALLET</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:wallet>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(wallet, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Unlinked cash + Primary account</div>
+                ))}
+                <div className="sp-nwhero-row is-wallet">
+                    <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-wallet"></i></span>
+                    <div className="sp-nwhero-main">
+                        <div className="sp-nwhero-name" style={{color: 'var(--sp-slate-300)'}}>In wallet</div>
+                        <div className="sp-nwhero-sub" style={{color: 'var(--sp-slate-400)', display: 'block'}}>{fmt0(walletParts.primaryBalances)} primary · {walletParts.unlinkedIncome > 0 ? '+' : ''}{fmt0(walletParts.unlinkedIncome)} unlinked income · {walletParts.unlinkedExpenses > 0 ? '−' : ''}{fmt0(walletParts.unlinkedExpenses)} unlinked spend</div>
                     </div>
-                    <div style={{background:savingsValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${savingsValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>SAVINGS</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:savingsValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(savingsValue, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Bank accounts</div>
-                    </div>
-                    <div style={{background:investmentValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${investmentValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>INVESTMENT</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:investmentValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(investmentValue, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Investment accounts</div>
-                    </div>
+                    <div className="sp-nwhero-val">{spFmtMoney(wallet, defaultCurrency)}</div>
                 </div>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
-                    <div style={{background:propertyValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${propertyValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>PROPERTY</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:propertyValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(propertyValue, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Property value</div>
-                    </div>
-                    <div style={{background:pensionValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${pensionValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>PENSION & RETIREMENT</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:pensionValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(pensionValue, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Pension accounts</div>
-                    </div>
-                    <div style={{background:otherAssetValue>=0?'#f0fff4':'#fff5f5',border:`1px solid ${otherAssetValue>=0?'#c3e6cb':'#f5c6cb'}`,borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                        <div style={{fontSize:'0.6rem',color:'#6c757d',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>OTHER ASSET</div>
-                        <div style={{fontSize:'0.88rem',fontWeight:800,color:otherAssetValue>=0?'#198754':'#dc3545',lineHeight:1.1}}>{fmt(otherAssetValue, defaultCurrency)}</div>
-                        <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Everything else</div>
-                    </div>
-                </div>
-                <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'9px 8px',textAlign:'center'}}>
-                    <div style={{fontSize:'0.6rem',color:'#dc3545',fontWeight:700,letterSpacing:'0.04em',marginBottom:'3px'}}>LIABILITIES</div>
-                    <div style={{fontSize:'0.88rem',fontWeight:800,color:'#dc3545',lineHeight:1.1}}>{fmt(totalLiabilities, defaultCurrency)}</div>
-                    <div style={{fontSize:'0.58rem',color:'#adb5bd',marginTop:'3px'}}>Total owed</div>
-                </div>
+                {hasForeign && <div className="sp-nwhero-note"><i className="fas fa-circle-info"></i>In wallet and ≈ amounts use approximate offline exchange rates.</div>}
             </div>
 
-            {/* Breakdown by Country — original currency, no conversion */}
-            {countryNames.length > 0 && (
-                <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
-                    <h6 style={{marginBottom:'0.6rem',fontSize:'0.85rem',fontWeight:600}}><i className="fas fa-globe me-2"></i>Net Worth by Country</h6>
-                    {countryNames.map(country => (
-                        <div key={country} style={{marginBottom:'0.5rem',paddingBottom:'0.5rem',borderBottom:'1px solid #e9ecef'}}>
-                            <div style={{fontWeight:600,fontSize:'0.82rem',marginBottom:'0.25rem',color: country === 'Not specified' ? '#6c757d' : 'inherit'}}>{country}</div>
-                            {Object.entries(countryBreakdown[country]).map(([currency, totals]) => (
-                                <div key={currency} style={{display:'flex',justifyContent:'space-between',fontSize:'0.78rem',marginBottom:'0.15rem'}}>
-                                    <span style={{color:'#6c757d'}}>{currency}</span>
-                                    <span>
-                                        {totals.asset > 0 && <span style={{color:'#198754'}}>{fmt(totals.asset, currency)} assets</span>}
-                                        {totals.asset > 0 && totals.liability > 0 && '   '}
-                                        {totals.liability > 0 && <span style={{color:'#dc3545'}}>{fmt(totals.liability, currency)} liabilities</span>}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
-                    ))}
-                </div>
-            )}
-
-            {/* Add button */}
-            <div style={{padding:'0.25rem 1rem 0.75rem',display:'flex',gap:'8px'}}>
-                <button type="button" className={'btn btn-sm flex-fill ' + (showForm ? 'btn-secondary' : 'btn-primary')}
-                    onClick={() => { if (showForm) { setShowForm(false); setEditingItem(null); } else openAddForm(); }}>
-                    <i className={'fas fa-' + (showForm ? 'times' : 'plus') + ' me-1'}></i>
-                    {showForm ? 'Cancel' : 'Add Asset / Liability'}
-                </button>
-                {/* Always available (not just on an existing Cash card) so a person/currency with
-                    no withdrawal history yet can still have a starting Cash balance set. */}
-                <button type="button" className="btn btn-sm btn-outline-secondary flex-fill"
-                    onClick={() => openCashUpdate(resolveActiveViewValue(activeView), defaultCurrency, false)}>
-                    <i className="fas fa-money-bill-wave me-1"></i>Update Cash Balance
-                </button>
+            <div className="sp-btn-row" style={{margin: '0 0 14px'}}>
+                <button type="button" className="sp-btn sp-btn-primary" style={{flex: 1, height: '50px', fontSize: '15px'}} onClick={() => setSheet({ kind: 'add', type: 'asset' })}><i className="fas fa-plus"></i>Add asset</button>
+                <button type="button" className="sp-btn sp-btn-white" style={{flex: 1, height: '50px', fontSize: '15px', color: '#e11d48'}} onClick={() => setSheet({ kind: 'add', type: 'liability' })}><i className="fas fa-plus"></i>Add liability</button>
             </div>
 
-            {/* Form modal — a modal (not inline-at-top) so Edit is reachable without scrolling
-                up past a long asset/liability list; Add reuses the same modal for consistency. */}
-            {showForm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                <div className="modal-dialog modal-dialog-centered">
-                <div className="modal-content">
-                <div className="modal-header">
-                    <h5 className="modal-title" style={{fontSize:'1rem'}}>{editingItem ? 'Edit Item' : 'Add New Item'}</h5>
-                    <button type="button" className="btn-close" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}></button>
-                </div>
-                <div className="modal-body" style={{maxHeight:'70vh',overflowY:'auto'}}>
-                    <form id="networth-item-form" onSubmit={handleSubmit}>
-                        <div className="mb-2" style={{display:'flex',gap:'8px'}}>
-                            <button type="button" className={'btn btn-sm flex-fill ' + (form.type==='asset' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => handleTypeChange('asset')}>
-                                <i className="fas fa-plus-circle me-1"></i>Asset
-                            </button>
-                            <button type="button" className={'btn btn-sm flex-fill ' + (form.type==='liability' ? 'btn-danger' : 'btn-outline-secondary')} onClick={() => handleTypeChange('liability')}>
-                                <i className="fas fa-minus-circle me-1"></i>Liability
-                            </button>
-                        </div>
-                        <div className="mb-2">
-                            <input className={'form-control form-control-sm' + (formErrors.name ? ' is-invalid' : '')}
-                                placeholder="Name (e.g. Savings Account)" value={form.name}
-                                onChange={e => setForm(f => ({...f, name: e.target.value}))} />
-                            {formErrors.name && <div className="invalid-feedback">{formErrors.name}</div>}
-                        </div>
-                        <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 100px',gap:'8px'}}>
-                            <div>
-                                <input type="number" min="0.01" step="0.01"
-                                    className={'form-control form-control-sm' + (formErrors.value ? ' is-invalid' : '')}
-                                    placeholder="Value" value={form.value}
-                                    onChange={e => setForm(f => ({...f, value: e.target.value}))} />
-                                {formErrors.value && <div className="invalid-feedback">{formErrors.value}</div>}
-                            </div>
-                            <select className="form-select form-select-sm" value={form.currency} onChange={e => {
-                                const newCurrency = e.target.value;
-                                const matches = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === newCurrency);
-                                setForm(f => {
-                                    let country = f.country;
-                                    if (matches.length === 1) country = matches[0];
-                                    else if (COUNTRY_CURRENCY_MAP[f.country] !== newCurrency) country = '';
-                                    return {...f, currency: newCurrency, country};
-                                });
-                            }}>
-                                {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-                            </select>
-                        </div>
-                        <div className="mb-2">
-                            <select className="form-select form-select-sm" value={form.categoryId} onChange={e => setForm(f => ({...f, categoryId: e.target.value, subcategory: ''}))}>
-                                {categoriesForType(form.type).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                            </select>
-                        </div>
-                        {(() => {
-                            const selectedCat = categoriesForType(form.type).find(c => String(c.id) === String(form.categoryId));
-                            return selectedCat && selectedCat.subcategories.length > 0 && (
-                                <div className="mb-2">
-                                    <select className="form-select form-select-sm" value={form.subcategory} onChange={e => setForm(f => ({...f, subcategory: e.target.value}))}>
-                                        <option value="">No subcategory</option>
-                                        {selectedCat.subcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-                                    </select>
-                                </div>
-                            );
-                        })()}
-                        <div className="mb-2">
-                            <select className="form-select form-select-sm" value={form.country} onChange={e => setForm(f => ({...f, country: e.target.value}))}>
-                                <option value="">Country: Not specified</option>
-                                {(() => {
-                                    const matching = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === form.currency);
-                                    const rest = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] !== form.currency);
-                                    return matching.length > 0 ? (
-                                        <React.Fragment>
-                                            <optgroup label={`Countries using ${form.currency}`}>
-                                                {matching.map(c => <option key={c} value={c}>{c}</option>)}
-                                            </optgroup>
-                                            <optgroup label="Other Countries">
-                                                {rest.map(c => <option key={c} value={c}>{c}</option>)}
-                                            </optgroup>
-                                        </React.Fragment>
-                                    ) : COUNTRIES.map(c => <option key={c} value={c}>{c}</option>);
-                                })()}
-                            </select>
-                        </div>
-                        {activeView.length > 1 && (
-                            <div className="mb-2">
-                                <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
-                                <PersonSelect value={form.person} onChange={v => setForm(f => ({...f, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
-                            </div>
-                        )}
-                        {!editingItem && form.type === 'asset' && (
-                            <React.Fragment>
-                                <div className="mb-2">
-                                    <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Fund from bank account (optional)</label>
-                                    <select className="form-select form-select-sm" value={form.fundAccountId} onChange={e => setForm(f => ({...f, fundAccountId: e.target.value}))}>
-                                        <option value="">Don't deduct from a bank account</option>
-                                        {bankAccounts.filter(a => a.currency === form.currency).map(a => (<option key={a.id} value={a.id}>{a.accountName} ({a.currency})</option>))}
-                                    </select>
-                                </div>
-                                {form.fundAccountId && (
-                                    <div className="alert alert-warning py-2" style={{fontSize:'0.78rem'}}>
-                                        <i className="fas fa-exclamation-triangle me-1"></i>This will deduct {fmt(parseFloat(form.value) || 0, form.currency)} from the selected account and log it in Summary as a transfer — kept for audit, not counted as an expense.
-                                    </div>
-                                )}
-                            </React.Fragment>
-                        )}
-                        {!editingItem && (
-                            <div className="mb-2">
-                                <div className="form-check">
-                                    <input className="form-check-input" type="checkbox" id="networth-item-recurring" checked={form.isRecurring} onChange={e => setForm(f => ({...f, isRecurring: e.target.checked}))} />
-                                    <label className="form-check-label" htmlFor="networth-item-recurring" style={{fontSize:'0.85rem'}}>Make this recurring</label>
-                                </div>
-                                {form.isRecurring && (
-                                    <div style={{marginTop:'0.4rem',padding:'0.5rem',background:'#fff',borderRadius:'6px',border:'1px solid #e9ecef'}}>
-                                        <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
-                                            <div>
-                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Frequency</label>
-                                                <select className="form-select form-select-sm" value={form.recurringFreq} onChange={e => setForm(f => ({...f, recurringFreq: e.target.value}))}>
-                                                    <option value="daily">Daily</option>
-                                                    <option value="weekly">Weekly</option>
-                                                    <option value="monthly">Monthly</option>
-                                                    <option value="yearly">Yearly</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Start Date</label>
-                                                <input type="date" className="form-control form-control-sm" value={form.recurringStartDate} onChange={e => setForm(f => ({...f, recurringStartDate: e.target.value}))} />
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>End Date (optional)</label>
-                                            <input type="date" className="form-control form-control-sm" value={form.recurringEndDate} onChange={e => setForm(f => ({...f, recurringEndDate: e.target.value}))} />
-                                        </div>
-                                        <div className="text-muted" style={{fontSize:'0.72rem',marginTop:'0.3rem'}}>
-                                            This same amount{form.fundAccountId ? ', funded from the same bank account,' : ''} will be added to this item automatically every {form.recurringFreq === 'daily' ? 'day' : form.recurringFreq === 'weekly' ? 'week' : form.recurringFreq === 'yearly' ? 'year' : 'month'} starting after {form.recurringStartDate || 'the start date'}.
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                        <div className="mb-3">
-                            <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
-                                onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
-                        </div>
-                    </form>
-                </div>
-                <div className="modal-footer">
-                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingItem(null); setFormErrors({}); }}>Cancel</button>
-                    <button type="submit" form="networth-item-form" className="btn btn-sm btn-primary">{editingItem ? 'Save Changes' : 'Add Item'}</button>
-                </div>
-                </div>
-                </div>
-                </div>
-            )}
+            <div className="sp-group-head" style={{padding: '0 4px 8px'}}><span className="sp-group-label">Assets</span><span className="sp-group-total" style={{color: '#16a34a', fontWeight: 800}}>{fmt0(totalAssetsConv)}</span></div>
+            {assetGroups.length === 0 ? <div className="sp-empty" style={{marginBottom: '14px'}}><i className="fas fa-arrow-trend-up"></i>No assets yet.</div> : assetGroups.map(g => renderGroup(g, 'asset'))}
+            <button type="button" className="sp-linkbtn" onClick={() => setSheet({ kind: 'cash', mode: 'update', target: { person: resolveActiveViewValue(activeView) || 'own', currency: defaultCurrency, locked: false } })}><i className="fas fa-money-bill-wave"></i>Set a cash balance</button>
 
-            {/* Assets list */}
-            <div style={{padding:'0 1rem'}}>
-                <div style={{marginBottom:'1rem'}}>
-                    <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px'}}>
-                        <h6 style={{margin:0,fontSize:'0.85rem',fontWeight:700,color:'#198754'}}><i className="fas fa-arrow-up me-1"></i>Assets</h6>
-                        <span className="badge bg-success" style={{fontSize:'0.62rem'}}>{assetItems.length}</span>
-                        <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#198754'}}>{fmt(totalAssets, defaultCurrency)}</span>
-                    </div>
-                    {assetItems.length === 0 && primaryWalletItems.length === 0
-                        ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No assets added yet.</div>
-                        : assetCategories.filter(c => assetsByCat[c.id] || primaryWalletItemsByCat[c.id]).map(cat => (
-                            <div key={cat.id} style={{marginBottom:'8px'}}>
-                                <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat.name]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat.name}</div>
-                                {(assetsByCat[cat.id]||[]).map(item => renderItemCard(item, '#198754'))}
-                                {(primaryWalletItemsByCat[cat.id]||[]).map(item => renderItemCard(item, '#198754'))}
-                            </div>
-                        ))
-                    }
-                </div>
+            <div className="sp-group-head" style={{padding: '14px 4px 8px'}}><span className="sp-group-label">Liabilities</span><span className="sp-group-total" style={{color: '#e11d48', fontWeight: 800}}>{totalLiabConv > 0 ? '−' : ''}{fmt0(totalLiabConv)}</span></div>
+            {liabilityGroups.length === 0 ? <div className="sp-empty"><i className="fas fa-arrow-trend-down"></i>No liabilities.</div> : liabilityGroups.map(g => renderGroup(g, 'liability'))}
 
-                {/* Liabilities list */}
-                <div style={{marginBottom:'1rem'}}>
-                    <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px'}}>
-                        <h6 style={{margin:0,fontSize:'0.85rem',fontWeight:700,color:'#dc3545'}}><i className="fas fa-arrow-down me-1"></i>Liabilities</h6>
-                        <span className="badge bg-danger" style={{fontSize:'0.62rem'}}>{liabilityItems.length + debtLiabilities.length}</span>
-                        <span style={{marginLeft:'auto',fontSize:'0.8rem',fontWeight:700,color:'#dc3545'}}>{fmt(totalLiabilities, defaultCurrency)}</span>
-                    </div>
-                    {liabilityItems.length === 0 && debtLiabilities.length === 0
-                        ? <div style={{textAlign:'center',padding:'1rem 0',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No liabilities added yet.</div>
-                        : <>
-                            {liabilityCategories.filter(c => liabsByCat[c.id]).map(cat => (
-                                <div key={cat.id} style={{marginBottom:'8px'}}>
-                                    <div style={{fontSize:'0.7rem',fontWeight:700,color:catColor[cat.name]||'#6c757d',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>{cat.name}</div>
-                                    {liabsByCat[cat.id].map(item => renderItemCard(item, '#dc3545'))}
-                                </div>
-                            ))}
-                            {debtLiabilities.length > 0 && (
-                                <div style={{marginBottom:'8px'}}>
-                                    <div style={{fontSize:'0.7rem',fontWeight:700,color:'#e83e8c',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'4px',paddingLeft:'2px'}}>
-                                        Debts I Owe
-                                        <span className="badge ms-1" style={{background:'#e83e8c',fontSize:'0.55rem',verticalAlign:'middle'}}>From Debt Tracker</span>
-                                    </div>
-                                    {debtLiabilities.map(debt => (
-                                        <div key={debt.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #f5c2d0',background:'#fff5f8',padding:'9px 12px',display:'flex',alignItems:'flex-start',gap:'8px'}}>
-                                            <div style={{flex:1,minWidth:0}}>
-                                                <div style={{fontWeight:600,fontSize:'0.88rem'}}>{debt.counterparty}</div>
-                                                <div style={{fontSize:'0.9rem',fontWeight:700,color:'#dc3545'}}>{fmt(debt.amount, debt.currency)}</div>
-                                                {debt.currency !== defaultCurrency && <div style={{fontSize:'0.72rem',color:'#6c757d'}} title="Converted using a fixed offline exchange rate, not a live market rate">≈ {fmt(convertToDefault(debt.amount, debt.currency), defaultCurrency)}</div>}
-                                                {debt.dueDate && <div style={{fontSize:'0.72rem',color:'#6c757d'}}>Due: {new Date(debt.dueDate+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
-                                                {debt.notes && <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>{debt.notes}</div>}
-                                            </div>
-                                            <span style={{fontSize:'0.68rem',color:'#6c757d',flexShrink:0,marginTop:'2px'}}>auto</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                          </>
-                    }
-                </div>
-            </div>
-
-            {/* History table */}
-            <div style={{padding:'0 1rem 1rem'}}>
-                <div style={{display:'flex',gap:'6px',marginBottom:'8px'}}>
-                    <button type="button" className="btn btn-sm btn-outline-secondary flex-grow-1" onClick={() => setShowHistory(v => !v)}>
-                        <i className={'fas fa-' + (showHistory ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
-                        {showHistory ? 'Hide' : 'Show'} History ({monthlyHistory.length} months)
-                    </button>
-                    {monthlyHistory.length > 0 && (
-                        <button type="button" className="btn btn-sm btn-outline-danger" title="Delete all history" onClick={() => setShowClearHistoryConfirm(true)}>
-                            <i className="fas fa-trash-alt"></i>
-                        </button>
-                    )}
-                </div>
-                {showHistory && (
-                    monthlyHistory.length === 0
-                        ? <div style={{textAlign:'center',padding:'1rem',color:'#6c757d',fontSize:'0.83rem',background:'#f8f9fa',borderRadius:'8px'}}>No history yet. Add your first asset or liability above.</div>
-                        : <div style={{borderRadius:'10px',overflow:'hidden',border:'1px solid #dee2e6'}}>
-                            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'0.8rem'}}>
-                                <thead>
-                                    <tr style={{background:'#f8f9fa'}}>
-                                        <th style={{padding:'7px 10px',textAlign:'left',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Month</th>
-                                        <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Net Worth</th>
-                                        <th style={{padding:'7px 10px',textAlign:'right',fontWeight:600,borderBottom:'1px solid #dee2e6'}}>Change</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {monthlyHistory.map((entry, idx) => {
-                                        const prev = monthlyHistory[idx + 1];
-                                        const change = prev != null ? entry.netWorth - prev.netWorth : null;
-                                        const isFirst = idx === 0;
-                                        return (
-                                            <tr key={entry.key} style={{borderBottom:idx < monthlyHistory.length-1 ? '1px solid #f0f0f0' : 'none', background:isFirst?'#f0fff4':'#fff'}}>
-                                                <td style={{padding:'7px 10px',color:'#495057'}}>
-                                                    {new Date(entry.date+'T00:00:00').toLocaleDateString('en-GB',{month:'long',year:'numeric'})}
-                                                    {isFirst && <span className="badge bg-success ms-1" style={{fontSize:'0.58rem'}}>Latest</span>}
-                                                </td>
-                                                <td style={{padding:'7px 10px',textAlign:'right',fontWeight:isFirst?700:400,color:entry.netWorth>=0?'#198754':'#dc3545'}}>
-                                                    {fmt(entry.netWorth, defaultCurrency)}
-                                                </td>
-                                                <td style={{padding:'7px 10px',textAlign:'right',fontWeight:600,color:change===null?'#adb5bd':change>0?'#198754':change<0?'#dc3545':'#6c757d'}}>
-                                                    {change === null ? '—' : change === 0 ? '±0' : (change > 0 ? '▲ ' : '▼ ') + fmt(Math.abs(change), defaultCurrency)}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                          </div>
-                )}
-            </div>
-
-            {/* Delete modal */}
-            {showDeleteModal && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Delete Item?</h5></div>
-                            <div className="modal-body"><p className="mb-0">Delete this item? This cannot be undone.</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowDeleteModal(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(showDeleteModal)}><i className="fas fa-trash me-1"></i>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            {sheet && (sheet.kind === 'add' || sheet.kind === 'edit') && (
+                <NetWorthItemSheet type={sheet.kind === 'add' ? sheet.type : sheet.item.type} item={sheet.kind === 'edit' ? sheet.item : null} assetCategories={assetCategories} liabilityCategories={liabilityCategories} bankAccounts={bankAccounts} defaultCurrency={defaultCurrency} activeView={activeView} onClose={() => setSheet(null)} onSaved={done} />
             )}
-
-            {/* Clear all history modal */}
-            {showClearHistoryConfirm && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header border-danger">
-                                <h5 className="modal-title text-danger"><i className="fas fa-exclamation-triangle me-2"></i>Delete All History?</h5>
-                            </div>
-                            <div className="modal-body">
-                                <p>You are about to permanently delete all <strong>{sortedHistory.length} net worth snapshot{sortedHistory.length !== 1 ? 's' : ''}</strong>.</p>
-                                <p className="mb-0">Your assets and liabilities themselves will not be affected — only the historical trend is cleared.</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setShowClearHistoryConfirm(false)}>Cancel</button>
-                                <button type="button" className="btn btn-danger" onClick={() => { DataService.clearNetWorthHistory(); setShowClearHistoryConfirm(false); reload(); }}>
-                                    <i className="fas fa-trash-alt me-1"></i>Delete All
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Update valuation modal */}
-            {valuationItem && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <form className="modal-content" onSubmit={handleValuationSubmit}>
-                            <div className="modal-header"><h5 className="modal-title">Update Valuation — {valuationItem.name}</h5></div>
-                            <div className="modal-body">
-                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current: {fmt(valuationItem.value, valuationItem.currency)}. This records a real change and will show as a gain/loss in the history below.</p>
-                                <label className="form-label">New Value ({valuationItem.currency})</label>
-                                <input type="number" step="0.01" className={'form-control' + (valuationError ? ' is-invalid' : '')} value={valuationValue} onChange={e => { setValuationValue(e.target.value); setValuationError(''); }} autoFocus />
-                                {valuationError && <div className="invalid-feedback">{valuationError}</div>}
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setValuationItem(null)}>Cancel</button>
-                                <button type="submit" className="btn btn-success btn-sm"><i className="fas fa-chart-line me-1"></i>Save Valuation</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-            {/* Add Money modal */}
-            {addMoneyItem && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <form className="modal-content" onSubmit={handleAddMoneySubmit}>
-                            <div className="modal-header"><h5 className="modal-title">Add Money — {addMoneyItem.name}</h5></div>
-                            <div className="modal-body">
-                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current: {fmt(addMoneyItem.value, addMoneyItem.currency)}. This adds fresh money — both the original and current amount increase.</p>
-                                <div className="mb-2">
-                                    <label className="form-label">Amount to add ({addMoneyItem.currency})</label>
-                                    <input type="number" step="0.01" className={'form-control' + (addMoneyErrors.amount ? ' is-invalid' : '')} value={addMoneyForm.amount} onChange={e => setAddMoneyForm(f => ({...f, amount: e.target.value}))} autoFocus />
-                                    {addMoneyErrors.amount && <div className="invalid-feedback">{addMoneyErrors.amount}</div>}
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Fund from bank account (optional)</label>
-                                    <select className="form-select" value={addMoneyForm.accountId} onChange={e => setAddMoneyForm(f => ({...f, accountId: e.target.value}))}>
-                                        <option value="">Don't deduct from a bank account</option>
-                                        {bankAccounts.filter(a => a.currency === addMoneyItem.currency).map(a => (<option key={a.id} value={a.id}>{a.accountName} ({a.currency})</option>))}
-                                    </select>
-                                </div>
-                                {addMoneyForm.accountId && (
-                                    <div className="alert alert-warning py-2" style={{fontSize:'0.82rem'}}>
-                                        <i className="fas fa-exclamation-triangle me-1"></i>This will deduct {fmt(parseFloat(addMoneyForm.amount) || 0, addMoneyItem.currency)} from the selected account and log it in Summary as a transfer to "{addMoneyItem.name}" — kept for audit, not counted as an expense.
-                                    </div>
-                                )}
-                                <div className="mb-2">
-                                    <div className="form-check">
-                                        <input className="form-check-input" type="checkbox" id="add-money-recurring" checked={addMoneyForm.isRecurring} onChange={e => setAddMoneyForm(f => ({...f, isRecurring: e.target.checked}))} />
-                                        <label className="form-check-label" htmlFor="add-money-recurring" style={{fontSize:'0.85rem'}}>Make this recurring</label>
-                                    </div>
-                                    {addMoneyForm.isRecurring && (
-                                        <div style={{marginTop:'0.4rem',padding:'0.5rem',background:'#f8f9fa',borderRadius:'6px',border:'1px solid #e9ecef'}}>
-                                            <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
-                                                <div>
-                                                    <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Frequency</label>
-                                                    <select className="form-select form-select-sm" value={addMoneyForm.recurringFreq} onChange={e => setAddMoneyForm(f => ({...f, recurringFreq: e.target.value}))}>
-                                                        <option value="daily">Daily</option>
-                                                        <option value="weekly">Weekly</option>
-                                                        <option value="monthly">Monthly</option>
-                                                        <option value="yearly">Yearly</option>
-                                                    </select>
-                                                </div>
-                                                <div>
-                                                    <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>Start Date</label>
-                                                    <input type="date" className="form-control form-control-sm" value={addMoneyForm.recurringStartDate} onChange={e => setAddMoneyForm(f => ({...f, recurringStartDate: e.target.value}))} />
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <label style={{fontSize:'0.7rem',fontWeight:600,marginBottom:'2px',display:'block'}}>End Date (optional)</label>
-                                                <input type="date" className="form-control form-control-sm" value={addMoneyForm.recurringEndDate} onChange={e => setAddMoneyForm(f => ({...f, recurringEndDate: e.target.value}))} />
-                                            </div>
-                                            <div className="text-muted" style={{fontSize:'0.72rem',marginTop:'0.3rem'}}>
-                                                This same amount{addMoneyForm.accountId ? ', funded from the same bank account,' : ''} will be added to "{addMoneyItem.name}" automatically every {addMoneyForm.recurringFreq === 'daily' ? 'day' : addMoneyForm.recurringFreq === 'weekly' ? 'week' : addMoneyForm.recurringFreq === 'yearly' ? 'year' : 'month'} starting after {addMoneyForm.recurringStartDate || 'the start date'}.
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setAddMoneyItem(null)}>Cancel</button>
-                                <button type="submit" className="btn btn-success btn-sm" disabled={addMoneySubmitting}>
-                                    {addMoneySubmitting ? <><span className="spinner-border spinner-border-sm me-1"></span>Adding…</> : <><i className="fas fa-piggy-bank me-1"></i>Add Money</>}
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-            {/* Cash Update modal — records a reconciliation (see openCashUpdate/handleCashUpdateSubmit)
-                instead of mutating a stored item, since Cash is fully computed. */}
-            {cashUpdateTarget && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <form className="modal-content" onSubmit={handleCashUpdateSubmit}>
-                            <div className="modal-header"><h5 className="modal-title">Update Cash — {personDisplayLabel(cashUpdateTarget.person)} ({cashUpdateTarget.currency})</h5></div>
-                            <div className="modal-body">
-                                {!cashUpdateTarget.locked && (
-                                    <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
-                                        <div>
-                                            <label className="form-label">Person</label>
-                                            <PersonSelect value={cashUpdateTarget.person} onChange={v => setCashUpdateTarget(t => ({...t, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
-                                        </div>
-                                        <div>
-                                            <label className="form-label">Currency</label>
-                                            <select className="form-select form-select-sm" value={cashUpdateTarget.currency} onChange={e => setCashUpdateTarget(t => ({...t, currency: e.target.value}))}>
-                                                {CURRENCIES.map(code => (<option key={code} value={code}>{code}</option>))}
-                                            </select>
-                                        </div>
-                                    </div>
-                                )}
-                                <p className="text-muted" style={{fontSize:'0.85rem'}}>Current (computed): {fmt(cashUpdateCurrentValue, cashUpdateTarget.currency)}. This records a reconciliation — it won't appear in your Expense/Income history.</p>
-                                <div className="mb-2">
-                                    <label className="form-label">Actual cash amount ({cashUpdateTarget.currency})</label>
-                                    <input type="number" step="0.01" className={'form-control' + (cashUpdateError ? ' is-invalid' : '')} value={cashUpdateForm.amount} onChange={e => { setCashUpdateForm(f => ({...f, amount: e.target.value})); setCashUpdateError(''); }} autoFocus />
-                                    {cashUpdateError && <div className="invalid-feedback">{cashUpdateError}</div>}
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Notes (optional)</label>
-                                    <input type="text" className="form-control" value={cashUpdateForm.notes} onChange={e => setCashUpdateForm(f => ({...f, notes: e.target.value}))} />
-                                </div>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setCashUpdateTarget(null)}>Cancel</button>
-                                <button type="submit" className="btn btn-success btn-sm"><i className="fas fa-money-bill-wave me-1"></i>Save</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-            {showConflictDetail && conflictItem && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictItem}
-                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
-                    fieldLabels={netWorthConflictFieldLabels}
-                    formatValue={formatNetWorthConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveConflict(false)}
-                    onUseCloud={() => handleResolveConflict(true)}
-                />
-            )}
+            {sheet && sheet.kind === 'topup' && <NetWorthTopUpSheet item={sheet.item} bankAccounts={bankAccounts} schedule={scheduleFor(sheet.item.id)} activeView={activeView} onClose={() => setSheet(null)} onSaved={done} />}
+            {sheet && sheet.kind === 'value' && <NetWorthValueSheet item={sheet.item} activeView={activeView} onClose={() => setSheet(null)} onSaved={done} />}
+            {sheet && sheet.kind === 'cash' && <NetWorthCashSheet mode={sheet.mode} target={sheet.target} activeView={activeView} defaultCurrency={defaultCurrency} onClose={() => setSheet(null)} onSaved={done} />}
         </div>
     );
 }
