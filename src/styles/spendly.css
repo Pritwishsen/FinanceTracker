@@ -450,7 +450,7 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 .sp-amounthero { background: var(--sp-navy); border-radius: 24px; padding: 20px; text-align: center; color: #fff; }
 .sp-amounthero-row { display: flex; align-items: baseline; justify-content: center; gap: 4px; margin-top: 4px; line-height: 1.1; }
 .sp-amounthero-sym { font-size: 32px; font-weight: 800; color: var(--sp-slate-500); }
-.sp-amounthero input { width: 180px; max-width: 220px; padding: 0; margin: 0; background: none; border: none; color: #fff; font-family: inherit; font-size: 40px; font-weight: 800; letter-spacing: -.03em; line-height: 1.1; outline: none; text-align: center; color-scheme: dark; }
+.sp-amounthero input { width: 180px; max-width: 240px; min-width: 4ch; padding: 0; margin: 0; background: none; border: none; color: #fff; font-family: inherit; font-size: 40px; font-weight: 800; letter-spacing: -.03em; line-height: 1.1; outline: none; text-align: left; color-scheme: dark; -moz-appearance: textfield; }
 .sp-amounthero input::placeholder { color: #475569; }
 .sp-curchips { display: flex; justify-content: center; gap: 5px; margin-top: 12px; flex-wrap: wrap; }
 .sp-curchip { background: #ffffff14; color: var(--sp-slate-300); font-size: 12px; font-weight: 700; padding: 5px 9px; border-radius: 999px; cursor: pointer; border: none; font-family: inherit; display: inline-flex; align-items: center; gap: 5px; }
@@ -920,12 +920,12 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 
 /* ---- Phase 11: More / Settings ---- */
 .sp-morepage { padding-bottom: 110px; }
-.sp-curgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.sp-curchip { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: #fff; border: none; border-radius: 16px; padding: 11px 4px; cursor: pointer; font-family: inherit; color: var(--sp-slate-600); min-width: 0; }
-.sp-curchip-sym { font-size: 17px; font-weight: 800; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sp-curchip-code { font-size: 11px; font-weight: 800; }
-.sp-curchip.is-on { background: var(--sp-navy); color: #fff; }
-.sp-curchip.is-add { background: transparent; border: 2px dashed var(--sp-slate-300); color: var(--sp-slate-500); }
+.sp-defcurgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.sp-defcur { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: #fff; border: none; border-radius: 16px; padding: 11px 4px; cursor: pointer; font-family: inherit; color: var(--sp-slate-600); min-width: 0; }
+.sp-defcur-sym { font-size: 17px; font-weight: 800; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-defcur-code { font-size: 11px; font-weight: 800; }
+.sp-defcur.is-on { background: var(--sp-navy); color: #fff; }
+.sp-defcur.is-add { background: transparent; border: 2px dashed var(--sp-slate-300); color: var(--sp-slate-500); }
 .sp-currow .sp-tile { font-size: 12px; }
 .sp-mini-btn { width: 32px; height: 32px; border-radius: 10px; border: none; background: var(--sp-slate-100); color: var(--sp-slate-600); cursor: pointer; flex-shrink: 0; font-size: 12px; }
 .sp-mini-btn.is-danger { color: var(--sp-slate-400); }
@@ -958,3 +958,18 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 .sp-backlist-row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; font-weight: 600; color: var(--sp-slate-500); padding: 5px 0; border-top: 1px solid var(--sp-slate-100); }
 .sp-backlist-row > span:first-child { word-break: break-all; }
 .sp-backlist-row > span:last-child { white-space: nowrap; }
+.sp-hero-pill.is-red { background: #e11d4826; color: #fb7185; }
+
+/* Amount row + currency chips (Add Income layout), shared by add / edit forms */
+.sp-amtblock-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.sp-amtblock-label { font-size: 14px; color: var(--sp-slate-500); font-weight: 600; white-space: nowrap; }
+.sp-amtblock.is-bad .sp-amtblock-label { color: var(--sp-rose); }
+.sp-amtblock .sp-curchips.is-light { margin-top: 9px; }
+.sp-formrow .sp-curchips.is-light { margin-top: 0; }
+.sp-amounthero input::-webkit-outer-spin-button, .sp-amounthero input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.sp-amtblock input { border: none; background: none; outline: none; padding: 0; text-align: right; color: var(--sp-navy); font-family: inherit; color-scheme: light; -moz-appearance: textfield; }
+.sp-amtblock input::-webkit-outer-spin-button, .sp-amtblock input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.sp-nwhero-cash { padding-bottom: 6px; }
+.sp-nwhero-cash .sp-nwhero-row { padding-bottom: 6px; }
+.sp-nwhero-cashlist { display: flex; flex-wrap: wrap; gap: 5px; }
+.sp-nwhero-cashval { background: #ffffff14; border-radius: 9px; padding: 4px 8px; font-size: 13px; font-weight: 800; white-space: nowrap; }

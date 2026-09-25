@@ -506,6 +506,49 @@ function PinnedCta({ label, icon, onClick, disabled, type = 'button', variant, a
     );
 }
 
+// Currency chips as in the design: the selected currency (with its symbol) plus two others,
+// then "+N more" which opens the full CurrencySheet. `light` = white form cards (navy selected);
+// otherwise the dark amount hero on Add Expense (green selected).
+function spChipCurrencies(value, recent) {
+    const all = CurrencyService.getAllCurrencies().map(c => c.code);
+    const def = (DataService.data && DataService.data.settings && DataService.data.settings.currency) || 'GBP';
+    let list = [...new Set([...(recent || []), def, 'GBP', 'USD', 'EUR'])].filter(c => all.includes(c)).slice(0, 3);
+    if (value && !list.includes(value)) list = [value, ...list].slice(0, 3);
+    return { list, more: Math.max(0, all.length - list.length) };
+}
+function SpCurrencyChips({ value, onChange, recent, light = true }) {
+    const [open, setOpen] = useState(false);
+    const { list, more } = spChipCurrencies(value, recent);
+    return (
+        <>
+            <div className={'sp-curchips' + (light ? ' is-light' : '')}>
+                {list.map(code => (
+                    <button key={code} type="button" className={'sp-curchip' + (value === code ? ' is-active' : '')} onClick={() => onChange(code)}>
+                        {value === code && CurrencyService.getCurrencySymbol(code) !== code ? CurrencyService.getCurrencySymbol(code) + ' ' + code : code}
+                    </button>
+                ))}
+                {more > 0 && <button type="button" className="sp-curchip" onClick={() => setOpen(true)}>+{more} more<i className="fas fa-chevron-down" style={{fontSize: '9px'}}></i></button>}
+            </div>
+            {open && ReactDOM.createPortal(<CurrencySheet value={value} onPick={c => { onChange(c); setOpen(false); }} onClose={() => setOpen(false)} />, document.body)}
+        </>
+    );
+}
+// Amount row with the currency chips under it (Add Income layout), for every add / edit form
+// where an amount has its own currency. `locked` shows the currency without letting it change.
+function SpAmountBlock({ label = 'Amount', hint, value, onValue, currency, onCurrency, locked, bad, recent, min = '0', autoFocus, placeholder = '0.00' }) {
+    return (
+        <div className={'sp-formblock sp-amtblock' + (bad ? ' is-bad' : '')}>
+            <div className="sp-amtblock-row">
+                <span className="sp-amtblock-label">{label}{hint && <small className="sp-formrow-hint">{hint}</small>}</span>
+                <span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(currency)}</span><input type="number" step="0.01" min={min} inputMode="decimal" placeholder={placeholder} value={value} autoFocus={autoFocus} onChange={e => onValue(e.target.value)} aria-label={label} /></span>
+            </div>
+            {locked
+                ? <div className="sp-curchips is-light"><span className="sp-curchip is-active">{CurrencyService.getCurrencySymbol(currency) !== currency ? CurrencyService.getCurrencySymbol(currency) + ' ' + currency : currency}<i className="fas fa-lock" style={{fontSize: '9px'}}></i></span></div>
+                : <SpCurrencyChips value={currency} onChange={onCurrency} recent={recent} />}
+        </div>
+    );
+}
+
 // Currency picker. Custom currencies are still added in Settings (see the plan's Settings phase).
 function CurrencySheet({ value, onPick, onClose }) {
     const [q, setQ] = useState('');
@@ -3239,16 +3282,9 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 <div className="sp-hero-label">{editSplitGroup ? 'Total amount' : 'Amount'}</div>
                 <div className="sp-amounthero-row">
                     <span className="sp-amounthero-sym">{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
-                    <input type="number" step="0.01" min="0" inputMode="decimal" value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" aria-label="Amount" />
+                    <input type="number" step="0.01" min="0" inputMode="decimal" value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" aria-label="Amount" style={{width: (Math.max(4, String(formData.amount || '0.00').length) + 0.5) + 'ch'}} />
                 </div>
-                <div className="sp-curchips">
-                    {recentCurrencies.map(code => (
-                        <button key={code} type="button" className={'sp-curchip' + (formData.currency === code ? ' is-active' : '')} onClick={() => handleInputChange('currency', code)}>
-                            {formData.currency === code ? ValidationUtils.getCurrencySymbol(code) + ' ' + code : code}
-                        </button>
-                    ))}
-                    <button type="button" className="sp-curchip" onClick={() => setShowCurrencySheet(true)}>More<i className="fas fa-chevron-down" style={{fontSize: '9px'}}></i></button>
-                </div>
+                <SpCurrencyChips value={formData.currency} onChange={code => handleInputChange('currency', code)} recent={recentCurrencies} light={false} />
             </div>
 
             <div className="sp-formlabel">Category</div>
@@ -3399,10 +3435,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     </div>
                     <div style={{display: 'flex', flexWrap: 'wrap', gap: '8px'}}>
                         {editSplitGroup ? splitParticipants.map(p => (
-                            <span key={p.id} className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{participantLabel(p).charAt(0)}</span>{participantLabel(p)}</span>
+                            <span key={p.id} className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{spAvatarLetter(participantLabel(p))}</span>{participantLabel(p)}</span>
                         )) : (
                             <React.Fragment>
-                                <span className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">Y</span>You</span>
+                                <span className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{spAvatarLetter('You')}</span>You</span>
                                 {/* The signed-in user's own (systemManaged) person record is already the fixed "You" chip. */}
                                 {people.filter(person => !person.systemManaged && !splitParticipants.some(s => s.id === 'me' && s.name === person.name)).map(person => {
                                     const on = splitParticipants.some(s => s.id !== 'me' && s.name === person.name);
@@ -3431,7 +3467,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                             const c = spPersonColor(p.id === 'me' ? 'own' : p.name, people);
                             return (
                                 <div key={p.id} className="sp-splitrow">
-                                    <span className="sp-tile" style={{width: '30px', height: '30px', borderRadius: '10px', background: c[0], color: c[1], fontWeight: 800, fontSize: '12px'}}>{participantLabel(p).charAt(0)}</span>
+                                    <span className="sp-tile" style={{width: '30px', height: '30px', borderRadius: '10px', background: c[0], color: c[1], fontWeight: 800, fontSize: '12px'}}>{spAvatarLetter(participantLabel(p))}</span>
                                     <span className="sp-row-title" style={{flex: 1, fontSize: '13px'}}>{participantLabel(p)}</span>
                                     {splitMethod === 'equal' ? (
                                         <span className="sp-row-title" style={{fontSize: '13px'}}>{fmtAmt(equalShare(i))}</span>
@@ -3469,9 +3505,6 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             <div style={{height: '84px'}}></div>
             <PinnedCta type="submit" label={ctaLabel} icon={isSubmitting ? 'fas fa-spinner fa-spin' : 'fas fa-check'} disabled={isSubmitting || splitUnbalanced} />
 
-            {showCurrencySheet && (
-                <CurrencySheet value={formData.currency} onClose={() => setShowCurrencySheet(false)} onPick={(code) => { handleInputChange('currency', code); setShowCurrencySheet(false); }} />
-            )}
         </form>
     );
 }
@@ -3734,7 +3767,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                         <div className="sp-item-right">
                                             <div className="sp-item-amount">{ValidationUtils.formatCurrency(expense.amount, expense.currency || 'GBP')}</div>
                                             <div className="sp-item-right-meta">
-                                                {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{whoLabel(expense).charAt(0).toUpperCase()}</span>{whoLabel(expense)}</span>}
+                                                {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{spAvatarLetter(whoLabel(expense))}</span>{whoLabel(expense)}</span>}
                                                 {expense.isSplitRecord && <span className="sp-minibadge"><i className="fas fa-users" style={{fontSize: '9px'}}></i>Split</span>}
                                             </div>
                                         </div>
@@ -4573,20 +4606,8 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                         <input type="text" value={formData.source} onChange={(e) => handleInputChange('source', e.target.value)} placeholder="e.g. Salary" list="sp-income-sources" style={{width: '60%'}} />
                         <datalist id="sp-income-sources">{incomeSources.map(s => <option key={s} value={s} />)}</datalist>
                     </div>
-                    <div className={'sp-formblock' + (errors.amount ? ' is-bad' : '')} style={{borderTop: '1px solid #f1f5f9'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                            <span style={{fontSize: '14px', color: errors.amount ? '#e11d48' : '#64748b', fontWeight: 600}}>Amount</span>
-                            <div style={{display: 'flex', alignItems: 'baseline', gap: '3px'}}>
-                                <span style={{fontSize: '14px', color: '#94a3b8', fontWeight: 700}}>{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
-                                <input type="number" step="0.01" min="0" inputMode="decimal" value={formData.amount} onChange={(e) => handleInputChange('amount', e.target.value)} placeholder="0.00" style={{border: 'none', fontSize: '14px', color: '#0f172a', fontWeight: 700, textAlign: 'right', outline: 'none', width: '110px', padding: 0, background: 'none', fontFamily: 'inherit', colorScheme: 'light'}} />
-                            </div>
-                        </div>
-                        <div style={{display: 'flex', justifyContent: 'flex-end', gap: '5px', marginTop: '9px', flexWrap: 'wrap'}}>
-                            {recentCurrencies.map(code => (
-                                <button key={code} type="button" className="sp-curchip" style={formData.currency === code ? {background: '#10b981', color: '#06281c'} : {background: '#f1f5f9', color: '#475569'}} onClick={() => handleInputChange('currency', code)}>{formData.currency === code ? ValidationUtils.getCurrencySymbol(code) + ' ' + code : code}</button>
-                            ))}
-                            <button type="button" className="sp-curchip" style={{background: '#f1f5f9', color: '#475569'}} onClick={() => setShowCurrencySheet(true)}>More<i className="fas fa-chevron-down" style={{fontSize: '9px'}}></i></button>
-                        </div>
+                    <div style={{borderTop: '1px solid #f1f5f9'}}>
+                        <SpAmountBlock value={formData.amount} onValue={v => handleInputChange('amount', v)} currency={formData.currency} onCurrency={code => handleInputChange('currency', code)} recent={recentCurrencies} bad={errors.amount} />
                     </div>
                     <div className={'sp-formrow' + (errors.date ? ' is-bad' : '')} style={{borderTop: '1px solid #f1f5f9'}}>
                         <span>Date</span>
@@ -4720,7 +4741,7 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                                     {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></button>}
                                 </div>
                                 <div className="sp-item-meta">
-                                    {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{whoLabel(item).charAt(0).toUpperCase()}</span>{whoLabel(item)}</span>}
+                                    {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{spAvatarLetter(whoLabel(item))}</span>{whoLabel(item)}</span>}
                                     {bankName
                                         ? <span className="sp-paybadge is-card"><i className="fas fa-building-columns" style={{fontSize: '9px'}}></i>{bankName}</span>
                                         : <span className="sp-paybadge is-cash"><i className="fas fa-money-bill-wave" style={{fontSize: '9px'}}></i>Cash</span>}
@@ -4822,14 +4843,20 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                 </Sheet>
             )}
 
-            {showCurrencySheet && (
-                <CurrencySheet value={formData.currency} onClose={() => setShowCurrencySheet(false)} onPick={(code) => { handleInputChange('currency', code); setShowCurrencySheet(false); }} />
-            )}
         </div>
     );
 }
 
 // Summary (home) helpers. Month keys are 'YYYY-MM' strings, compared as text.
+// Savings-rate label for Summary. When spending exceeds income, net ÷ income turns into
+// huge negative percentages (£18 in, £2,423 out = −13,361%), so a deficit is described
+// instead: by how much spending ran over income, or as a multiple of income once it's 2× or more.
+const spNetRate = (net, income, expense) => {
+    if (net >= 0) return { text: (income > 0 ? Math.round((net / income) * 100) : 0) + '% saved', deficit: false };
+    if (!(income > 0)) return { text: 'In deficit · no income', deficit: true };
+    const ratio = expense / income;
+    return { text: 'In deficit · ' + (ratio >= 2 ? (ratio >= 10 ? Math.round(ratio) : Math.round(ratio * 10) / 10) + '× income' : Math.round((ratio - 1) * 100) + '% over income'), deficit: true };
+};
 const spPerfColor = (pct) => pct > 110 ? '#e11d48' : pct > 100 ? '#f59e0b' : '#10b981';
 const SP_PERF_INK = { '#10b981': '#047857', '#f59e0b': '#b45309', '#e11d48': '#be123c' };
 const spMonthKey = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
@@ -4930,7 +4957,11 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
         return Math.round(CurrencyService.convertToDefaultSync(amount, fromCurrency, toCurrency) * 100) / 100;
     };
 
+    // A view switch updates expenses and income in two separate renders, so a conversion started
+    // for the in-between state (new expenses, previous view's income) can finish after the final
+    // one and overwrite it. Only the latest run may set state.
     useEffect(() => {
+        let cancelled = false;
         const convertAll = async () => {
             const newExpenses = await Promise.all(expenses.map(async (exp) => {
                 const expCurrency = exp.currency || 'GBP';
@@ -4952,10 +4983,12 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     return { ...inc, amount: convertAmountSync(inc.amount, incCurrency, defaultCurrency), currency: defaultCurrency };
                 }
             }));
+            if (cancelled) return;
             setConvertedExpenses(newExpenses);
             setConvertedIncome(newIncome);
         };
         convertAll();
+        return () => { cancelled = true; };
     }, [expenses, income, defaultCurrency]);
 
     // `now` picks which month's mid-month budget reset (budgetHistory) applies.
@@ -5232,7 +5265,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                             {(vsPct > 0 ? '▲ ' : vsPct < 0 ? '▼ ' : '') + Math.abs(vsPct) + '% spend ' + vsWord}
                         </span>
                     )}
-                    <span className="sp-hero-pill is-green">{totalIncome > 0 ? Math.round((net / totalIncome) * 100) + '%' : '0%'} saved</span>
+                    {(() => { const r = spNetRate(net, totalIncome, totalExpenses); return <span className={'sp-hero-pill' + (r.deficit ? ' is-red' : ' is-green')}>{r.text}</span>; })()}
                     <span className="sp-hero-pill">{fmt0(totalExpenses / periodDays)}/day avg</span>
                     <span className="sp-hero-pill">{periodBudget > 0 ? fmt0(totalExpenses) + ' of ' + fmt0(periodBudget) + ' budget' : 'No budget set'}</span>
                 </div>
@@ -5323,7 +5356,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                         <div>
                                             <div className="sp-pcard-k">NET SAVING</div>
                                             <div className="sp-pcard-v" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{(p.bNet >= 0 ? '+' : '−') + fmt0(Math.abs(p.bNet))}</div>
-                                            {p.inc > 0 && <div className="sp-pcard-rate" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{Math.round((p.bNet / p.inc) * 100)}% saved</div>}
+                                            {(p.inc > 0 || p.bNet < 0) && <div className="sp-pcard-rate" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{spNetRate(p.bNet, p.inc, p.ex).text}</div>}
                                         </div>
                                     </div>
                                     <div className="sp-pcard-budget">
@@ -5452,18 +5485,14 @@ function AccountFormCard({ account, bankAccounts, activeView, onCancel, onSaved 
             <div className={'sp-formrow' + (error ? ' is-bad' : '')}><span>Account name</span><input type="text" value={f.accountName} placeholder="e.g. Barclays Current" onChange={e => set('accountName', e.target.value)} /></div>
             <div className="sp-formrow"><span>Account type</span><select value={f.accountType} onChange={e => set('accountType', e.target.value)}>{BANK_ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select></div>
             <div className="sp-formrow"><span>Country</span><select value={f.country} onChange={e => set('country', e.target.value)}>{COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
-            <div className="sp-formrow">
-                <span>Currency</span>
-                {isEdit ? <span className="sp-lockedval"><b>{f.currency}</b><i className="fas fa-lock"></i></span>
-                    : <select value={f.currency} onChange={e => setCurrency(e.target.value)}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}</select>}
-            </div>
+            {isEdit && <div className="sp-formrow"><span>Currency</span><span className="sp-lockedval"><b>{f.currency}</b><i className="fas fa-lock"></i></span></div>}
             <div className="sp-formrow">
                 <span>Account owner</span>
                 {activeView.length > 1
                     ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
                     : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
             </div>
-            {!isEdit && <div className="sp-formrow"><span>Opening balance</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={f.openingAmount} onChange={e => set('openingAmount', e.target.value)} /></span></div>}
+            {!isEdit && <SpAmountBlock label="Opening balance" value={f.openingAmount} onValue={v => set('openingAmount', v)} currency={f.currency} onCurrency={setCurrency} min={undefined} />}
             {isEdit && <div className="sp-blocked" style={{margin: '4px 0 6px'}}><i className="fas fa-lock"></i><span>Balance {spFmtMoney(balance, account.currency)} and currency can't be edited here. Use Balance (reconcile) to correct it.</span></div>}
             <div className="sp-formrow"><span>Account ID<small className="sp-formrow-hint">Optional · last 4 or IBAN</small></span><input type="text" value={f.accountRef} placeholder="Optional" onChange={e => set('accountRef', e.target.value)} /></div>
             <button type="button" className="sp-checkrow" onClick={() => set('isPrimary', !f.isPrimary)}>
@@ -5946,8 +5975,8 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
                     <SpSheetHead icon="fas fa-money-bill-wave" tint="#fef3c7" ink="#d97706" title="Cash withdrawal" sub={withdrawAccount.accountName + ' · ' + spFmtMoney(bal(withdrawAccount), withdrawAccount.currency)} />
                     {Object.values(withdrawErrors).filter(Boolean)[0] && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{Object.values(withdrawErrors).filter(Boolean)[0]}</span></div>}
                     <div className="sp-formcard" style={{marginTop: 0}}>
-                        <div className="sp-formrow"><span>Amount</span><span className="sp-moneyin"><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={withdrawForm.amount} autoFocus onChange={e => setWithdrawForm(f => ({ ...f, amount: e.target.value }))} /><select value={withdrawForm.currency} onChange={e => setWithdrawForm(f => ({ ...f, currency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
-                        <div className="sp-formrow"><span>Fee<small className="sp-formrow-hint">Optional</small></span><span className="sp-moneyin"><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={withdrawForm.fee} onChange={e => setWithdrawForm(f => ({ ...f, fee: e.target.value }))} /><select value={withdrawForm.feeCurrency} onChange={e => setWithdrawForm(f => ({ ...f, feeCurrency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        <SpAmountBlock value={withdrawForm.amount} onValue={v => setWithdrawForm(f => ({ ...f, amount: v }))} currency={withdrawForm.currency} onCurrency={c => setWithdrawForm(f => ({ ...f, currency: c }))} min={undefined} autoFocus />
+                        <SpAmountBlock label="Fee" hint="Optional" value={withdrawForm.fee} onValue={v => setWithdrawForm(f => ({ ...f, fee: v }))} currency={withdrawForm.feeCurrency} onCurrency={c => setWithdrawForm(f => ({ ...f, feeCurrency: c }))} min={undefined} />
                         <div className="sp-formrow"><span>Date</span><input type="date" max={DateUtils.today()} value={withdrawForm.date} onChange={e => setWithdrawForm(f => ({ ...f, date: e.target.value }))} /></div>
                         <div className="sp-formrow"><span>Deducted from account<small className="sp-formrow-hint">Amount + fee in {withdrawAccount.currency} · edit to match your statement</small></span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(withdrawAccount.currency)}</span><input type="number" step="0.01" inputMode="decimal" value={withdrawForm.deductedAmount} onChange={e => setWithdrawForm(f => ({ ...f, deductedAmount: e.target.value }))} /></span></div>
                     </div>
@@ -5999,8 +6028,8 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
                     <SpSheetHead icon="fas fa-money-bill-wave" tint="#fef3c7" ink="#d97706" title="Edit cash withdrawal" sub={editWithdraw.accountName} />
                     {editWithdraw.error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{editWithdraw.error}</span></div>}
                     <div className="sp-formcard" style={{marginTop: 0}}>
-                        <div className="sp-formrow"><span>Amount</span><span className="sp-moneyin"><input type="number" step="0.01" value={editWithdraw.amount} onChange={e => setEditWithdraw(p => ({ ...p, amount: e.target.value, error: '' }))} /><select value={editWithdraw.currency} onChange={e => setEditWithdraw(p => ({ ...p, currency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
-                        <div className="sp-formrow"><span>Fee</span><span className="sp-moneyin"><input type="number" step="0.01" value={editWithdraw.fee} onChange={e => setEditWithdraw(p => ({ ...p, fee: e.target.value }))} /><select value={editWithdraw.feeCurrency} onChange={e => setEditWithdraw(p => ({ ...p, feeCurrency: e.target.value }))}>{CurrencyService.getAllCurrencies().map(c => <option key={c.code} value={c.code}>{c.code}</option>)}</select></span></div>
+                        <SpAmountBlock value={editWithdraw.amount} onValue={v => setEditWithdraw(p => ({ ...p, amount: v, error: '' }))} currency={editWithdraw.currency} onCurrency={c => setEditWithdraw(p => ({ ...p, currency: c }))} min={undefined} />
+                        <SpAmountBlock label="Fee" value={editWithdraw.fee} onValue={v => setEditWithdraw(p => ({ ...p, fee: v }))} currency={editWithdraw.feeCurrency} onCurrency={c => setEditWithdraw(p => ({ ...p, feeCurrency: c }))} min={undefined} />
                         {/* Not recomputed from amount + fee on purpose: that would overwrite the historical figure at today's rate. */}
                         <div className="sp-formrow"><span>Deducted from account</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(editWithdraw.accountCurrency)}</span><input type="number" step="0.01" value={editWithdraw.deductedAmount} onChange={e => setEditWithdraw(p => ({ ...p, deductedAmount: e.target.value, error: '' }))} /></span></div>
                         <div className="sp-formrow"><span>Date</span><input type="date" max={DateUtils.today()} value={editWithdraw.date} onChange={e => setEditWithdraw(p => ({ ...p, date: e.target.value }))} /></div>
@@ -6296,13 +6325,13 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
             {notice && <div className={'sp-alert sp-alert-' + notice.tone} style={{marginTop: '12px'}}><i className={'fas ' + (notice.tone === 'err' ? 'fa-circle-exclamation' : 'fa-circle-check')}></i><span>{notice.text}</span></div>}
 
             <div className="sp-section-label">Default currency</div>
-            <div className="sp-curgrid">
+            <div className="sp-defcurgrid">
                 {supportedCurrencies.map(c => (
-                    <button key={c.code} type="button" className={'sp-curchip' + (c.code === currentCurrency ? ' is-on' : '')} onClick={() => handlePickDefault(c.code)} title={c.name}>
-                        <span className="sp-curchip-sym">{c.symbol}</span><span className="sp-curchip-code">{c.code}</span>
+                    <button key={c.code} type="button" className={'sp-defcur' + (c.code === currentCurrency ? ' is-on' : '')} onClick={() => handlePickDefault(c.code)} title={c.name}>
+                        <span className="sp-defcur-sym">{c.symbol}</span><span className="sp-defcur-code">{c.code}</span>
                     </button>
                 ))}
-                <button type="button" className="sp-curchip is-add" onClick={openAddCurrency}><span className="sp-curchip-sym"><i className="fas fa-plus"></i></span><span className="sp-curchip-code">Add</span></button>
+                <button type="button" className="sp-defcur is-add" onClick={openAddCurrency}><span className="sp-defcur-sym"><i className="fas fa-plus"></i></span><span className="sp-defcur-code">Add</span></button>
             </div>
             {staleCustomCurrencies.length > 0 && (
                 <div className="sp-alert sp-alert-warn" style={{marginTop: '10px'}}>
@@ -7305,8 +7334,6 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
         loadGoals(); if (onUpdate) onUpdate();
     };
 
-    const chipCurrencies = [...new Set([defaultCurrency || 'GBP', 'USD', 'EUR', formData.currency])].slice(0, 4);
-    const moreCount = Math.max(0, CurrencyService.getAllCurrencies().length - chipCurrencies.length);
     const sym = ValidationUtils.getCurrencySymbol(formData.currency);
     const formError = formErrors.name || formErrors.targetAmount || formErrors.deadline;
 
@@ -7328,21 +7355,7 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                     {formError && <div className="sp-alert sp-alert-err" style={{marginTop: '8px'}}><i className="fas fa-circle-exclamation"></i><span>{formError}</span></div>}
                     <div className={'sp-formrow' + (formErrors.name ? ' is-bad' : '')}><span>Name</span><input type="text" value={formData.name} placeholder="e.g. Holiday" onChange={e => set('name', e.target.value)} /></div>
                     <div className="sp-formrow"><span>Emoji</span><input type="text" value={formData.emoji} placeholder="✈️" maxLength={2} onChange={e => set('emoji', e.target.value)} style={{width: '60px', fontSize: '18px'}} /></div>
-                    <div className="sp-formrow">
-                        <span>Currency</span>
-                        <div className="sp-curchips is-light">
-                            {chipCurrencies.map(code => (
-                                <button key={code} type="button" className={'sp-curchip' + (formData.currency === code ? ' is-active' : '')} onClick={() => set('currency', code)}>
-                                    {formData.currency === code ? ValidationUtils.getCurrencySymbol(code) + ' ' + code : code}
-                                </button>
-                            ))}
-                            {moreCount > 0 && <button type="button" className="sp-curchip" onClick={() => setShowCurrencySheet(true)}>+{moreCount} more<i className="fas fa-chevron-down" style={{fontSize: '9px'}}></i></button>}
-                        </div>
-                    </div>
-                    <div className={'sp-formrow' + (formErrors.targetAmount ? ' is-bad' : '')}>
-                        <span>Target</span>
-                        <span className="sp-moneyin"><span>{sym}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0" value={formData.targetAmount} onChange={e => set('targetAmount', e.target.value)} /></span>
-                    </div>
+                    <SpAmountBlock label="Target" value={formData.targetAmount} onValue={v => set('targetAmount', v)} currency={formData.currency} onCurrency={code => set('currency', code)} bad={formErrors.targetAmount} min="0.01" placeholder="0" />
                     <div className="sp-formrow">
                         <span>Already saved<small className="sp-formrow-hint">Money you've already put aside</small></span>
                         <span className="sp-moneyin"><span>{sym}</span><input type="number" step="0.01" min="0" inputMode="decimal" placeholder="0" value={formData.currentSaved} onChange={e => set('currentSaved', e.target.value)} /></span>
@@ -7420,7 +7433,6 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
             })}
 
             {!showForm && <PinnedCta label="New Goal" icon="fas fa-piggy-bank" onClick={() => { resetForm(); setShowForm(true); setPendingDelete(null); window.scrollTo({ top: 0, behavior: 'smooth' }); }} />}
-            {showCurrencySheet && <CurrencySheet value={formData.currency} onPick={c => { set('currency', c); setShowCurrencySheet(false); }} onClose={() => setShowCurrencySheet(false)} />}
         </div>
     );
 }
@@ -7442,11 +7454,21 @@ const spScheduleVisible = (s, activeView) => {
 };
 const spScheduleEnded = (s, today) => !!(s.endDate && today > s.endDate);
 
+// Avatar letter for an owner label. "You" is the signed-in user, so it uses their name's
+// initial (Pritwish -> P), not the Y of the word "You".
+function spAvatarLetter(label) {
+    if (label === 'You') {
+        let name = (DataService.data && DataService.data.settings && DataService.data.settings.displayName) || '';
+        if (!name) { try { name = (JSON.parse(localStorage.getItem('financeApp_currentUser') || '{}') || {}).displayName || ''; } catch (_) { name = ''; } }
+        return (name.trim().charAt(0) || 'Y').toUpperCase();
+    }
+    return String(label || '?').trim().charAt(0).toUpperCase() || '?';
+}
 function spOwnerChip(person, people) {
     const key = person && person !== 'own' ? person : 'own';
     const name = key === 'own' ? 'You' : key;
     const oc = spPersonColor(key, people);
-    return <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{name.charAt(0).toUpperCase()}</span>{name}</span>;
+    return <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{spAvatarLetter(name)}</span>{name}</span>;
 }
 
 // Expanded-row action bar: icon tile over a small label (design's inline expand pattern).
@@ -7613,11 +7635,7 @@ function BillFormSheet({ bill, categories, activeView, onClose, onSaved }) {
                         ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
                         : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
                 </div>
-                <div className="sp-formrow"><span>Currency</span><button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button></div>
-                <div className={'sp-formrow' + (errors.amount ? ' is-bad' : '')}>
-                    <span>Amount</span>
-                    <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
-                </div>
+                <SpAmountBlock value={f.amount} onValue={v => set('amount', v)} currency={f.currency} onCurrency={c => set('currency', c)} bad={errors.amount} min="0.01" />
                 <div className="sp-formblock">
                     <div className="sp-formblock-label">Frequency</div>
                     <div className="sp-seg is-light" style={{marginTop: '8px'}}>
@@ -7637,7 +7655,6 @@ function BillFormSheet({ bill, categories, activeView, onClose, onSaved }) {
                     {remindChoices.map(n => <button key={n} type="button" className={remind === n ? 'is-active' : ''} onClick={() => set('reminderDaysBefore', n)}>{n === 0 ? 'Off' : n + 'd'}</button>)}
                 </div>
             </div>
-            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { set('currency', c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
         </Sheet>
     );
 }
@@ -9388,21 +9405,17 @@ function NetWorthItemSheet({ type, item, assetCategories, liabilityCategories, b
                 </div>
                 <div className="sp-formrow"><span>Date of opening</span><input type="date" value={f.openDate} max={DateUtils.today()} onChange={e => set('openDate', e.target.value)} /></div>
                 <div className="sp-formrow"><span>Country</span><SpCountrySelect value={f.country} currency={f.currency} onChange={v => set('country', v)} /></div>
-                <div className="sp-formrow">
-                    <span>Currency</span>
-                    {locked
-                        ? <span className="sp-lockedval"><b>{f.currency}</b><i className="fas fa-lock"></i></span>
-                        : <button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button>}
-                </div>
             </div>
             <div className="sp-formlabel">{item ? 'Opening balance' : isAsset ? 'Opening balance' : 'Amount owed'}</div>
             <div className="sp-formcard" style={{marginTop: '8px'}}>
-                <div className={'sp-formrow' + (errors.value ? ' is-bad' : '')}>
-                    <span>{item ? 'Amount' : isAsset ? 'Value today' : 'Owed today'}</span>
-                    {locked
-                        ? <span className="sp-lockedval"><b>{spFmtMoney(item.value, item.currency)}</b><i className="fas fa-lock"></i></span>
-                        : <span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.value} onChange={e => set('value', e.target.value)} /></span>}
-                </div>
+                {locked ? (
+                    <div className="sp-formblock sp-amtblock">
+                        <div className="sp-amtblock-row"><span className="sp-amtblock-label">Amount</span><span className="sp-lockedval"><b>{spFmtMoney(item.value, item.currency)}</b><i className="fas fa-lock"></i></span></div>
+                        <div className="sp-curchips is-light"><span className="sp-curchip is-active">{CurrencyService.getCurrencySymbol(item.currency) + ' ' + item.currency}<i className="fas fa-lock" style={{fontSize: '9px'}}></i></span></div>
+                    </div>
+                ) : (
+                    <SpAmountBlock label={item ? 'Amount' : isAsset ? 'Value today' : 'Owed today'} value={f.value} onValue={v => set('value', v)} currency={f.currency} onCurrency={setCurrency} bad={errors.value} min="0.01" />
+                )}
                 {locked && <div className="sp-hint" style={{fontSize: '11px', padding: '0 0 10px'}}><i className="fas fa-lock" style={{marginRight: '5px'}}></i>Locked because this {noun} has {isAsset ? 'top-ups or valuations' : 'balance updates'}. Use {isAsset ? 'Top up or Update value' : 'Update balance'} instead.</div>}
                 {!item && isAsset && (
                     <div className="sp-formblock">
@@ -9429,7 +9442,6 @@ function NetWorthItemSheet({ type, item, assetCategories, liabilityCategories, b
                     <textarea className="sp-textarea" rows={2} style={{marginTop: '8px'}} value={f.notes} placeholder="e.g. Account number, platform, who manages it" onChange={e => set('notes', e.target.value)} />
                 </div>
             </div>
-            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { setCurrency(c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
         </Sheet>
     );
 }
@@ -9592,17 +9604,12 @@ function NetWorthCashSheet({ mode, target, activeView, defaultCurrency, onClose,
             {error && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{error}</span></div>}
             <div className="sp-formcard" style={{marginTop: 0}}>
                 {!target.locked && activeView.length > 1 && <div className="sp-formrow"><span>Whose cash</span><PersonSelect value={person === 'own' ? '' : person} onChange={v => setPerson(v || 'own')} activeView={activeView} className="" ownLabel="You" /></div>}
-                <div className="sp-formrow">
-                    <span>Currency</span>
-                    {target.locked ? <b>{currency}</b> : <button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{currency}<i className="fas fa-chevron-down"></i></button>}
-                </div>
                 <div className="sp-formrow"><span>Cash now (computed)</span><b>{spFmtMoney(current, currency)}</b></div>
-                <div className="sp-formrow"><span>{isAdd ? 'Amount received' : 'Actual cash'}</span><span className="sp-moneyin"><span>{CurrencyService.getCurrencySymbol(currency)}</span><input type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={amount} autoFocus onChange={e => { setAmount(e.target.value); setError(''); }} /></span></div>
+                <SpAmountBlock label={isAdd ? 'Amount received' : 'Actual cash'} value={amount} onValue={v => { setAmount(v); setError(''); }} currency={currency} onCurrency={setCurrency} locked={target.locked} autoFocus />
                 {isAdd && <div className="sp-formrow"><span>Date</span><input type="date" value={date} max={today} onChange={e => setDate(e.target.value)} /></div>}
                 <div className="sp-formrow"><span>Note</span><input type="text" value={notes} placeholder={isAdd ? 'e.g. Birthday money' : 'Optional'} onChange={e => setNotes(e.target.value)} /></div>
             </div>
             <div className="sp-hint" style={{fontSize: '11px', margin: '8px 4px 0'}}>Saved as a cash correction (shown with balance reconciliations). It isn't counted as income or spending.</div>
-            {showCurrency && <CurrencySheet value={currency} onPick={c => { setCurrency(c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
         </Sheet>
     );
 }
@@ -9667,9 +9674,16 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
             if (!map[k]) map[k] = { country: country || '', currency, assets: 0, owed: 0 };
             if (type === 'asset') map[k].assets += value; else map[k].owed += value;
         };
-        counted.forEach(i => add(i.country, i.currency, i.type, i.value));
+        // Cash has no country; it gets its own "Cash in hand" block below instead of a row per currency.
+        counted.filter(i => !i.isComputedCash).forEach(i => add(i.country, i.currency, i.type, i.value));
         debtLiabilities.forEach(d => add('', d.currency, 'liability', d.amount));
         return Object.values(map).map(r => ({ ...r, net: r.assets - r.owed })).sort((a, b) => convertToDefault(b.net, b.currency) - convertToDefault(a.net, a.currency));
+    })();
+    // One line per currency (summed across people in a shared view), in the original currency.
+    const cashRows = (() => {
+        const map = {};
+        cashItems.forEach(c => { map[c.currency] = (map[c.currency] || 0) + c.value; });
+        return Object.entries(map).map(([currency, value]) => ({ currency, value })).sort((a, b) => convertToDefault(b.value, b.currency) - convertToDefault(a.value, a.currency));
     })();
     const hasForeign = [...counted, ...primaryWalletItems].some(i => i.currency !== defaultCurrency);
 
@@ -9696,14 +9710,17 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
         }
         return groups.map(g => {
             const totals = {};
-            g.items.forEach(i => { const k = (i.country || '') + '|' + i.currency; totals[k] = totals[k] || { country: i.country || '', currency: i.currency, value: 0 }; totals[k].value += i.value; });
+            // Card totals include primary accounts (g.extra). Only the top card leaves them out, since
+            // its In wallet row already holds their balance.
+            [...g.items, ...(g.extra || [])].forEach(i => { const k = (i.country || '') + '|' + i.currency; totals[k] = totals[k] || { country: i.country || '', currency: i.currency, value: 0 }; totals[k].value += i.value; });
             return { ...g, totals: Object.values(totals) };
         });
     };
     const assetGroups = buildGroups('asset');
     const liabilityGroups = buildGroups('liability');
     const sumConverted = (list) => list.reduce((s, i) => s + convertToDefault(i.value, i.currency), 0);
-    const totalAssetsConv = sumConverted(counted.filter(i => i.type === 'asset'));
+    // The Assets heading is the sum of the cards below it, primary accounts included.
+    const totalAssetsConv = sumConverted([...counted.filter(i => i.type === 'asset'), ...primaryWalletItems]);
     const totalLiabConv = sumConverted(counted.filter(i => i.type === 'liability')) + debtLiabilities.reduce((s, d) => s + convertToDefault(d.amount, d.currency), 0);
     const fmt0 = (v) => spFmtMoney(v, defaultCurrency, 0);
 
@@ -9738,7 +9755,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 <button type="button" className="sp-nwitem-row" onClick={() => { setOpenItem(isOpen ? null : groupKey + ':' + item.id); setPendingDelete(null); }}>
                     <span className="sp-nwitem-main">
                         <span className="sp-schedtitle">
-                            <span>{item.name}</span>
+                            <span>{kind === 'cash' ? item.name + ' · ' + item.currency : item.name}</span>
                             {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></span>}
                             {activeView.length > 1 && spOwnerChip(item.person, people)}
                             {sch && <i className="fas fa-rotate" style={{color: '#7c3aed', fontSize: '10px', flexShrink: 0}} title="Recurring investment"></i>}
@@ -9780,7 +9797,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                             </div>
                         )}
                         {kind === 'bank' && <div className="sp-nwdetail">Worked out from this account's linked transactions. Adjust it with Balance (reconcile) in More → Accounts.</div>}
-                        {kind === 'primary' && <div className="sp-nwdetail">Your primary account. Its balance is counted in "In wallet" above, so it isn't added again here.</div>}
+                        {kind === 'primary' && <div className="sp-nwdetail">Your primary account. It counts towards this card's total; in the top card its balance is shown under "In wallet" instead of by country.</div>}
                         {kind === 'cash' && <div className="sp-nwdetail">Cash withdrawals minus cash spending, plus any cash corrections.</div>}
                         {kind === 'debt' && <div className="sp-nwdetail">Settle or edit it in Scheduled → Debts.</div>}
                         {kind === 'stored' && (
@@ -9817,7 +9834,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 {g.totals.length > 0 && (
                     <div className="sp-nwtotals">
                         {g.totals.map(t => (
-                            <div key={t.country + t.currency}><span className="sp-nwcc">{spCountryCode(t.country)}</span><b style={{color: type === 'liability' || t.value < 0 ? '#e11d48' : undefined}}>{type === 'liability' ? '−' : ''}{spFmtMoney(type === 'liability' ? Math.abs(t.value) : t.value, t.currency)}</b></div>
+                            <div key={t.country + t.currency}><span className="sp-nwcc">{t.country ? spCountryCode(t.country) : t.currency}</span><b style={{color: type === 'liability' || t.value < 0 ? '#e11d48' : undefined}}>{type === 'liability' ? '−' : ''}{spFmtMoney(type === 'liability' ? Math.abs(t.value) : t.value, t.currency)}</b></div>
                         ))}
                     </div>
                 )}
@@ -9840,7 +9857,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
 
             <div className="sp-nwhero">
                 <div className="sp-nwhero-label">Net worth by country</div>
-                {countryRows.length === 0 && <div className="sp-nwhero-empty">Add an asset or liability to see where you stand.</div>}
+                {countryRows.length === 0 && cashRows.length === 0 && <div className="sp-nwhero-empty">Add an asset or liability to see where you stand.</div>}
                 {countryRows.map(r => (
                     <div key={r.country + r.currency} className="sp-nwhero-row">
                         <span className="sp-nwhero-cc">{spCountryCode(r.country)}</span>
@@ -9851,6 +9868,20 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                         <div className="sp-nwhero-val" style={{color: r.net < 0 ? '#fb7185' : undefined}}>{spFmtMoney(r.net, r.currency)}</div>
                     </div>
                 ))}
+                {cashRows.length > 0 && (
+                    <div className="sp-nwhero-cash">
+                        <div className="sp-nwhero-row">
+                            <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-money-bill-wave"></i></span>
+                            <div className="sp-nwhero-main">
+                                <div className="sp-nwhero-name">Cash in hand</div>
+                                <div className="sp-nwhero-sub" style={{color: 'var(--sp-slate-400)'}}>{cashRows.length === 1 ? '1 currency' : cashRows.length + ' currencies'}</div>
+                            </div>
+                        </div>
+                        <div className="sp-nwhero-cashlist">
+                            {cashRows.map(r => <span key={r.currency} className="sp-nwhero-cashval" title={r.currency} style={{color: r.value < 0 ? '#fb7185' : undefined}}>{spFmtMoney(r.value, r.currency)}</span>)}
+                        </div>
+                    </div>
+                )}
                 <div className="sp-nwhero-row is-wallet">
                     <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-wallet"></i></span>
                     <div className="sp-nwhero-main">
@@ -9928,15 +9959,10 @@ function DebtFormSheet({ debt, direction, defaultCurrency, activeView, onClose, 
                         ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
                         : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
                 </div>
-                <div className="sp-formrow"><span>Currency</span><button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button></div>
-                <div className={'sp-formrow' + (errors.amount ? ' is-bad' : '')}>
-                    <span>Amount</span>
-                    <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
-                </div>
+                <SpAmountBlock value={f.amount} onValue={v => set('amount', v)} currency={f.currency} onCurrency={c => set('currency', c)} bad={errors.amount} min="0.01" />
                 <div className="sp-formrow"><span>Due date</span><input type="date" value={f.dueDate} onChange={e => set('dueDate', e.target.value)} /></div>
                 <div className="sp-formrow"><span>Note</span><input type="text" value={f.notes} placeholder="Optional" onChange={e => set('notes', e.target.value)} /></div>
             </div>
-            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { set('currency', c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
         </Sheet>
     );
 }
@@ -10783,16 +10809,20 @@ function App() {
         const [expensesData, incomeData, categoriesData, settings] = await Promise.all([
             DataService.getExpenses(), DataService.getIncome(), DataService.getCategories(), DataService.getSettings()
         ]);
-        setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
-        setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
-        setCategories(categoriesData);
-        setNetWorthItems(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, view)));
-        // getNetWorthCategories('asset') guarantees "Bank & Savings" (a locked default)
-        // exists before this state is read by the Net Worth screen's category grouping.
-        setAssetCategories(DataService.getNetWorthCategories('asset'));
-        setLiabilityCategories(DataService.getNetWorthCategories('liability'));
-        setDefaultCurrency(settings.currency || 'GBP');
-        setPeople(DataService.getPeople());
+        // One render for the whole reload: after an await these setters aren't batched, and screens
+        // would otherwise briefly see the new view's expenses next to the previous view's income.
+        ReactDOM.unstable_batchedUpdates(() => {
+            setExpenses(expensesData.filter(e => matchesActiveView(e.paidBy, view)));
+            setIncome(incomeData.filter(i => matchesActiveView(i.paidBy, view)));
+            setCategories(categoriesData);
+            setNetWorthItems(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, view)));
+            // getNetWorthCategories('asset') guarantees "Bank & Savings" (a locked default)
+            // exists before this state is read by the Net Worth screen's category grouping.
+            setAssetCategories(DataService.getNetWorthCategories('asset'));
+            setLiabilityCategories(DataService.getNetWorthCategories('liability'));
+            setDefaultCurrency(settings.currency || 'GBP');
+            setPeople(DataService.getPeople());
+        });
     };
 
     const handleActiveViewChange = (newView) => {
