@@ -442,7 +442,7 @@ body:has(.sp-shell) { background: #e3e7ee; }
 .sp-cta { width: 100%; height: 54px; border: none; border-radius: 18px; font-size: 15px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; font-family: var(--sp-font); background: var(--sp-green); color: var(--sp-green-ink); box-shadow: 0 16px 30px -10px #10b981aa; }
 .sp-cta.is-dark { background: var(--sp-navy); color: #fff; box-shadow: 0 16px 30px -12px rgba(15, 23, 42, .5); }
 .sp-cta:disabled { background: var(--sp-slate-300); color: #fff; box-shadow: none; cursor: default; }
-body:has(.sp-cta-wrap) .sp-dock { display: none; }
+body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 
 /* Add / edit expense form */
 .sp-formhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -639,3 +639,72 @@ body:has(.sp-cta-wrap) .sp-dock { display: none; }
 .sp-mm-body { padding: 0 14px 12px; border-top: 1px solid var(--sp-slate-100); }
 .sp-mm-body h5 { font-size: 13px; font-weight: 800; color: var(--sp-navy); margin: 12px 0 6px; }
 .sp-mm-body > div:first-child { margin-top: 0 !important; }
+
+/* ---------- Scheduled (Phase 5) ---------- */
+.sp-cta-wrap.is-above-dock { bottom: 96px; }
+.sp-sched { padding-bottom: 90px; }
+.sp-stattiles { display: flex; gap: 10px; margin-bottom: 12px; }
+.sp-stattile { flex: 1; min-width: 0; background: #fff; border-radius: 16px; padding: 13px 14px; }
+.sp-stattile-head { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 700; color: var(--sp-slate-500); letter-spacing: .04em; white-space: nowrap; }
+.sp-stattile-head > span { width: 24px; height: 24px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }
+.sp-stattile-value { font-size: 20px; font-weight: 800; color: var(--sp-navy); margin-top: 7px; }
+.sp-stattile-sub { font-size: 11px; color: var(--sp-slate-400); font-weight: 600; }
+
+.sp-schedcard { background: #fff; border-radius: 16px; margin-bottom: 10px; overflow: hidden; }
+.sp-schedrow { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 15px; cursor: pointer; background: none; border: none; text-align: left; font-family: inherit; color: inherit; }
+.sp-schedicon { width: 42px; height: 42px; border-radius: 13px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+.sp-schedmain { flex: 1; min-width: 0; display: block; }
+.sp-schedtitle { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sp-schedtitle > span:first-child { font-size: 14px; font-weight: 700; color: var(--sp-navy); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sp-schedmeta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; font-weight: 600; color: var(--sp-slate-400); margin-top: 3px; }
+.sp-schedremind { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; color: #6366f1; font-size: 11px; font-weight: 700; }
+.sp-schedremind i { font-size: 10px; }
+.sp-schedend { display: block; font-size: 11px; font-weight: 700; color: var(--sp-slate-400); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-schedright { text-align: right; flex-shrink: 0; display: block; }
+.sp-schedamt { display: block; font-size: 15px; font-weight: 800; color: var(--sp-navy); white-space: nowrap; }
+.sp-schedsub { display: block; font-size: 11px; color: var(--sp-slate-400); font-weight: 600; margin-top: 3px; }
+.sp-schedopen { background: var(--sp-slate-50); border-top: 1px solid var(--sp-slate-100); padding: 6px 8px 8px; }
+.sp-schednote { font-size: 12px; font-weight: 600; color: var(--sp-slate-500); padding: 6px 8px 2px; }
+.sp-kindtag { display: inline-flex; align-items: center; font-size: 9px; font-weight: 800; letter-spacing: .04em; padding: 2px 6px; border-radius: 6px; flex-shrink: 0; white-space: nowrap; }
+.sp-kindtag.is-paused { background: var(--sp-slate-100); color: var(--sp-slate-500); }
+
+.sp-actbar { display: flex; gap: 2px; }
+.sp-actbar-item { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 8px 0 7px; border-radius: 12px; cursor: pointer; background: none; border: none; font-family: inherit; }
+.sp-actbar-item:hover { background: #fff; }
+.sp-actbar-icon { width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+.sp-actbar-icon.is-green { background: var(--sp-green); color: var(--sp-green-ink); }
+.sp-actbar-icon.is-slate { background: var(--sp-slate-100); color: var(--sp-navy); }
+.sp-actbar-icon.is-amber { background: #fef3c7; color: #b45309; }
+.sp-actbar-icon.is-blue { background: #dbeafe; color: #1d4ed8; }
+.sp-actbar-icon.is-rose { background: var(--sp-rose-tint); color: var(--sp-rose); }
+.sp-actbar-label { font-size: 10px; font-weight: 700; color: var(--sp-slate-600); white-space: nowrap; }
+
+.sp-debtpills { display: flex; gap: 8px; margin-bottom: 12px; }
+.sp-debtpills > button { flex: 1; min-width: 0; text-align: center; font-size: 12px; font-weight: 700; padding: 9px 6px; border-radius: 12px; cursor: pointer; background: #fff; color: var(--sp-slate-600); border: none; font-family: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-debtpills > button.is-active { background: var(--sp-navy); color: #fff; }
+.sp-showsettled { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin: 4px 0 10px; padding: 9px; border-radius: 12px; border: none; background: none; color: var(--sp-slate-500); font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.sp-showsettled i { font-size: 10px; }
+
+.sp-sheethead { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; }
+.sp-sheethead-icon { width: 40px; height: 40px; border-radius: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 15px; }
+.sp-sheethead-sub { font-size: 12px; color: var(--sp-slate-500); font-weight: 600; }
+.sp-sheet-q { font-size: 13px; font-weight: 700; color: var(--sp-navy); margin: 2px 2px 10px; }
+.sp-sheet-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.sp-sheet-actions .sp-btn { height: 50px; font-size: 14px; gap: 8px; }
+.sp-sheet-actions .sp-btn-row .sp-btn { flex: 1; }
+.sp-formrow > b { font-size: 14px; font-weight: 700; color: var(--sp-navy); text-align: right; }
+.sp-formblock-label { font-size: 14px; color: var(--sp-slate-500); font-weight: 600; }
+.sp-moneyin { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sp-moneyin > span { color: var(--sp-slate-400); font-weight: 800; font-size: 15px; }
+.sp-moneyin input { width: 110px; font-size: 16px !important; font-weight: 800 !important; }
+.sp-rowpick { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; font-size: 14px; font-weight: 800; color: var(--sp-navy); cursor: pointer; font-family: inherit; padding: 0; }
+.sp-rowpick i { font-size: 11px; }
+.sp-lockedval { display: inline-flex; align-items: center; gap: 8px; }
+.sp-lockedval > i { color: var(--sp-slate-300); font-size: 11px; }
+.sp-remind-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sp-remind-head > span:first-child { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 800; color: var(--sp-navy); }
+.sp-remind-head > span:first-child i { color: #6366f1; }
+.sp-remind-when { font-size: 11px; font-weight: 700; color: var(--sp-slate-400); }
+.sp-remind-chips { display: flex; gap: 6px; margin-top: 10px; }
+.sp-remind-chips > button { flex: 1; min-width: 0; padding: 9px 0; border-radius: 12px; background: var(--sp-slate-50); border: 1px solid var(--sp-slate-200); color: var(--sp-slate-600); font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.sp-remind-chips > button.is-active { background: var(--sp-indigo-tint); border-color: #a5b4fc; color: var(--sp-indigo); }

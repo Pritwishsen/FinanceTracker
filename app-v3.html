@@ -559,9 +559,9 @@ function ConflictCompare({ localRecord, cloudSnapshot, detectedAt, fieldLabels =
 }
 
 // Fixed save button at the bottom of add/edit screens (hides the dock via CSS while shown).
-function PinnedCta({ label, icon, onClick, disabled, type = 'button', variant }) {
+function PinnedCta({ label, icon, onClick, disabled, type = 'button', variant, aboveDock }) {
     return (
-        <div className="sp-cta-wrap">
+        <div className={'sp-cta-wrap' + (aboveDock ? ' is-above-dock' : '')}>
             <button type={type} className={'sp-cta' + (variant === 'dark' ? ' is-dark' : '')} onClick={onClick} disabled={disabled}>
                 {icon && <i className={icon}></i>}{label}
             </button>
@@ -2191,7 +2191,7 @@ class DataService {
         if (!amount || parseFloat(amount) <= 0) throw new Error('Amount must be greater than 0');
         const today = DateUtils.today();
         if (!nextDueDate || nextDueDate < today) throw new Error('Due date must be today or in the future');
-        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: parseInt(reminderDaysBefore) || 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false, createdAt: new Date().toISOString() };
+        const bill = { id: DataService._uniqueId(), name: name.trim(), amount: parseFloat(amount), currency: currency || 'GBP', frequency: frequency || 'Monthly', nextDueDate, categoryId: parseInt(categoryId) || null, subcategory: subcategory || '', reminderDaysBefore: Number.isFinite(parseInt(reminderDaysBefore)) ? parseInt(reminderDaysBefore) : 3, notes: notes || '', person: person || 'own', createdInView: createdInView || ['own'], isActive: true, isPaid: false, createdAt: new Date().toISOString() };
         const bills = this.getBills(); bills.push(bill); this.saveBills(bills); return bill;
     }
     static updateBill(id, updates) { const bills = this.getBills(); const i = bills.findIndex(b => b.id === id); if (i !== -1) { bills[i] = { ...bills[i], ...updates, updatedAt: new Date().toISOString() }; this.saveBills(bills); } }
@@ -8776,192 +8776,253 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
     );
 }
 
+// ── Scheduled (Phase 5): shared bits for Bills / Recurring / Debts ───────────
+const SP_BILL_FREQ_MONTHLY = { Weekly: 4.33, Monthly: 1, Quarterly: 1 / 3, Yearly: 1 / 12 };
+const SP_SCHED_FREQ_MONTHLY = { daily: 30.44, weekly: 4.33, monthly: 1, quarterly: 1 / 3, yearly: 1 / 12 };
+const SP_REMIND_CHOICES = [0, 1, 3, 7, 14];
+const spShortDate = (d) => d ? DateUtils.parseDateStr(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }).replace(/\bSept\b/, 'Sep') : '';
+const spLongDate = (d) => d ? DateUtils.parseDateStr(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).replace(/\bSept\b/, 'Sep') : '';
+// Day + month, adding the year only when it isn't the current one.
+const spDueDate = (d) => d && d.slice(0, 4) !== DateUtils.today().slice(0, 4) ? spLongDate(d) : spShortDate(d);
+const spDaysFrom = (today, d) => Math.round((DateUtils.parseDateStr(d) - DateUtils.parseDateStr(today)) / 86400000);
+// Visibility rules shared by the list tabs and the Scheduled stat tiles (unchanged from before).
+const spBillVisible = (b, activeView) => !b.person || matchesActiveView(b.person, activeView) || (b.createdInView || []).some(v => activeView.includes(v));
+const spScheduleVisible = (s, activeView) => {
+    const t = s.templateExpense || {};
+    return matchesActiveView(s.type === 'asset' || s.type === 'liability' ? t.person : t.paidBy, activeView);
+};
+const spScheduleEnded = (s, today) => !!(s.endDate && today > s.endDate);
+
+function spOwnerChip(person, people) {
+    const key = person && person !== 'own' ? person : 'own';
+    const name = key === 'own' ? 'You' : key;
+    const oc = spPersonColor(key, people);
+    return <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{name.charAt(0).toUpperCase()}</span>{name}</span>;
+}
+
+// Expanded-row action bar: icon tile over a small label (design's inline expand pattern).
+function SpActBar({ actions }) {
+    return (
+        <div className="sp-actbar">
+            {actions.filter(Boolean).map(a => (
+                <button key={a.key} type="button" className="sp-actbar-item" onClick={a.onClick}>
+                    <span className={'sp-actbar-icon is-' + a.tone}><i className={a.icon}></i></span>
+                    <span className="sp-actbar-label">{a.label}</span>
+                </button>
+            ))}
+        </div>
+    );
+}
+
+function SpSheetHead({ icon, tint, ink, title, sub }) {
+    return (
+        <div className="sp-sheethead">
+            <span className="sp-sheethead-icon" style={{background: tint, color: ink}}><i className={icon}></i></span>
+            <div style={{minWidth: 0}}><div className="sp-sheet-title">{title}</div>{sub && <div className="sp-sheethead-sub">{sub}</div>}</div>
+        </div>
+    );
+}
+
+// Category chips + sub-category row, used by the bill form and the mark-paid / settle sheets.
+function SpCategoryPicker({ categories, categoryId, subcategory, onChange, required, bad }) {
+    const cat = categories.find(c => String(c.id) === String(categoryId));
+    const subs = (cat && cat.subcategories) || [];
+    return (
+        <React.Fragment>
+            <div className="sp-catchips">
+                {categories.map((c, i) => {
+                    const on = String(c.id) === String(categoryId);
+                    const look = spCategoryLook(c, i);
+                    return (
+                        <button key={c.id} type="button" className={'sp-catchip' + (on ? ' is-active' : '') + (bad && !categoryId ? ' is-bad' : '')}
+                            onClick={() => onChange(on && !required ? '' : String(c.id), '')}>
+                            <i className={look.icon} style={{color: on ? '#34d399' : look.ink}}></i>{c.name}
+                        </button>
+                    );
+                })}
+            </div>
+            {subs.length > 0 && (
+                <div className="sp-formcard" style={{marginTop: '12px'}}>
+                    <div className={'sp-formrow' + (bad && !subcategory ? ' is-bad' : '')}>
+                        <span>Sub category</span>
+                        <select value={subcategory} onChange={e => onChange(String(categoryId), e.target.value)}>
+                            <option value="">{required ? 'Select' : 'None'}</option>
+                            {subs.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                    </div>
+                </div>
+            )}
+        </React.Fragment>
+    );
+}
+
+// Mirrors DataService.markBillPaid's frequency-based advancement.
+const spBillNextDue = (bill) => {
+    const delta = bill.frequency === 'Weekly' ? { days: 7 } : bill.frequency === 'Monthly' ? { months: 1 } : bill.frequency === 'Quarterly' ? { months: 3 } : bill.frequency === 'Yearly' ? { years: 1 } : {};
+    return DateUtils.addToDateStr(bill.nextDueDate, delta);
+};
+
+function BillPaySheet({ bill, categories, onClose, onPaid }) {
+    const today = DateUtils.today();
+    const [categoryId, setCategoryId] = useState(bill.categoryId ? String(bill.categoryId) : '');
+    const [subcategory, setSubcategory] = useState(bill.subcategory || '');
+    const [busy, setBusy] = useState(false);
+    const origCat = categories.find(c => c.id === bill.categoryId);
+    // Same check as before: no category, or a category with sub-categories but none picked.
+    const needsPick = !bill.categoryId || !origCat || (origCat.subcategories && origCat.subcategories.length > 0 && !bill.subcategory);
+    const cat = categories.find(c => String(c.id) === String(categoryId));
+    const catHasSubs = !!(cat && cat.subcategories && cat.subcategories.length > 0);
+    const canLog = !!categoryId && (!catHasSubs || !!subcategory);
+    const nextDue = spBillNextDue(bill);
+
+    const logAndPay = async () => {
+        if (!canLog || busy) return;
+        setBusy(true);
+        try {
+            await DataService.addExpense({ amount: bill.amount, date: today, description: bill.name, categoryId: parseInt(categoryId), subcategory: subcategory || '', currency: bill.currency || 'GBP', paidBy: '' });
+            DataService.updateBill(bill.id, { categoryId: parseInt(categoryId), subcategory: subcategory || '', nextDueDate: nextDue, isPaid: false });
+            onPaid(bill.name + ' logged as an expense · next due ' + spShortDate(nextDue));
+        } catch (e) { onPaid('Failed to log expense'); }
+    };
+    const payOnly = () => { DataService.markBillPaid(bill.id); onPaid(bill.name + ' marked paid · next due ' + spShortDate(nextDue)); };
+
+    return (
+        <Sheet onClose={onClose}>
+            <SpSheetHead icon="fas fa-check" tint="#dcfce7" ink="#16a34a" title={'Mark ' + bill.name + ' as paid'} sub={'Next due moves to ' + spShortDate(nextDue)} />
+            <div className="sp-sheet-q">Log this payment as an expense?</div>
+            {needsPick ? (
+                <React.Fragment>
+                    <div className="sp-alert sp-alert-warn" style={{marginBottom: 0}}><i className="fas fa-circle-info"></i><span>{bill.categoryId && origCat ? 'Pick a sub category to log this expense.' : 'This bill has no category yet. Pick one to log it as an expense.'}</span></div>
+                    <div className="sp-formlabel">Expense category</div>
+                    <SpCategoryPicker categories={categories} categoryId={categoryId} subcategory={subcategory} required onChange={(c, s) => { setCategoryId(c); setSubcategory(s); }} />
+                    <div className="sp-formcard" style={{marginTop: '12px'}}>
+                        <div className="sp-formrow"><span>Amount</span><b>{ValidationUtils.formatCurrency(bill.amount, bill.currency || 'GBP')}</b></div>
+                        <div className="sp-formrow"><span>Date</span><b>Today, {spShortDate(today)}</b></div>
+                    </div>
+                </React.Fragment>
+            ) : (
+                <div className="sp-formcard" style={{marginTop: 0}}>
+                    <div className="sp-formrow"><span>Amount</span><b style={{fontSize: '15px', fontWeight: 800}}>{ValidationUtils.formatCurrency(bill.amount, bill.currency || 'GBP')}</b></div>
+                    <div className="sp-formrow"><span>Category</span><b>{origCat.name}</b></div>
+                    {bill.subcategory && <div className="sp-formrow"><span>Sub category</span><b>{bill.subcategory}</b></div>}
+                    <div className="sp-formrow"><span>Date</span><b>Today, {spShortDate(today)}</b></div>
+                </div>
+            )}
+            <div className="sp-sheet-actions">
+                <button type="button" className="sp-btn sp-btn-primary" disabled={!canLog || busy} onClick={logAndPay}><i className="fas fa-receipt"></i>Mark paid &amp; log expense</button>
+                <div className="sp-btn-row">
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-white" onClick={payOnly} disabled={busy}>Mark paid only</button>
+                </div>
+            </div>
+        </Sheet>
+    );
+}
+
+function BillFormSheet({ bill, categories, activeView, onClose, onSaved }) {
+    const today = DateUtils.today();
+    const people = DataService.getPeople();
+    const [f, setF] = useState(() => bill
+        ? { name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', subcategory: bill.subcategory || '', reminderDaysBefore: bill.reminderDaysBefore == null ? 3 : Number(bill.reminderDaysBefore), notes: bill.notes || '', person: bill.person || 'own' }
+        : { name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', subcategory: '', reminderDaysBefore: 3, notes: '', person: resolveActiveViewValue(activeView) || 'own' });
+    const [errors, setErrors] = useState({});
+    const [showCurrency, setShowCurrency] = useState(false);
+    const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+    const remind = Number(f.reminderDaysBefore) || 0;
+    const remindChoices = SP_REMIND_CHOICES.includes(remind) ? SP_REMIND_CHOICES : [...SP_REMIND_CHOICES, remind].sort((a, b) => a - b);
+
+    const save = () => {
+        const e = {};
+        if (!f.name || f.name.trim().length < 2) e.name = 'Name must be at least 2 characters';
+        if (!f.amount || parseFloat(f.amount) <= 0) e.amount = 'Amount must be greater than 0';
+        if (!f.nextDueDate || f.nextDueDate < today) e.nextDueDate = 'Due date must be today or in the future';
+        if (Object.keys(e).length > 0) { setErrors(e); return; }
+        try {
+            if (bill) {
+                DataService.updateBill(bill.id, { name: f.name.trim(), amount: parseFloat(f.amount), currency: f.currency, frequency: f.frequency, nextDueDate: f.nextDueDate, categoryId: parseInt(f.categoryId) || null, subcategory: f.subcategory || '', reminderDaysBefore: remind, notes: f.notes, person: f.person || 'own' });
+            } else {
+                DataService.addBill({ name: f.name.trim(), amount: f.amount, currency: f.currency, frequency: f.frequency, nextDueDate: f.nextDueDate, categoryId: f.categoryId, subcategory: f.subcategory, reminderDaysBefore: remind, notes: f.notes, person: f.person || 'own', createdInView: activeView });
+            }
+            onSaved(bill ? 'Bill updated' : f.name.trim() + ' added');
+        } catch (err) { setErrors({ name: err.message }); }
+    };
+    const firstError = errors.name || errors.amount || errors.nextDueDate;
+    const remindOn = remind > 0 && f.nextDueDate ? DateUtils.addToDateStr(f.nextDueDate, { days: -remind }) : '';
+
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{bill ? 'Save changes' : 'Save bill'}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon="fas fa-file-invoice" tint="#fef3c7" ink="#d97706" title={bill ? 'Edit bill' : 'Add bill'} sub="Scheduled payment with reminder" />
+            {firstError && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{firstError}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className={'sp-formrow' + (errors.name ? ' is-bad' : '')}><span>Bill name</span><input type="text" value={f.name} placeholder="e.g. Water" onChange={e => set('name', e.target.value)} /></div>
+                <div className="sp-formrow">
+                    <span>Bill owner</span>
+                    {activeView.length > 1
+                        ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
+                        : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
+                </div>
+                <div className="sp-formrow"><span>Currency</span><button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button></div>
+                <div className={'sp-formrow' + (errors.amount ? ' is-bad' : '')}>
+                    <span>Amount</span>
+                    <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
+                </div>
+                <div className="sp-formblock">
+                    <div className="sp-formblock-label">Frequency</div>
+                    <div className="sp-seg is-light" style={{marginTop: '8px'}}>
+                        {['Weekly', 'Monthly', 'Quarterly', 'Yearly'].map(q => <button key={q} type="button" className={f.frequency === q ? 'is-active' : ''} onClick={() => set('frequency', q)}>{q}</button>)}
+                    </div>
+                </div>
+                <div className={'sp-formrow' + (errors.nextDueDate ? ' is-bad' : '')}><span>Next due date</span><input type="date" value={f.nextDueDate} min={today} onChange={e => set('nextDueDate', e.target.value)} /></div>
+            </div>
+            <div className="sp-formlabel">Expense category</div>
+            <SpCategoryPicker categories={categories} categoryId={f.categoryId} subcategory={f.subcategory} onChange={(c, s) => setF(p => ({ ...p, categoryId: c, subcategory: s }))} />
+            <div className="sp-formcard" style={{marginTop: '12px'}}>
+                <div className="sp-formrow"><span>Note</span><input type="text" value={f.notes} placeholder="Optional" onChange={e => set('notes', e.target.value)} /></div>
+            </div>
+            <div className="sp-panel">
+                <div className="sp-remind-head"><span><i className="fas fa-bell"></i>Remind me before</span><span className="sp-remind-when">{remind > 0 ? 'On ' + spShortDate(remindOn) : 'No reminder'}</span></div>
+                <div className="sp-remind-chips">
+                    {remindChoices.map(n => <button key={n} type="button" className={remind === n ? 'is-active' : ''} onClick={() => set('reminderDaysBefore', n)}>{n === 0 ? 'Off' : n + 'd'}</button>)}
+                </div>
+            </div>
+            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { set('currency', c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
+        </Sheet>
+    );
+}
+
 function BillTracker({ categories, onUpdate, activeView, embedded }) {
-    const [bills, setBills] = useState([]);
-    const [showForm, setShowForm] = useState(false);
-    const [editingBill, setEditingBill] = useState(null);
-    const [formData, setFormData] = useState({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: DateUtils.today(), categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
-    const [formErrors, setFormErrors] = useState({});
-    const [deleteConfirm, setDeleteConfirm] = useState(null);
-    const [logMsg, setLogMsg] = useState('');
-    const [logExpenseBill, setLogExpenseBill] = useState(null);
-    const [logExpenseCategoryId, setLogExpenseCategoryId] = useState('');
-    const [logExpenseSubcategory, setLogExpenseSubcategory] = useState('');
-    const [logExpenseConfirm, setLogExpenseConfirm] = useState(null);
+    const [bills, setBills] = useState(() => DataService.getBills());
+    const [openId, setOpenId] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null);
+    const [formBill, setFormBill] = useState(null); // null | 'new' | bill
+    const [payBill, setPayBill] = useState(null);
+    const [toast, setToast] = useState('');
     const _f0 = FilterMemory.load('bills');
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
+    const people = DataService.getPeople();
 
     const loadBills = () => setBills(DataService.getBills());
-    useEffect(() => { loadBills(); }, []);
-
     useEffect(() => { FilterMemory.save('bills', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4000); return () => clearTimeout(t); }, [toast]);
 
     const syncConflicts = useMemo(() => SyncConflicts.read('bills'), [bills]);
-
     const today = DateUtils.today();
-
-    const getDaysDiff = (dateStr) => Math.ceil((new Date(dateStr) - new Date(today)) / 86400000);
-
-    const getBadge = (bill) => {
-        if (!bill.isActive) return null;
-        const diff = getDaysDiff(bill.nextDueDate);
-        if (diff < 0 && !bill.isPaid) return { label: 'OVERDUE', cls: 'bg-danger' };
-        if (diff === 0) return { label: 'DUE TODAY', cls: 'bg-danger' };
-        if (diff <= bill.reminderDaysBefore) return { label: 'DUE SOON', cls: 'bg-warning text-dark' };
-        return null;
-    };
-
-    const getMonthlyAmount = (bill) => {
-        if (!bill.isActive) return 0;
-        const map = { Weekly: 4.33, Monthly: 1, Quarterly: 1/3, Yearly: 1/12 };
-        return bill.amount * (map[bill.frequency] || 1);
-    };
-
-    // Global Active View — a bill is visible if it's linked to a selected person, OR it
-    // was created while a selected person's view was active (same pattern as debts'
-    // createdInView, so a bill logged for yourself while viewing "John" still shows up
-    // when you switch back to John's view even though its `person` field is 'own').
-    // Bills created before this field existed have no `person` at all — treated as
-    // visible under every view rather than disappearing.
-    const visibleBills = bills.filter(b => !b.person || matchesActiveView(b.person, activeView) || (b.createdInView || []).some(v => activeView.includes(v)));
-
-    const monthlyCommitment = visibleBills.reduce((s, b) => s + getMonthlyAmount(b), 0);
-
+    const visibleBills = bills.filter(b => spBillVisible(b, activeView));
     const displayBills = filterSyncConflict ? visibleBills.filter(b => !!syncConflicts[String(b.id)]) : visibleBills;
-
     const sortedBills = [...displayBills].sort((a, b) => {
-        const aOverdue = getDaysDiff(a.nextDueDate) < 0 && !a.isPaid;
-        const bOverdue = getDaysDiff(b.nextDueDate) < 0 && !b.isPaid;
-        const aToday = a.nextDueDate === today;
-        const bToday = b.nextDueDate === today;
-        if (aOverdue && !bOverdue) return -1;
-        if (!aOverdue && bOverdue) return 1;
-        if (aToday && !bToday) return -1;
-        if (!aToday && bToday) return 1;
-        return a.nextDueDate.localeCompare(b.nextDueDate);
+        if (!!a.isActive !== !!b.isActive) return a.isActive ? -1 : 1;
+        return (a.nextDueDate || '').localeCompare(b.nextDueDate || '');
     });
 
-    const activeBills = sortedBills.filter(b => b.isActive);
-    const inactiveBills = sortedBills.filter(b => !b.isActive);
+    const afterChange = (msg) => { loadBills(); if (msg) setToast(msg); if (onUpdate) onUpdate(); };
+    const handleDelete = (id) => { DataService.deleteBill(id); setPendingDelete(null); setOpenId(null); afterChange('Bill deleted'); };
+    const setActive = (bill, isActive) => { DataService.updateBill(bill.id, { isActive }); afterChange(bill.name + (isActive ? ' resumed' : ' paused')); };
 
-    const resetForm = () => {
-        setFormData({ name: '', amount: '', currency: 'GBP', frequency: 'Monthly', nextDueDate: today, categoryId: '', subcategory: '', reminderDaysBefore: '3', notes: '', person: resolveActiveViewValue(activeView) });
-        setFormErrors({}); setEditingBill(null);
-    };
-
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        const errors = {};
-        if (!formData.name || formData.name.trim().length < 2) errors.name = 'Name must be at least 2 characters';
-        if (!formData.amount || parseFloat(formData.amount) <= 0) errors.amount = 'Amount must be greater than 0';
-        if (!formData.nextDueDate || formData.nextDueDate < today) errors.nextDueDate = 'Due date must be today or in the future';
-        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-        try {
-            if (editingBill) {
-                DataService.updateBill(editingBill.id, { name: formData.name.trim(), amount: parseFloat(formData.amount), currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: parseInt(formData.categoryId) || null, subcategory: formData.subcategory || '', reminderDaysBefore: parseInt(formData.reminderDaysBefore) || 3, notes: formData.notes, person: formData.person || 'own' });
-            } else {
-                DataService.addBill({ name: formData.name.trim(), amount: formData.amount, currency: formData.currency, frequency: formData.frequency, nextDueDate: formData.nextDueDate, categoryId: formData.categoryId, subcategory: formData.subcategory, reminderDaysBefore: formData.reminderDaysBefore, notes: formData.notes, person: formData.person || 'own', createdInView: activeView });
-            }
-            resetForm(); setShowForm(false); loadBills(); onUpdate();
-        } catch (err) { setFormErrors({ name: err.message }); }
-    };
-
-    const handleEdit = (bill) => {
-        setFormData({ name: bill.name, amount: bill.amount.toString(), currency: bill.currency || 'GBP', frequency: bill.frequency || 'Monthly', nextDueDate: bill.nextDueDate, categoryId: bill.categoryId ? bill.categoryId.toString() : '', subcategory: bill.subcategory || '', reminderDaysBefore: (bill.reminderDaysBefore || 3).toString(), notes: bill.notes || '', person: bill.person || 'own' });
-        setEditingBill(bill); setShowForm(true);
-    };
-
-    const handleMarkPaid = (id) => { DataService.markBillPaid(id); loadBills(); onUpdate(); };
-    const handleDelete = (id) => { DataService.deleteBill(id); setDeleteConfirm(null); loadBills(); onUpdate(); };
-
-    // Mirrors DataService.markBillPaid's frequency-based advancement, so "Log as
-    // Expense" moves the due date the same way "Mark Paid" does (e.g. +1 month for
-    // a Monthly bill) instead of a second, divergent notion of "next due date".
-    const computeNextDueDate = (bill) => {
-        const delta = bill.frequency === 'Weekly' ? { days: 7 } : bill.frequency === 'Monthly' ? { months: 1 } : bill.frequency === 'Quarterly' ? { months: 3 } : bill.frequency === 'Yearly' ? { years: 1 } : {};
-        return DateUtils.addToDateStr(bill.nextDueDate, delta);
-    };
-
-    const handleLogExpense = (bill) => {
-        const cat = categories.find(c => c.id === bill.categoryId);
-        const catHasSubcats = !!(cat && cat.subcategories && cat.subcategories.length > 0);
-        // A category is missing outright, or the bill's category has subcategories but
-        // none was ever picked for this bill — either way, ask before logging instead of
-        // silently logging with no subcategory.
-        if (!bill.categoryId || (catHasSubcats && !bill.subcategory)) {
-            setLogExpenseCategoryId(bill.categoryId ? bill.categoryId.toString() : '');
-            setLogExpenseSubcategory(bill.subcategory || '');
-            setLogExpenseBill(bill);
-            return;
-        }
-        setLogExpenseConfirm({ bill, categoryId: bill.categoryId, subcategory: bill.subcategory || '' });
-    };
-
-    const handleLogExpenseCategoryContinue = () => {
-        const selectedCat = categories.find(c => c.id === parseInt(logExpenseCategoryId));
-        const selectedCatHasSubcats = !!(selectedCat && selectedCat.subcategories && selectedCat.subcategories.length > 0);
-        if (!logExpenseCategoryId || (selectedCatHasSubcats && !logExpenseSubcategory)) return;
-        setLogExpenseConfirm({ bill: logExpenseBill, categoryId: parseInt(logExpenseCategoryId), subcategory: logExpenseSubcategory });
-        setLogExpenseBill(null);
-    };
-
-    const handleConfirmLogExpense = async () => {
-        const { bill, categoryId, subcategory } = logExpenseConfirm;
-        try {
-            await DataService.addExpense({ amount: bill.amount, date: today, description: bill.name, categoryId: categoryId, subcategory: subcategory || '', currency: bill.currency || 'GBP', paidBy: '' });
-            const newDueDate = computeNextDueDate(bill);
-            DataService.updateBill(bill.id, { categoryId, subcategory: subcategory || '', nextDueDate: newDueDate, isPaid: false });
-            setLogMsg(bill.name + ' logged as expense — due date moved to ' + ValidationUtils.formatDate(newDueDate));
-            setTimeout(() => setLogMsg(''), 4000);
-            loadBills(); onUpdate();
-        } catch (e) { setLogMsg('Failed to log expense'); setTimeout(() => setLogMsg(''), 3000); }
-        setLogExpenseConfirm(null);
-    };
-
-    const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
-    const frequencies = ['Weekly', 'Monthly', 'Quarterly', 'Yearly'];
     const fmtCurrency = (amt, cur) => ValidationUtils.formatCurrency(amt, cur || 'GBP');
-
-    const BillRow = ({ bill }) => {
-        const badge = getBadge(bill);
-        const cat = categories.find(c => c.id === bill.categoryId);
-        return (
-            <div className="card mb-2" style={{borderRadius:'10px', border:'1px solid ' + (badge && badge.cls.includes('danger') ? '#dc3545' : badge ? '#ffc107' : '#e9ecef'), opacity: bill.isActive ? 1 : 0.6}}>
-                <div className="card-body py-2 px-3">
-                    <div className="d-flex justify-content-between align-items-start">
-                        <div style={{flex:1}}>
-                            <div className="d-flex align-items-center gap-2 flex-wrap">
-                                <strong style={{fontSize:'0.95rem'}}>{bill.name}</strong>
-                                {badge && <span className={'badge ' + badge.cls} style={{fontSize:'0.72rem'}}>{badge.label}</span>}
-                                <SyncConflictBadge conflict={syncConflicts[String(bill.id)]} onClick={() => setShowConflictDetail(bill.id)} />
-                            </div>
-                            <div style={{fontSize:'0.83rem', color:'#6c757d', marginTop:'0.15rem'}}>
-                                <strong>{fmtCurrency(bill.amount, bill.currency)}</strong> · {bill.frequency}
-                                {cat && <span> · {cat.name}{bill.subcategory ? ' / ' + bill.subcategory : ''}</span>}
-                            </div>
-                            <div style={{fontSize:'0.8rem', color:'#6c757d'}}>Due: {ValidationUtils.formatDate(bill.nextDueDate)}</div>
-                            {bill.notes && <div style={{fontSize:'0.78rem', color:'#aaa', fontStyle:'italic'}}>{bill.notes}</div>}
-                        </div>
-                        <div className="d-flex gap-1">
-                            <button className="btn btn-outline-primary btn-sm" style={{padding:'2px 7px'}} onClick={() => handleEdit(bill)}><i className="fas fa-edit"></i></button>
-                            <button className="btn btn-outline-danger btn-sm" style={{padding:'2px 7px'}} onClick={() => setDeleteConfirm(bill)}><i className="fas fa-trash"></i></button>
-                        </div>
-                    </div>
-                    {bill.isActive ? (
-                        <div className="d-flex gap-2 mt-2 flex-wrap">
-                            <button className="btn btn-success btn-sm" onClick={() => handleMarkPaid(bill.id)}><i className="fas fa-check me-1"></i>Mark Paid</button>
-                            <button className="btn btn-outline-secondary btn-sm" onClick={() => handleLogExpense(bill)}><i className="fas fa-receipt me-1"></i>Log as Expense</button>
-                            <button className="btn btn-outline-secondary btn-sm" onClick={() => { DataService.updateBill(bill.id, { isActive: false }); loadBills(); if (onUpdate) onUpdate(); }}><i className="fas fa-pause me-1"></i>Deactivate</button>
-                        </div>
-                    ) : (
-                        <button className="btn btn-outline-primary btn-sm mt-2" onClick={() => { DataService.updateBill(bill.id, { isActive: true }); loadBills(); if (onUpdate) onUpdate(); }}><i className="fas fa-play me-1"></i>Reactivate</button>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
     const conflictBill = showConflictDetail ? bills.find(b => b.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const billConflictFieldLabels = { name: 'Name', amount: 'Amount', currency: 'Currency', frequency: 'Frequency', nextDueDate: 'Next Due Date', categoryId: 'Category', subcategory: 'Subcategory', reminderDaysBefore: 'Reminder (days before)', notes: 'Notes', person: 'Person', isActive: 'Active', isPaid: 'Paid' };
@@ -8977,225 +9038,178 @@ function BillTracker({ categories, onUpdate, activeView, embedded }) {
         await DataService.updateBill(billId, updates);
         SyncConflicts.dismiss('bills', billId);
         setShowConflictDetail(null);
-        loadBills(); onUpdate();
+        afterChange();
     };
 
     return (
-        <div className={embedded ? undefined : 'screen'}>
-            <div className="screen-header" style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                <h2><i className="fas fa-file-invoice-dollar me-2"></i>Bills</h2>
-                <button className="btn btn-primary btn-sm" onClick={() => { if (showForm && !editingBill) { resetForm(); setShowForm(false); } else { resetForm(); setShowForm(true); } }}>
-                    <i className={'fas fa-' + (showForm && !editingBill ? 'times' : 'plus') + ' me-1'}></i>
-                    {showForm && !editingBill ? 'Cancel' : 'Add Bill'}
-                </button>
-            </div>
-
+        <div className={embedded ? undefined : 'sp-page'}>
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
             {Object.keys(syncConflicts).length > 0 && (
-                <div className="form-check mb-2">
-                    <input type="checkbox" className="form-check-input" id="filterBillSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
-                    <label className="form-check-label" htmlFor="filterBillSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                </div>
+                <label className="sp-check" style={{margin: '0 4px 10px'}}>
+                    <input type="checkbox" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i>Sync conflicts only
+                </label>
             )}
-
-            <div className="card mb-3" style={{borderRadius:'12px', background:'linear-gradient(135deg,#4a6cf7,#6a3de8)', color:'#fff', border:'none'}}>
-                <div className="card-body py-2 px-3">
-                    <div style={{fontSize:'0.8rem', opacity:0.85}}>Monthly Commitment</div>
-                    <div style={{fontSize:'1.5rem', fontWeight:'700'}}>{fmtCurrency(monthlyCommitment, 'GBP')}</div>
-                    <div style={{fontSize:'0.78rem', opacity:0.8}}>{activeBills.length} active bill{activeBills.length !== 1 ? 's' : ''}</div>
-                </div>
-            </div>
-
-            {logMsg && <div className="alert alert-success py-1 px-3 mb-2" style={{fontSize:'0.85rem'}}>{logMsg}</div>}
-
-            {showForm && (
-                <div className="card mb-3" style={{borderRadius:'12px', border:'1px solid #e9ecef'}}>
-                    <div className="card-body">
-                        <h6 className="card-title mb-3">{editingBill ? 'Edit Bill' : 'New Bill / Subscription'}</h6>
-                        <form onSubmit={handleSubmit}>
-                            <div className="row g-2">
-                                <div className="col-12">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Bill Name *</label>
-                                    <input type="text" className={'form-control ' + (formErrors.name ? 'is-invalid' : '')} value={formData.name} onChange={e => setFormData(p => ({...p, name: e.target.value}))} placeholder="e.g., Netflix, Rent, Phone" />
-                                    {formErrors.name && <div className="invalid-feedback">{formErrors.name}</div>}
-                                </div>
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Amount *</label>
-                                    <input type="number" step="0.01" min="0.01" className={'form-control ' + (formErrors.amount ? 'is-invalid' : '')} value={formData.amount} onChange={e => setFormData(p => ({...p, amount: e.target.value}))} placeholder="0.00" />
-                                    {formErrors.amount && <div className="invalid-feedback">{formErrors.amount}</div>}
-                                </div>
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Currency</label>
-                                    <select className="form-select" value={formData.currency} onChange={e => setFormData(p => ({...p, currency: e.target.value}))}>
-                                        {currencies.map(c => <option key={c} value={c}>{c}</option>)}
-                                    </select>
-                                </div>
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Frequency</label>
-                                    <select className="form-select" value={formData.frequency} onChange={e => setFormData(p => ({...p, frequency: e.target.value}))}>
-                                        {frequencies.map(f => <option key={f} value={f}>{f}</option>)}
-                                    </select>
-                                </div>
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Next Due Date *</label>
-                                    <input type="date" className={'form-control ' + (formErrors.nextDueDate ? 'is-invalid' : '')} value={formData.nextDueDate} onChange={e => setFormData(p => ({...p, nextDueDate: e.target.value}))} />
-                                    {formErrors.nextDueDate && <div className="invalid-feedback">{formErrors.nextDueDate}</div>}
-                                </div>
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Category</label>
-                                    <select className="form-select" value={formData.categoryId} onChange={e => setFormData(p => ({...p, categoryId: e.target.value, subcategory: ''}))}>
-                                        <option value="">None</option>
-                                        {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                    </select>
-                                </div>
-                                {(() => { const cat = categories.find(c => c.id === parseInt(formData.categoryId)); return cat && cat.subcategories.length > 0 && (
-                                    <div className="col-6">
-                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Subcategory</label>
-                                        <select className="form-select" value={formData.subcategory} onChange={e => setFormData(p => ({...p, subcategory: e.target.value}))}>
-                                            <option value="">None</option>
-                                            {cat.subcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-                                        </select>
-                                    </div>
-                                ); })()}
-                                <div className="col-6">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Remind (days before)</label>
-                                    <input type="number" min="1" max="14" className="form-control" value={formData.reminderDaysBefore} onChange={e => setFormData(p => ({...p, reminderDaysBefore: e.target.value}))} />
-                                </div>
-                                {activeView.length > 1 && (
-                                    <div className="col-6">
-                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Linked to</label>
-                                        <PersonSelect value={formData.person} onChange={v => setFormData(p => ({...p, person: v}))} activeView={activeView} className="form-select" ownLabel="Own (Me)" />
-                                    </div>
-                                )}
-                                <div className="col-12">
-                                    <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Notes</label>
-                                    <input type="text" className="form-control" value={formData.notes} onChange={e => setFormData(p => ({...p, notes: e.target.value}))} placeholder="Optional notes" />
-                                </div>
-                            </div>
-                            <div className="d-flex gap-2 mt-3">
-                                <button type="submit" className="btn btn-primary btn-sm"><i className={'fas fa-' + (editingBill ? 'save' : 'plus') + ' me-1'}></i>{editingBill ? 'Save Changes' : 'Add Bill'}</button>
-                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => { resetForm(); setShowForm(false); }}>Cancel</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {visibleBills.length === 0 && !showForm ? (
-                <div className="empty-state">
-                    <i className="fas fa-file-invoice-dollar fa-3x"></i>
-                    <h4>No bills tracked yet</h4>
-                    <p>Add your regular bills and subscriptions to stay on top of payments.</p>
-                </div>
-            ) : (
-                <>
-                    {activeBills.map(bill => <BillRow key={bill.id} bill={bill} />)}
-                    {inactiveBills.length > 0 && (
-                        <>
-                            <div style={{fontSize:'0.8rem', color:'#6c757d', marginTop:'1rem', marginBottom:'0.5rem', textTransform:'uppercase', letterSpacing:'0.05em'}}>Inactive</div>
-                            {inactiveBills.map(bill => <BillRow key={bill.id} bill={bill} />)}
-                        </>
-                    )}
-                </>
-            )}
-
-            {deleteConfirm && (
-                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Delete Bill</h5></div>
-                            <div className="modal-body"><p>Delete <strong>{deleteConfirm.name}</strong>? This cannot be undone.</p></div>
-                            <div className="modal-footer">
-                                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
-                                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {logExpenseBill && (() => {
-                const cat = categories.find(c => c.id === parseInt(logExpenseCategoryId));
-                const catHasSubcats = !!(cat && cat.subcategories && cat.subcategories.length > 0);
+            {visibleBills.length === 0 ? (
+                <div className="sp-empty"><i className="fas fa-file-invoice"></i>No bills yet. Add regular bills and subscriptions to get reminders before they're due.</div>
+            ) : sortedBills.map(bill => {
+                const cat = categories.find(c => c.id === bill.categoryId);
+                const look = spCategoryLook(cat, categories.indexOf(cat));
+                const diff = spDaysFrom(today, bill.nextDueDate);
+                const remind = Number(bill.reminderDaysBefore) || 0;
+                const dueText = !bill.isActive ? 'Paused' : diff < 0 ? 'Overdue · was due ' + spDueDate(bill.nextDueDate) : diff === 0 ? 'Due today' : diff === 1 ? 'Due tomorrow' : 'Due ' + spDueDate(bill.nextDueDate);
+                const metaColor = !bill.isActive ? 'var(--sp-slate-400)' : diff <= 0 ? '#e11d48' : remind > 0 && diff <= remind ? '#d97706' : 'var(--sp-slate-400)';
+                const isOpen = openId === bill.id;
+                const conflict = syncConflicts[String(bill.id)];
+                const cfOpen = showConflictDetail === bill.id;
                 return (
-                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Select Category</h5></div>
-                            <div className="modal-body">
-                                <p className="text-muted" style={{fontSize:'0.85rem'}}>
-                                    {logExpenseBill.categoryId
-                                        ? <React.Fragment><strong>{logExpenseBill.name}</strong> needs a subcategory before it can be logged as an expense.</React.Fragment>
-                                        : <React.Fragment><strong>{logExpenseBill.name}</strong> has no category set. Choose one to log it as an expense.</React.Fragment>}
-                                </p>
-                                <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Category *</label>
-                                <select className="form-select mb-2" value={logExpenseCategoryId} onChange={e => { setLogExpenseCategoryId(e.target.value); setLogExpenseSubcategory(''); }}>
-                                    <option value="">Select a category</option>
-                                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                </select>
-                                {catHasSubcats && (
-                                    <React.Fragment>
-                                        <label className="form-label" style={{fontWeight:'600',fontSize:'0.85rem'}}>Subcategory *</label>
-                                        <select className="form-select" value={logExpenseSubcategory} onChange={e => setLogExpenseSubcategory(e.target.value)}>
-                                            <option value="">Select a subcategory</option>
-                                            {cat.subcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-                                        </select>
-                                    </React.Fragment>
+                    <div key={bill.id} className="sp-schedcard">
+                        <button type="button" className="sp-schedrow" style={{opacity: bill.isActive ? 1 : 0.6}} onClick={() => { setOpenId(isOpen ? null : bill.id); setPendingDelete(null); }}>
+                            <span className="sp-schedicon" style={{background: look.tint, color: look.ink}}><i className={look.icon}></i></span>
+                            <span className="sp-schedmain">
+                                <span className="sp-schedtitle">
+                                    <span>{bill.name}</span>
+                                    {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : bill.id); }}><i className="fas fa-code-compare"></i></span>}
+                                    {!bill.isActive && <span className="sp-kindtag is-paused">PAUSED</span>}
+                                </span>
+                                <span className="sp-schedmeta" style={{color: metaColor}}>
+                                    {activeView.length > 1 && spOwnerChip(bill.person, people)}
+                                    <span>{dueText} · {bill.frequency}</span>
+                                </span>
+                                {bill.isActive && remind > 0 && <span className="sp-schedremind"><i className="fas fa-bell"></i>{remind}d before</span>}
+                            </span>
+                            <span className="sp-schedright">
+                                <span className="sp-schedamt">{fmtCurrency(bill.amount, bill.currency)}</span>
+                                {cat && <span className="sp-schedsub">{cat.name}</span>}
+                            </span>
+                        </button>
+                        {cfOpen && conflictBill && conflictSnapshot && (
+                            <div style={{padding: '0 15px 12px'}}>
+                                <ConflictCompare localRecord={conflictBill} cloudSnapshot={conflictSnapshot.cloudSnapshot} detectedAt={conflictSnapshot.detectedAt} fieldLabels={billConflictFieldLabels} formatValue={formatBillConflictValue} onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
+                            </div>
+                        )}
+                        {isOpen && (
+                            <div className="sp-schedopen">
+                                {bill.notes && <div className="sp-schednote">{bill.notes}</div>}
+                                <SpActBar actions={[
+                                    bill.isActive && { key: 'paid', label: 'Mark paid', icon: 'fas fa-check', tone: 'green', onClick: () => setPayBill(bill) },
+                                    { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => setFormBill(bill) },
+                                    bill.isActive
+                                        ? { key: 'pause', label: 'Pause', icon: 'fas fa-pause', tone: 'amber', onClick: () => setActive(bill, false) }
+                                        : { key: 'resume', label: 'Resume', icon: 'fas fa-play', tone: 'blue', onClick: () => setActive(bill, true) },
+                                    { key: 'delete', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => setPendingDelete(bill.id) }
+                                ]} />
+                                {pendingDelete === bill.id && (
+                                    <div style={{padding: '4px 4px 2px'}}>
+                                        <InlineConfirm text={'Delete ' + bill.name + '? Past expenses already logged from this bill stay in Expenses.'} keepLabel="Cancel" cta="Delete bill" onKeep={() => setPendingDelete(null)} onConfirm={() => handleDelete(bill.id)} />
+                                    </div>
                                 )}
                             </div>
-                            <div className="modal-footer">
-                                <button className="btn btn-secondary" onClick={() => setLogExpenseBill(null)}>Cancel</button>
-                                <button className="btn btn-primary" disabled={!logExpenseCategoryId || (catHasSubcats && !logExpenseSubcategory)} onClick={handleLogExpenseCategoryContinue}>Continue</button>
-                            </div>
-                        </div>
+                        )}
                     </div>
-                </div>
                 );
-            })()}
-            {logExpenseConfirm && (
-                <div className="modal show d-block" style={{backgroundColor:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Log as Expense</h5></div>
-                            <div className="modal-body">
-                                <p>Log <strong>{fmtCurrency(logExpenseConfirm.bill.amount, logExpenseConfirm.bill.currency)}</strong> for <strong>{logExpenseConfirm.bill.name}</strong> as an expense?</p>
-                                <p className="mb-0">This will also move its due date from <strong>{ValidationUtils.formatDate(logExpenseConfirm.bill.nextDueDate)}</strong> to <strong>{ValidationUtils.formatDate(computeNextDueDate(logExpenseConfirm.bill))}</strong>.</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button className="btn btn-secondary" onClick={() => setLogExpenseConfirm(null)}>Cancel</button>
-                                <button className="btn btn-primary" onClick={handleConfirmLogExpense}>Confirm</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showConflictDetail && conflictBill && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictBill}
-                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
-                    fieldLabels={billConflictFieldLabels}
-                    formatValue={formatBillConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveConflict(false)}
-                    onUseCloud={() => handleResolveConflict(true)}
-                />
-            )}
+            })}
+            {!formBill && !payBill && <PinnedCta label="Add Bill" icon="fas fa-plus" onClick={() => setFormBill('new')} aboveDock />}
+            {formBill && <BillFormSheet bill={formBill === 'new' ? null : formBill} categories={categories} activeView={activeView} onClose={() => setFormBill(null)} onSaved={(msg) => { setFormBill(null); afterChange(msg); }} />}
+            {payBill && <BillPaySheet bill={payBill} categories={categories} onClose={() => setPayBill(null)} onPaid={(msg) => { setPayBill(null); setOpenId(null); afterChange(msg); }} />}
         </div>
     );
 }
 
+const SP_SCHED_KIND = {
+    expense: { label: 'EXPENSE', bg: '#fee2e2', ink: '#e11d48', word: 'Expenses', name: 'Expense' },
+    income: { label: 'INCOME', bg: '#dcfce7', ink: '#16a34a', word: 'Income', name: 'Income' },
+    asset: { label: 'INVESTMENT', bg: '#ede9fe', ink: '#7c3aed', word: 'Net Worth', name: 'Investment' },
+    liability: { label: 'LIABILITY', bg: '#fef3c7', ink: '#b45309', word: 'Net Worth', name: 'Liability' }
+};
+const spFreqWord = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
+const spScheduleName = (s) => { const t = s.templateExpense || {}; return (s.type === 'asset' || s.type === 'liability') ? (t.netWorthItemName || '—') : (t.description || t.source || '—'); };
+
+function RecurringEditSheet({ schedule, onClose, onSaved }) {
+    const t = schedule.templateExpense || {};
+    const kind = SP_SCHED_KIND[schedule.type] || SP_SCHED_KIND.expense;
+    const [f, setF] = useState({ amount: String(t.amount || ''), frequency: schedule.frequency, endDate: schedule.endDate || '', nextDue: schedule.nextDue });
+    const [endMode, setEndMode] = useState(schedule.endDate ? 'date' : 'never');
+    const [errors, setErrors] = useState({});
+    const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+    const save = () => {
+        const amount = parseFloat(f.amount);
+        if (!f.amount || isNaN(amount) || amount <= 0) { setErrors({ amount: 'Amount must be greater than 0' }); return; }
+        if (!f.nextDue) { setErrors({ nextDue: 'Next payment date is required' }); return; }
+        DataService.updateRecurring(schedule.id, {
+            templateExpense: { ...schedule.templateExpense, amount },
+            frequency: f.frequency,
+            endDate: endMode === 'date' ? (f.endDate || '') : '',
+            nextDue: f.nextDue
+        });
+        onSaved(spScheduleName(schedule) + ' updated');
+    };
+    const upcoming = f.nextDue ? [1, 2, 3].reduce((acc) => { acc.push(computeNextDue(acc[acc.length - 1], f.frequency)); return acc; }, [f.nextDue]).slice(1) : [];
+    const endDate = endMode === 'date' ? f.endDate : '';
+    const shownUpcoming = upcoming.filter(d => !endDate || d <= endDate);
+    const err = errors.amount || errors.nextDue;
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>Save changes</button>
+        </React.Fragment>}>
+            <SpSheetHead icon="fas fa-rotate" tint="#ede9fe" ink="#7c3aed" title="Edit recurring" sub={spScheduleName(schedule) + ' · ' + kind.name} />
+            {err && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{err}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className={'sp-formrow' + (errors.amount ? ' is-bad' : '')}>
+                    <span>Amount</span>
+                    <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(t.currency || 'GBP')}</span><input type="number" step="0.01" inputMode="decimal" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
+                </div>
+                <div className={'sp-formrow' + (errors.nextDue ? ' is-bad' : '')}><span>Next processing date</span><input type="date" value={f.nextDue} onChange={e => set('nextDue', e.target.value)} /></div>
+            </div>
+            <div className="sp-panel">
+                <div className="sp-panel-label">Repeat every</div>
+                <div className="sp-seg is-light">
+                    {['daily', 'weekly', 'monthly', 'quarterly', 'yearly'].map(q => <button key={q} type="button" className={f.frequency === q ? 'is-active' : ''} onClick={() => set('frequency', q)}>{q === 'quarterly' ? 'Quarter' : spFreqWord(q)}</button>)}
+                </div>
+                <div className="sp-panel-label" style={{margin: '14px 0 8px'}}>Ends</div>
+                <div className="sp-endtabs">
+                    <button type="button" className={'sp-endtab' + (endMode === 'never' ? ' is-active' : '')} onClick={() => setEndMode('never')}>Never</button>
+                    <button type="button" className={'sp-endtab' + (endMode === 'date' ? ' is-active' : '')} onClick={() => setEndMode('date')}>On a date</button>
+                </div>
+                {endMode === 'date' && (
+                    <div className="sp-formrow" style={{borderTop: '1px solid #f1f5f9', marginTop: '8px'}}>
+                        <span>End date</span>
+                        <input type="date" value={f.endDate} min={f.nextDue} onChange={e => set('endDate', e.target.value)} />
+                    </div>
+                )}
+                {f.nextDue && (
+                    <div className="sp-infobox">
+                        <div className="sp-infobox-row">
+                            <span className="sp-infobox-icon"><i className="fas fa-calendar-check"></i></span>
+                            <div><div className="sp-infobox-kicker">Next processing</div><div className="sp-infobox-value">{DateUtils.parseDateStr(f.nextDue).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(/\bSept\b/, 'Sep')}</div></div>
+                        </div>
+                        {shownUpcoming.length > 0 && <div className="sp-infobox-dates">{shownUpcoming.map(d => <span key={d}>{spShortDate(d)}</span>)}</div>}
+                        <div className="sp-infobox-foot">Repeats {f.frequency} from {spShortDate(f.nextDue)} · {endDate ? 'until ' + spLongDate(endDate) : 'no end date'}</div>
+                    </div>
+                )}
+                {f.nextDue !== schedule.nextDue
+                    ? <div className="sp-alert sp-alert-warn" style={{margin: '10px 0 0'}}><i className="fas fa-triangle-exclamation"></i><span>The next payment date moves to {spLongDate(f.nextDue) || '—'}. Nothing is recorded until then.</span></div>
+                    : <div className="sp-hint" style={{margin: '10px 2px 0', fontSize: '11px'}}>A frequency change takes effect from the following cycle, not this one.</div>}
+            </div>
+        </Sheet>
+    );
+}
+
 function RecurringList({ onUpdate, activeView, embedded }) {
-    const [schedules, setSchedules] = useState([]);
-    const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [schedules, setSchedules] = useState(() => DataService.getRecurring());
+    const [openId, setOpenId] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null);
     const [editSchedule, setEditSchedule] = useState(null);
-    const [editForm, setEditForm] = useState({ amount: '', frequency: 'monthly', endDate: '', nextDue: '' });
-    const [editErrors, setEditErrors] = useState({});
+    const [toast, setToast] = useState('');
     const _f0 = FilterMemory.load('recurring');
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
+    const people = DataService.getPeople();
 
     const load = () => setSchedules(DataService.getRecurring());
-    useEffect(() => { load(); }, []);
-
     useEffect(() => { FilterMemory.save('recurring', { syncConflict: filterSyncConflict }); }, [filterSyncConflict]);
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4000); return () => clearTimeout(t); }, [toast]);
 
     const syncConflicts = useMemo(() => SyncConflicts.read('recurring'), [schedules]);
     const accountNameById = useMemo(() => {
@@ -9203,8 +9217,8 @@ function RecurringList({ onUpdate, activeView, embedded }) {
         DataService.getBankAccounts().forEach(a => m.set(String(a.id), a.accountName));
         return m;
     }, [schedules]);
-    // templateExpense is a nested object, so the generic diff loop would show it as one
-    // opaque "differs" row — flatten it into dotted keys so the modal reads naturally.
+    // templateExpense is a nested object, so the generic diff would show it as one opaque
+    // "differs" row — flatten it into dotted keys so the compare panel reads naturally.
     const flattenScheduleForDiff = (s) => {
         if (!s) return {};
         const t = s.templateExpense || {};
@@ -9218,65 +9232,20 @@ function RecurringList({ onUpdate, activeView, embedded }) {
 
     const today = DateUtils.today();
     const isNetWorthType = (type) => type === 'asset' || type === 'liability';
-    // Schedules have no field of their own — expense/income schedules inherit paidBy from
-    // the template record they were created from; asset/liability ones carry person directly
-    // (Net Worth items use the 'own' convention, not '', but matchesActiveView normalizes both).
-    const visibleSchedules = schedules.filter(s => {
-        const t = s.templateExpense || {};
-        return matchesActiveView(isNetWorthType(s.type) ? t.person : t.paidBy, activeView);
-    });
+    const visibleSchedules = schedules.filter(s => spScheduleVisible(s, activeView));
+    // Soonest next payment first; paused ones after the running ones, ended ones last.
+    const scheduleRank = (s) => spScheduleEnded(s, today) ? 2 : s.isActive ? 0 : 1;
+    const displaySchedules = (filterSyncConflict ? visibleSchedules.filter(s => !!syncConflicts[String(s.id)]) : visibleSchedules)
+        .slice().sort((a, b) => scheduleRank(a) - scheduleRank(b) || (a.nextDue || '').localeCompare(b.nextDue || ''));
 
-    const getStatus = (s) => {
-        if (s.endDate && today > s.endDate) return 'ended';
-        if (!s.isActive) return 'paused';
-        return 'active';
-    };
-
+    const afterChange = (msg) => { load(); if (msg) setToast(msg); if (onUpdate) onUpdate(); };
     const handlePauseResume = (s) => {
         if (s.isActive) DataService.pauseRecurring(s.id);
         else DataService.resumeRecurring(s.id);
-        load(); onUpdate();
+        afterChange(spScheduleName(s) + (s.isActive ? ' paused' : ' resumed'));
     };
+    const handleDelete = (s) => { DataService.deleteRecurring(s.id); setPendingDelete(null); setOpenId(null); afterChange(spScheduleName(s) + ' stopped repeating'); };
 
-    const handleDelete = (id) => {
-        DataService.deleteRecurring(id);
-        setDeleteConfirm(null); load(); onUpdate();
-    };
-
-    const openEdit = (s) => {
-        setEditSchedule(s);
-        setEditForm({ amount: String((s.templateExpense || {}).amount || ''), frequency: s.frequency, endDate: s.endDate || '', nextDue: s.nextDue });
-        setEditErrors({});
-    };
-
-    const handleEditSubmit = (e) => {
-        e.preventDefault();
-        const amount = parseFloat(editForm.amount);
-        if (!editForm.amount || isNaN(amount) || amount <= 0) { setEditErrors({ amount: 'Amount must be greater than 0' }); return; }
-        if (!editForm.nextDue) { setEditErrors({ nextDue: 'Next payment date is required' }); return; }
-        DataService.updateRecurring(editSchedule.id, {
-            templateExpense: { ...editSchedule.templateExpense, amount },
-            frequency: editForm.frequency,
-            endDate: editForm.endDate || '',
-            nextDue: editForm.nextDue
-        });
-        setEditSchedule(null);
-        load(); onUpdate();
-    };
-
-    const freqLabel = (f) => f ? f.charAt(0).toUpperCase() + f.slice(1) : '';
-    const typeBadge = (type) => {
-        const map = {
-            expense: { label: 'Expense', cls: 'bg-danger' },
-            income: { label: 'Income', cls: 'bg-success' },
-            asset: { label: 'Asset', cls: 'bg-primary' },
-            liability: { label: 'Liability', cls: 'bg-warning text-dark' }
-        };
-        const m = map[type] || { label: type, cls: 'bg-secondary' };
-        return <span className={`badge me-1 ${m.cls}`}>{m.label}</span>;
-    };
-
-    const displaySchedules = filterSyncConflict ? visibleSchedules.filter(s => !!syncConflicts[String(s.id)]) : visibleSchedules;
     const conflictSchedule = showConflictDetail ? schedules.find(s => s.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const recurringConflictFieldLabels = { type: 'Type', frequency: 'Frequency', endDate: 'End Date', nextDue: 'Next Due', lastGenerated: 'Last Generated', isActive: 'Active', 'templateExpense.amount': 'Amount', 'templateExpense.description': 'Description', 'templateExpense.source': 'Source', 'templateExpense.paidBy': 'Paid By', 'templateExpense.person': 'Person', 'templateExpense.currency': 'Currency', 'templateExpense.accountId': 'Account', 'templateExpense.netWorthItemName': 'Item Name' };
@@ -9291,140 +9260,78 @@ function RecurringList({ onUpdate, activeView, embedded }) {
         DataService.updateRecurring(scheduleId, updates);
         SyncConflicts.dismiss('recurring', scheduleId);
         setShowConflictDetail(null);
-        load(); onUpdate();
+        afterChange();
     };
 
     return (
-        <div className={embedded ? undefined : 'screen'}>
-            <div className="screen-header"><h2><i className="fas fa-redo me-2"></i>Recurring Transactions</h2></div>
+        <div className={embedded ? undefined : 'sp-page'}>
+            <div className="sp-alert sp-alert-info" style={{fontWeight: 600}}><i className="fas fa-circle-info"></i><span>Created by ticking <strong>Repeat</strong> when adding a transaction, or a repeat on a Net Worth item.</span></div>
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
             {Object.keys(syncConflicts).length > 0 && (
-                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
-                    <input type="checkbox" className="form-check-input" id="filterRecurringSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
-                    <label className="form-check-label" htmlFor="filterRecurringSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                </div>
+                <label className="sp-check" style={{margin: '0 4px 10px'}}>
+                    <input type="checkbox" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i>Sync conflicts only
+                </label>
             )}
             {visibleSchedules.length === 0 ? (
-                <div className="empty-state">
-                    <i className="fas fa-redo fa-3x"></i>
-                    <h4>No recurring transactions</h4>
-                    <p>When adding an expense, income, or asset/liability, tick "Make this recurring" to set one up.</p>
-                </div>
-            ) : (
-                <div style={{padding: '0 1rem 1rem'}}>
-                    {displaySchedules.map(s => {
-                        const status = getStatus(s);
-                        const t = s.templateExpense || {};
-                        const isDueToday = s.nextDue === today;
-                        const netWorth = isNetWorthType(s.type);
-                        return (
-                            <div key={s.id} className="card mb-3 shadow-sm" style={{opacity: status === 'ended' ? 0.6 : 1}}>
-                                <div className="card-body p-3">
-                                    <div className="d-flex justify-content-between align-items-start mb-2">
-                                        <div>
-                                            {typeBadge(s.type)}
-                                            {status === 'active' && <span className="badge bg-success me-1">Active</span>}
-                                            {status === 'paused' && <span className="badge bg-warning text-dark me-1">Paused</span>}
-                                            {status === 'ended' && <span className="badge bg-secondary me-1">Ended</span>}
-                                            {isDueToday && status === 'active' && <span className="badge bg-primary">Due Today</span>}
-                                            <SyncConflictBadge conflict={syncConflicts[String(s.id)]} onClick={() => setShowConflictDetail(s.id)} />
-                                        </div>
-                                        <div className="d-flex gap-1">
-                                            <button className="btn btn-sm btn-outline-primary" onClick={() => openEdit(s)} title="Edit"><i className="fas fa-edit"></i></button>
-                                            {status !== 'ended' && (
-                                                <button className={`btn btn-sm ${s.isActive ? 'btn-outline-warning' : 'btn-outline-success'}`} onClick={() => handlePauseResume(s)} title={s.isActive ? 'Pause' : 'Resume'}>
-                                                    <i className={`fas fa-${s.isActive ? 'pause' : 'play'}`}></i>
-                                                </button>
-                                            )}
-                                            <button className="btn btn-sm btn-outline-danger" onClick={() => setDeleteConfirm(s)} title="Delete"><i className="fas fa-trash"></i></button>
-                                        </div>
-                                    </div>
-                                    <div className="fw-semibold">{netWorth ? (t.netWorthItemName || '—') : (t.description || t.source || '—')}</div>
-                                    <div className="text-muted small">
-                                        {netWorth ? '+' : ''}{ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')} &bull; {freqLabel(s.frequency)}
-                                        {netWorth ? (t.accountId && <> &bull; funded from linked bank account</>) : (t.paidBy && <> &bull; {t.paidBy}</>)}
-                                    </div>
-                                    <div className="small mt-1">
-                                        <span className="text-muted">Next: </span><strong>{s.nextDue}</strong>
-                                        {s.lastGenerated && <> &bull; <span className="text-muted">Last run: {s.lastGenerated}</span></>}
-                                        {s.endDate && <> &bull; <span className="text-muted">Ends: {s.endDate}</span></>}
-                                    </div>
-                                </div>
+                <div className="sp-empty"><i className="fas fa-rotate"></i>No repeating transactions yet.</div>
+            ) : displaySchedules.map(s => {
+                const t = s.templateExpense || {};
+                const kind = SP_SCHED_KIND[s.type] || SP_SCHED_KIND.expense;
+                const ended = spScheduleEnded(s, today);
+                const paused = !ended && !s.isActive;
+                const netWorth = isNetWorthType(s.type);
+                const fromAcc = netWorth && t.accountId ? accountNameById.get(String(t.accountId)) : '';
+                const isOpen = openId === s.id;
+                const conflict = syncConflicts[String(s.id)];
+                const cfOpen = showConflictDetail === s.id;
+                const owner = netWorth ? t.person : ((t.paidBy || '').trim() ? t.paidBy : 'own');
+                const endLabel = ended ? 'Ended ' + spLongDate(s.endDate) : s.endDate ? 'Ends ' + spLongDate(s.endDate) : 'No end date';
+                return (
+                    <div key={s.id} className="sp-schedcard">
+                        <button type="button" className="sp-schedrow" style={{opacity: ended || paused ? 0.6 : 1}} onClick={() => { setOpenId(isOpen ? null : s.id); setPendingDelete(null); }}>
+                            <span className="sp-schedicon" style={{background: '#ede9fe', color: '#7c3aed'}}><i className="fas fa-rotate"></i></span>
+                            <span className="sp-schedmain">
+                                <span className="sp-schedtitle">
+                                    <span>{spScheduleName(s)}</span>
+                                    <span className="sp-kindtag" style={{background: kind.bg, color: kind.ink}}>{kind.label}</span>
+                                    {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : s.id); }}><i className="fas fa-code-compare"></i></span>}
+                                    {paused && <span className="sp-kindtag is-paused">PAUSED</span>}
+                                </span>
+                                <span className="sp-schedmeta">
+                                    {activeView.length > 1 && spOwnerChip(owner, people)}
+                                    <span>{paused ? 'Paused · ' + spFreqWord(s.frequency) : ended ? spFreqWord(s.frequency) : spFreqWord(s.frequency) + ' · next ' + spDueDate(s.nextDue)}{fromAcc ? ' · from ' + fromAcc : ''}</span>
+                                </span>
+                                <span className="sp-schedend" style={{color: s.endDate && !ended ? '#d97706' : 'var(--sp-slate-400)'}}>{endLabel}</span>
+                            </span>
+                            <span className="sp-schedright"><span className="sp-schedamt">{netWorth ? '+' : ''}{ValidationUtils.formatCurrency(t.amount || 0, t.currency || 'GBP')}</span></span>
+                        </button>
+                        {cfOpen && conflictSchedule && conflictSnapshot && (
+                            <div style={{padding: '0 15px 12px'}}>
+                                <ConflictCompare localRecord={flattenScheduleForDiff(conflictSchedule)} cloudSnapshot={flattenScheduleForDiff(conflictSnapshot.cloudSnapshot)} detectedAt={conflictSnapshot.detectedAt} fieldLabels={recurringConflictFieldLabels} formatValue={formatRecurringConflictValue} onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
                             </div>
-                        );
-                    })}
-                </div>
-            )}
-            {editSchedule && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <form className="modal-content" onSubmit={handleEditSubmit}>
-                            <div className="modal-header"><h5 className="modal-title">Edit Recurring</h5></div>
-                            <div className="modal-body">
-                                <div className="mb-2">
-                                    <label className="form-label">Amount ({(editSchedule.templateExpense || {}).currency || 'GBP'})</label>
-                                    <input type="number" step="0.01" className={'form-control' + (editErrors.amount ? ' is-invalid' : '')} value={editForm.amount} onChange={e => setEditForm(f => ({...f, amount: e.target.value}))} autoFocus />
-                                    {editErrors.amount && <div className="invalid-feedback">{editErrors.amount}</div>}
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Frequency</label>
-                                    <select className="form-select" value={editForm.frequency} onChange={e => setEditForm(f => ({...f, frequency: e.target.value}))}>
-                                        <option value="daily">Daily</option>
-                                        <option value="weekly">Weekly</option>
-                                        <option value="monthly">Monthly</option>
-                                        <option value="quarterly">Quarterly</option>
-                                        <option value="yearly">Yearly</option>
-                                    </select>
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">Next Payment Date</label>
-                                    <input type="date" className={'form-control' + (editErrors.nextDue ? ' is-invalid' : '')} value={editForm.nextDue} onChange={e => setEditForm(f => ({...f, nextDue: e.target.value}))} />
-                                    {editErrors.nextDue && <div className="invalid-feedback">{editErrors.nextDue}</div>}
-                                </div>
-                                <div className="mb-2">
-                                    <label className="form-label">End Date (optional)</label>
-                                    <input type="date" className="form-control" value={editForm.endDate} onChange={e => setEditForm(f => ({...f, endDate: e.target.value}))} />
-                                </div>
-                                {editForm.nextDue !== editSchedule.nextDue ? (
-                                    <div className="alert alert-warning py-2" style={{fontSize:'0.8rem'}}>
-                                        <i className="fas fa-exclamation-triangle me-1"></i>The next payment date will be pushed to <strong>{editForm.nextDue || '—'}</strong> — no payment will be recorded until then.
+                        )}
+                        {isOpen && (
+                            <div className="sp-schedopen">
+                                {s.lastGenerated && <div className="sp-schednote">Last run {spLongDate(s.lastGenerated)}</div>}
+                                <SpActBar actions={[
+                                    { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => setEditSchedule(s) },
+                                    !ended && (s.isActive
+                                        ? { key: 'pause', label: 'Pause', icon: 'fas fa-pause', tone: 'amber', onClick: () => handlePauseResume(s) }
+                                        : { key: 'resume', label: 'Resume', icon: 'fas fa-play', tone: 'blue', onClick: () => handlePauseResume(s) }),
+                                    { key: 'delete', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => setPendingDelete(s.id) }
+                                ]} />
+                                {pendingDelete === s.id && (
+                                    <div style={{padding: '4px 4px 2px'}}>
+                                        <InlineConfirm text={'Stop repeating ' + spScheduleName(s) + '? Entries already logged stay in ' + kind.word + '.'} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => handleDelete(s)} />
                                     </div>
-                                ) : (
-                                    <p className="text-muted" style={{fontSize:'0.78rem'}}>A frequency change takes effect from the following cycle, not this one.</p>
                                 )}
                             </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-secondary" onClick={() => setEditSchedule(null)}>Cancel</button>
-                                <button type="submit" className="btn btn-primary">Save Changes</button>
-                            </div>
-                        </form>
+                        )}
                     </div>
-                </div>
-            )}
-            {deleteConfirm && (
-                <div className="modal show d-block" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Delete Recurring</h5></div>
-                            <div className="modal-body"><p>Delete the recurring <strong>{deleteConfirm.type}</strong> for <strong>{(deleteConfirm.templateExpense || {}).netWorthItemName || (deleteConfirm.templateExpense || {}).description || (deleteConfirm.templateExpense || {}).source || 'this item'}</strong>? Future transactions will no longer be generated.</p></div>
-                            <div className="modal-footer">
-                                <button className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
-                                <button className="btn btn-danger" onClick={() => handleDelete(deleteConfirm.id)}>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showConflictDetail && conflictSchedule && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={flattenScheduleForDiff(conflictSchedule)}
-                    cloudSnapshot={flattenScheduleForDiff(conflictSnapshot.cloudSnapshot)}
-                    fieldLabels={recurringConflictFieldLabels}
-                    formatValue={formatRecurringConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveConflict(false)}
-                    onUseCloud={() => handleResolveConflict(true)}
-                />
-            )}
+                );
+            })}
+            {editSchedule && <RecurringEditSheet schedule={editSchedule} onClose={() => setEditSchedule(null)} onSaved={(msg) => { setEditSchedule(null); afterChange(msg); }} />}
         </div>
     );
 }
@@ -11932,109 +11839,198 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     );
 }
 
+function DebtFormSheet({ debt, direction, defaultCurrency, activeView, onClose, onSaved }) {
+    const people = DataService.getPeople();
+    const [f, setF] = useState(() => debt
+        ? { direction: debt.direction, counterparty: debt.counterparty, amount: String(debt.amount), currency: debt.currency, notes: debt.notes || '', dueDate: debt.dueDate || '', person: debt.person || 'own' }
+        : { direction, counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) });
+    const [errors, setErrors] = useState({});
+    const [showCurrency, setShowCurrency] = useState(false);
+    const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+    const owe = f.direction === 'owe';
+    const save = () => {
+        const e = {};
+        if (!f.counterparty.trim()) e.counterparty = 'Person name is required';
+        if (!f.amount || parseFloat(f.amount) <= 0) e.amount = 'Amount must be greater than 0';
+        if (Object.keys(e).length > 0) { setErrors(e); return; }
+        if (debt) {
+            DataService.updateDebt(debt.id, { counterparty: f.counterparty.trim(), amount: parseFloat(f.amount), currency: f.currency, notes: f.notes, dueDate: f.dueDate, person: f.person || 'own' });
+        } else {
+            const { direction: dir, ...rest } = f;
+            DataService.addDebt({ ...rest, counterparty: f.counterparty.trim(), direction: dir, createdInView: activeView });
+        }
+        onSaved(debt ? 'Debt updated' : 'Debt with ' + f.counterparty.trim() + ' added', f.direction);
+    };
+    const err = errors.counterparty || errors.amount;
+    return (
+        <Sheet onClose={onClose} footer={<React.Fragment>
+            <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={save}><i className="fas fa-check"></i>{debt ? 'Save changes' : 'Save debt'}</button>
+        </React.Fragment>}>
+            <SpSheetHead icon="fas fa-handshake" tint="#fef3c7" ink="#d97706" title={debt ? 'Edit debt' : 'Add debt'} sub="Money between you and someone else" />
+            {!debt && (
+                <div className="sp-seg" style={{margin: '0 0 12px'}}>
+                    <button type="button" className={owe ? 'is-active' : ''} onClick={() => set('direction', 'owe')}>To pay</button>
+                    <button type="button" className={!owe ? 'is-active' : ''} onClick={() => set('direction', 'owed')}>To collect</button>
+                </div>
+            )}
+            {err && <div className="sp-alert sp-alert-err"><i className="fas fa-circle-exclamation"></i><span>{err}</span></div>}
+            <div className="sp-formcard" style={{marginTop: 0}}>
+                <div className={'sp-formrow' + (errors.counterparty ? ' is-bad' : '')}><span>{owe ? 'Pay to' : 'Collect from'}</span><input type="text" value={f.counterparty} placeholder="Name" onChange={e => set('counterparty', e.target.value)} /></div>
+                <div className="sp-formrow">
+                    <span>Debt owner</span>
+                    {activeView.length > 1
+                        ? <PersonSelect value={f.person === 'own' ? '' : f.person} onChange={v => set('person', v || 'own')} activeView={activeView} className="" ownLabel="You" />
+                        : <span className="sp-lockedval">{spOwnerChip(f.person, people)}<i className="fas fa-lock"></i></span>}
+                </div>
+                <div className="sp-formrow"><span>Currency</span><button type="button" className="sp-rowpick" onClick={() => setShowCurrency(true)}>{f.currency}<i className="fas fa-chevron-down"></i></button></div>
+                <div className={'sp-formrow' + (errors.amount ? ' is-bad' : '')}>
+                    <span>Amount</span>
+                    <span className="sp-moneyin"><span>{ValidationUtils.getCurrencySymbol(f.currency)}</span><input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder="0.00" value={f.amount} onChange={e => set('amount', e.target.value)} /></span>
+                </div>
+                <div className="sp-formrow"><span>Due date</span><input type="date" value={f.dueDate} onChange={e => set('dueDate', e.target.value)} /></div>
+                <div className="sp-formrow"><span>Note</span><input type="text" value={f.notes} placeholder="Optional" onChange={e => set('notes', e.target.value)} /></div>
+            </div>
+            {showCurrency && <CurrencySheet value={f.currency} onPick={c => { set('currency', c); setShowCurrency(false); }} onClose={() => setShowCurrency(false)} />}
+        </Sheet>
+    );
+}
+
+// Settling records the same expense / income as before; "owed to me" can now land in one of
+// the receiving person's accounts (approved change) — Cash keeps today's no-account income.
+function DebtSettleSheet({ debt, categories, activeView, onClose, onSettled }) {
+    const today = DateUtils.today();
+    const owe = debt.direction === 'owe';
+    const paidBy = resolveActiveViewValue(activeView);
+    const accounts = owe ? [] : DataService.getAccountsForPerson(paidBy || 'own');
+    const [accountId, setAccountId] = useState(() => owe ? '' : (resolveDefaultAccountId(paidBy, debt.currency) || ''));
+    const [categoryId, setCategoryId] = useState('');
+    const [subcategory, setSubcategory] = useState('');
+    const [busy, setBusy] = useState(false);
+    const amountFmt = ValidationUtils.formatCurrency(debt.amount, debt.currency || 'GBP');
+    const account = accounts.find(a => String(a.id) === String(accountId));
+
+    const settleOnly = () => { DataService.settleDebt(debt.id); onSettled('Debt with ' + debt.counterparty + ' settled'); };
+    const settleAndLog = async () => {
+        if (busy) return;
+        setBusy(true);
+        DataService.settleDebt(debt.id);
+        try {
+            if (owe) {
+                const cat = (categories || []).find(c => String(c.id) === String(categoryId));
+                await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: categoryId ? Number(categoryId) : null, category: cat ? cat.name : '', subcategory, description: `Settled debt to ${debt.counterparty}`, paidBy, tags: [] });
+                onSettled('Settled · expense logged');
+            } else {
+                const rec = { amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, paidBy };
+                if (account) rec.accountId = Number(account.id);
+                await DataService.addIncome(rec);
+                onSettled('Settled · income added' + (account ? ' to ' + account.accountName : ' as cash'));
+            }
+        } catch (e) { onSettled('Settled, but the ' + (owe ? 'expense' : 'income') + ' could not be logged'); }
+    };
+
+    return (
+        <Sheet onClose={onClose}>
+            <SpSheetHead icon="fas fa-handshake" tint="#dcfce7" ink="#16a34a" title={'Settle ' + amountFmt} sub={(owe ? 'You paid ' + debt.counterparty : debt.counterparty + ' paid you') + (debt.notes ? ' · ' + debt.notes : '')} />
+            {owe ? (
+                <React.Fragment>
+                    <div className="sp-sheet-q">Log this payment as an expense?</div>
+                    <div className="sp-formlabel" style={{marginTop: '4px'}}>Expense category</div>
+                    <SpCategoryPicker categories={categories || []} categoryId={categoryId} subcategory={subcategory} onChange={(c, s) => { setCategoryId(c); setSubcategory(s); }} />
+                    <div className="sp-formcard" style={{marginTop: '12px'}}>
+                        <div className="sp-formrow"><span>Date</span><b>Today, {spShortDate(today)}</b></div>
+                    </div>
+                </React.Fragment>
+            ) : (
+                <React.Fragment>
+                    <div className="sp-sheet-q">Where did you receive it?</div>
+                    <div className="sp-bankrows" style={{marginTop: 0}}>
+                        {accounts.map(a => {
+                            const on = String(accountId) === String(a.id);
+                            return (
+                                <button key={a.id} type="button" className="sp-bankrow" onClick={() => setAccountId(a.id)}>
+                                    <span className="sp-tile" style={{background: on ? '#dcfce7' : '#f1f5f9', color: on ? '#16a34a' : '#64748b'}}><i className={a.accountType === 'Credit' ? 'fas fa-credit-card' : a.accountType === 'Savings' ? 'fas fa-piggy-bank' : 'fas fa-building-columns'}></i></span>
+                                    <div className="sp-row-main">
+                                        <div style={{display: 'flex', alignItems: 'center', gap: '6px'}}><span className="sp-row-title">{a.accountName}</span>{a.isPrimary && <span className="sp-badge-primary">PRIMARY</span>}</div>
+                                        <div className="sp-row-sub">{a.accountType || 'Account'} · {a.currency}</div>
+                                    </div>
+                                    <i className={on ? 'fas fa-circle-check' : 'far fa-circle'} style={{color: on ? '#10b981' : '#cbd5e1', fontSize: '16px'}}></i>
+                                </button>
+                            );
+                        })}
+                        <button type="button" className="sp-bankrow" onClick={() => setAccountId('')}>
+                            <span className="sp-tile" style={{background: !accountId ? '#dcfce7' : '#f1f5f9', color: !accountId ? '#16a34a' : '#64748b'}}><i className="fas fa-money-bill-wave"></i></span>
+                            <div className="sp-row-main"><div className="sp-row-title">Cash</div><div className="sp-row-sub">Received in hand</div></div>
+                            <i className={!accountId ? 'fas fa-circle-check' : 'far fa-circle'} style={{color: !accountId ? '#10b981' : '#cbd5e1', fontSize: '16px'}}></i>
+                        </button>
+                    </div>
+                    <div className="sp-hint" style={{margin: '8px 4px 0', fontSize: '11px'}}>Logged in Income as "Debt from {debt.counterparty}".</div>
+                </React.Fragment>
+            )}
+            <div className="sp-sheet-actions">
+                <button type="button" className="sp-btn sp-btn-primary" disabled={busy} onClick={settleAndLog}>
+                    <i className={owe ? 'fas fa-receipt' : 'fas fa-arrow-down'}></i>{owe ? 'Settle & log expense' : account ? 'Settle & add to ' + account.accountName : 'Settle & add as cash'}
+                </button>
+                <div className="sp-btn-row">
+                    <button type="button" className="sp-btn sp-btn-cancel" onClick={onClose}>Cancel</button>
+                    <button type="button" className="sp-btn sp-btn-white" disabled={busy} onClick={settleOnly}>Settle only</button>
+                </div>
+            </div>
+        </Sheet>
+    );
+}
+
 function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedded }) {
     const _f0 = FilterMemory.load('debts'); // restore last session's tab / settled toggle (see FilterMemory)
     const [activeTab, setActiveTab] = useState(_f0.tab === 'owed' ? 'owed' : 'owe');
     const [debts, setDebts] = useState(() => DataService.getDebts());
-    const [showForm, setShowForm] = useState(false);
-    const [editingDebt, setEditingDebt] = useState(null);
-    const [form, setForm] = useState({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) });
-    const [formErrors, setFormErrors] = useState({});
-    const [showSettleModal, setShowSettleModal] = useState(null);
-    const [showDeleteModal, setShowDeleteModal] = useState(null);
-    const [showLinkedModal, setShowLinkedModal] = useState(null);
-    const [linkedCatId, setLinkedCatId] = useState('');
-    const [linkedSubcat, setLinkedSubcat] = useState('');
+    const [openId, setOpenId] = useState(null);
+    const [pendingDelete, setPendingDelete] = useState(null);
+    const [formDebt, setFormDebt] = useState(null); // null | 'new' | debt
+    const [settleDebt, setSettleDebt] = useState(null);
+    const [toast, setToast] = useState('');
     const [showSettled, setShowSettled] = useState(!!_f0.showSettled);
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
+    const people = DataService.getPeople();
 
     // Persist tab + settled toggle for the session (see FilterMemory).
     useEffect(() => { FilterMemory.save('debts', { tab: activeTab, showSettled, syncConflict: filterSyncConflict }); }, [activeTab, showSettled, filterSyncConflict]);
+    useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4000); return () => clearTimeout(t); }, [toast]);
 
     const syncConflicts = useMemo(() => SyncConflicts.read('debts'), [debts]);
-
     const reload = () => setDebts(DataService.getDebts());
     const today = DateUtils.today();
-    const currencies = CurrencyService.getAllCurrencies().map(c => c.code);
     const isOverdue = (d) => d.dueDate && d.dueDate < today && !d.isSettled;
 
-    // Global Active View replaces this screen's own person filter: a debt is visible if
-    // it's linked to a selected person, OR it was created while a selected person's view
-    // was active (so a debt you logged for yourself while viewing "John" still shows up
-    // when you switch back to John's view, even though its `person` field is 'own').
+    // A debt is visible if it's linked to a selected person, OR it was created while a
+    // selected person's view was active (unchanged rule).
     const personDebts = debts.filter(d => matchesActiveView(d.person, activeView) || (d.createdInView || []).some(v => activeView.includes(v)));
     const displayDebts = filterSyncConflict ? personDebts.filter(d => !!syncConflicts[String(d.id)]) : personDebts;
     const activeDebts = displayDebts.filter(d => !d.isSettled && d.direction === activeTab);
     const settledDebts = displayDebts.filter(d => d.isSettled && d.direction === activeTab);
     const sortedActive = [...activeDebts].sort((a, b) => (isOverdue(a) ? 0 : 1) - (isOverdue(b) ? 0 : 1) || new Date(b.createdAt) - new Date(a.createdAt));
 
-    const sumByCurrency = (dir) => {
-        const totals = {};
-        personDebts.filter(d => !d.isSettled && d.direction === dir).forEach(d => { totals[d.currency] = (totals[d.currency] || 0) + d.amount; });
-        return totals;
-    };
-    const oweTotals = sumByCurrency('owe');
-    const owedTotals = sumByCurrency('owed');
-
     const fmtAmt = (amount, currency) => {
         try { return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(amount); } catch (_) { return `${currency} ${Number(amount).toFixed(2)}`; }
     };
-
-    const handleAddDebt = (e) => {
-        e.preventDefault();
-        const errors = {};
-        if (!form.counterparty.trim()) errors.counterparty = 'Person name is required';
-        if (!form.amount || parseFloat(form.amount) <= 0) errors.amount = 'Amount must be greater than 0';
-        if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-        if (editingDebt) {
-            DataService.updateDebt(editingDebt.id, { counterparty: form.counterparty.trim(), amount: parseFloat(form.amount), currency: form.currency, notes: form.notes, dueDate: form.dueDate, person: form.person || 'own' });
-            setEditingDebt(null);
-        } else {
-            DataService.addDebt({ ...form, counterparty: form.counterparty.trim(), direction: activeTab, createdInView: activeView });
-        }
-        setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) });
-        setFormErrors({});
-        setShowForm(false);
-        reload();
+    const fmt0 = (amount, currency) => ValidationUtils.getCurrencySymbol(currency) + Math.round(amount).toLocaleString('en-GB');
+    const totalsLabel = (dir) => {
+        const totals = {};
+        personDebts.filter(d => !d.isSettled && d.direction === dir).forEach(d => { totals[d.currency] = (totals[d.currency] || 0) + d.amount; });
+        const parts = Object.entries(totals).map(([c, a]) => fmt0(a, c));
+        return parts.length ? parts.join(' + ') : fmt0(0, defaultCurrency || 'GBP');
     };
 
-    const openEditForm = (debt) => {
-        setEditingDebt(debt);
-        setForm({ counterparty: debt.counterparty, amount: String(debt.amount), currency: debt.currency, notes: debt.notes || '', dueDate: debt.dueDate || '', person: debt.person || 'own' });
-        setFormErrors({});
-        setShowForm(true);
-    };
+    const afterChange = (msg) => { reload(); if (msg) setToast(msg); if (onUpdate) onUpdate(); };
+    const handleDelete = (id) => { DataService.deleteDebt(id); setPendingDelete(null); setOpenId(null); afterChange('Debt deleted'); };
 
-    const handleSettle = (debt) => {
-        DataService.settleDebt(debt.id);
-        setShowSettleModal(null);
-        setLinkedCatId('');
-        setLinkedSubcat('');
-        setShowLinkedModal(debt);
-        reload();
-    };
-
-    const handleLinkedRecord = async (debt) => {
-        if (debt.direction === 'owe') {
-            const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
-            await DataService.addExpense({ amount: debt.amount, currency: debt.currency, date: today, categoryId: linkedCatId ? Number(linkedCatId) : null, category: cat ? cat.name : '', subcategory: linkedSubcat, description: `Settled debt to ${debt.counterparty}`, paidBy: resolveActiveViewValue(activeView), tags: [] });
-        } else {
-            await DataService.addIncome({ amount: debt.amount, currency: debt.currency, date: today, source: `Debt from ${debt.counterparty}`, description: `Received debt from ${debt.counterparty}`, paidBy: resolveActiveViewValue(activeView) });
-        }
-        setLinkedCatId('');
-        setLinkedSubcat('');
-        setShowLinkedModal(null);
-        if (onUpdate) onUpdate();
-    };
-
-    const handleDelete = (id) => { DataService.deleteDebt(id); setShowDeleteModal(null); reload(); if (onUpdate) onUpdate(); };
     const conflictDebt = showConflictDetail ? debts.find(d => d.id === showConflictDetail) : null;
     const conflictSnapshot = showConflictDetail ? syncConflicts[String(showConflictDetail)] : null;
     const debtConflictFieldLabels = { counterparty: 'Person', amount: 'Amount', currency: 'Currency', direction: 'Direction', notes: 'Notes', dueDate: 'Due Date', person: 'Owner', isSettled: 'Settled', settledAt: 'Settled On' };
     const formatDebtConflictValue = (key, value) => {
         if (key === 'amount' && value !== undefined && value !== null) return fmtAmt(value, (conflictDebt && conflictDebt.currency) || 'GBP');
-        if (key === 'direction') return value === 'owe' ? 'I Owe' : value === 'owed' ? 'Owed to Me' : String(value || '—');
+        if (key === 'direction') return value === 'owe' ? 'To pay' : value === 'owed' ? 'To collect' : String(value || '—');
         if (typeof value === 'boolean') return value ? 'Yes' : 'No';
         return value === undefined || value === null || value === '' ? '—' : String(value);
     };
@@ -12044,289 +12040,130 @@ function DebtTracker({ defaultCurrency, categories, onUpdate, activeView, embedd
         DataService.updateDebt(debtId, updates);
         SyncConflicts.dismiss('debts', debtId);
         setShowConflictDetail(null);
-        reload(); if (onUpdate) onUpdate();
+        afterChange();
+    };
+
+    const renderRow = (debt, settled) => {
+        const owe = debt.direction === 'owe';
+        const overdue = isOverdue(debt);
+        const late = overdue ? -spDaysFrom(today, debt.dueDate) : 0;
+        const meta = settled ? 'Settled' + (debt.settledAt ? ' ' + spLongDate(debt.settledAt.slice(0, 10)) : '')
+            : !debt.dueDate ? 'No due date' : overdue ? 'Was due ' + spShortDate(debt.dueDate) + ' · ' + late + ' day' + (late === 1 ? '' : 's') + ' late' : 'Due ' + spLongDate(debt.dueDate);
+        const isOpen = openId === debt.id;
+        const conflict = syncConflicts[String(debt.id)];
+        const cfOpen = showConflictDetail === debt.id;
+        return (
+            <div key={debt.id} className="sp-schedcard">
+                <button type="button" className="sp-schedrow" style={{opacity: settled ? 0.6 : 1}} onClick={() => { setOpenId(isOpen ? null : debt.id); setPendingDelete(null); }}>
+                    <span className="sp-schedicon" style={{background: owe ? '#fee2e2' : '#dcfce7', color: owe ? '#e11d48' : '#16a34a', fontWeight: 800, fontSize: '15px'}}>{(debt.counterparty || '?').charAt(0).toUpperCase()}</span>
+                    <span className="sp-schedmain">
+                        <span className="sp-schedtitle">
+                            <span>{debt.counterparty}</span>
+                            {conflict && <span role="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : debt.id); }}><i className="fas fa-code-compare"></i></span>}
+                            {overdue && <span className="sp-kindtag" style={{background: '#fee2e2', color: '#e11d48'}}><i className="fas fa-circle-exclamation" style={{fontSize: '8px', marginRight: '3px'}}></i>OVERDUE</span>}
+                        </span>
+                        <span className="sp-schedmeta" style={{color: overdue ? '#e11d48' : 'var(--sp-slate-400)'}}>
+                            {activeView.length > 1 && spOwnerChip(debt.person, people)}
+                            <span>{meta}</span>
+                        </span>
+                        {debt.notes && <span className="sp-schedend" style={{fontWeight: 500}}>{debt.notes}</span>}
+                    </span>
+                    <span className="sp-schedright"><span className="sp-schedamt" style={{color: settled ? 'var(--sp-slate-400)' : owe ? '#e11d48' : '#16a34a', textDecoration: settled ? 'line-through' : 'none'}}>{fmtAmt(debt.amount, debt.currency)}</span></span>
+                </button>
+                {cfOpen && conflictDebt && conflictSnapshot && (
+                    <div style={{padding: '0 15px 12px'}}>
+                        <ConflictCompare localRecord={conflictDebt} cloudSnapshot={conflictSnapshot.cloudSnapshot} detectedAt={conflictSnapshot.detectedAt} fieldLabels={debtConflictFieldLabels} formatValue={formatDebtConflictValue} onKeepLocal={() => handleResolveConflict(false)} onUseCloud={() => handleResolveConflict(true)} />
+                    </div>
+                )}
+                {isOpen && (
+                    <div className="sp-schedopen">
+                        <SpActBar actions={[
+                            !settled && { key: 'settle', label: 'Settle', icon: 'fas fa-handshake', tone: 'green', onClick: () => setSettleDebt(debt) },
+                            !settled && { key: 'edit', label: 'Edit', icon: 'fas fa-pen', tone: 'slate', onClick: () => setFormDebt(debt) },
+                            { key: 'delete', label: 'Delete', icon: 'fas fa-trash', tone: 'rose', onClick: () => setPendingDelete(debt.id) }
+                        ]} />
+                        {pendingDelete === debt.id && (
+                            <div style={{padding: '4px 4px 2px'}}>
+                                <InlineConfirm text={'Delete this ' + fmtAmt(debt.amount, debt.currency) + ' debt with ' + debt.counterparty + '? Nothing is logged.'} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => handleDelete(debt.id)} />
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
     };
 
     return (
-        <div className={embedded ? undefined : 'screen'}>
-            <div className="screen-header"><h2><i className="fas fa-handshake me-2"></i>Debt Tracker</h2></div>
-
-            <div style={{padding:'0 1rem 0.75rem',display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-                <div style={{background:'#fff5f5',border:'1px solid #f5c6cb',borderRadius:'10px',padding:'10px 12px'}}>
-                    <div style={{fontSize:'0.72rem',color:'#dc3545',fontWeight:700,marginBottom:'3px',letterSpacing:'0.03em'}}>TOTAL I OWE</div>
-                    {Object.keys(oweTotals).length === 0
-                        ? <div style={{fontSize:'0.85rem',color:'#adb5bd'}}>None</div>
-                        : Object.entries(oweTotals).map(([cur, amt]) => <div key={cur} style={{fontSize:'0.95rem',fontWeight:700,color:'#dc3545'}}>{fmtAmt(amt, cur)}</div>)}
-                </div>
-                <div style={{background:'#f0fff4',border:'1px solid #c3e6cb',borderRadius:'10px',padding:'10px 12px'}}>
-                    <div style={{fontSize:'0.72rem',color:'#198754',fontWeight:700,marginBottom:'3px',letterSpacing:'0.03em'}}>OWED TO ME</div>
-                    {Object.keys(owedTotals).length === 0
-                        ? <div style={{fontSize:'0.85rem',color:'#adb5bd'}}>None</div>
-                        : Object.entries(owedTotals).map(([cur, amt]) => <div key={cur} style={{fontSize:'0.95rem',fontWeight:700,color:'#198754'}}>{fmtAmt(amt, cur)}</div>)}
-                </div>
+        <div className={embedded ? undefined : 'sp-page'}>
+            <div className="sp-debtpills">
+                <button type="button" className={activeTab === 'owe' ? 'is-active' : ''} onClick={() => { setActiveTab('owe'); setOpenId(null); }}>To pay · {totalsLabel('owe')}</button>
+                <button type="button" className={activeTab === 'owed' ? 'is-active' : ''} onClick={() => { setActiveTab('owed'); setOpenId(null); }}>To collect · {totalsLabel('owed')}</button>
             </div>
-
-            <div style={{padding:'0 1rem 0.75rem',display:'flex',gap:'8px'}}>
-                <button type="button" className={'btn btn-sm flex-fill ' + (activeTab==='owe' ? 'btn-danger' : 'btn-outline-secondary')} onClick={() => setActiveTab('owe')}>
-                    <i className="fas fa-arrow-up me-1"></i>I Owe
-                </button>
-                <button type="button" className={'btn btn-sm flex-fill ' + (activeTab==='owed' ? 'btn-success' : 'btn-outline-secondary')} onClick={() => setActiveTab('owed')}>
-                    <i className="fas fa-arrow-down me-1"></i>Owed to Me
-                </button>
-                <button type="button" className={'btn btn-sm ' + (showForm ? 'btn-secondary' : 'btn-primary')} onClick={() => { if (showForm) { setShowForm(false); setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) }); } else { setEditingDebt(null); setForm({ counterparty: '', amount: '', currency: defaultCurrency || 'GBP', notes: '', dueDate: '', person: resolveActiveViewValue(activeView) }); setShowForm(true); } }} title="Add debt">
-                    <i className={'fas fa-' + (showForm ? 'times' : 'plus')}></i>
-                </button>
-            </div>
+            {toast && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{toast}</span></div>}
             {Object.keys(syncConflicts).length > 0 && (
-                <div className="form-check mb-2" style={{padding: '0 1rem'}}>
-                    <input type="checkbox" className="form-check-input" id="filterDebtSyncConflict" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
-                    <label className="form-check-label" htmlFor="filterDebtSyncConflict"><i className="fas fa-triangle-exclamation sync-conflict-icon"></i> Sync conflicts only</label>
-                </div>
+                <label className="sp-check" style={{margin: '0 4px 10px'}}>
+                    <input type="checkbox" checked={filterSyncConflict} onChange={(e) => setFilterSyncConflict(e.target.checked)} />
+                    <i className="fas fa-code-compare" style={{color: '#4f46e5'}}></i>Sync conflicts only
+                </label>
             )}
-
-            {showForm && (
-                <div style={{margin:'0 1rem 0.75rem',background:'#f8f9fa',borderRadius:'10px',padding:'0.75rem'}}>
-                    <h6 style={{marginBottom:'0.6rem',fontSize:'0.85rem',fontWeight:600}}>{activeTab==='owe' ? 'Add Debt I Owe' : 'Add Debt Owed to Me'}</h6>
-                    <form onSubmit={handleAddDebt}>
-                        <div className="mb-2">
-                            <input className={'form-control form-control-sm' + (formErrors.counterparty ? ' is-invalid' : '')}
-                                placeholder="Person / counterparty name" value={form.counterparty}
-                                onChange={e => setForm(f => ({...f, counterparty: e.target.value}))} />
-                            {formErrors.counterparty && <div className="invalid-feedback">{formErrors.counterparty}</div>}
-                        </div>
-                        <div className="mb-2" style={{display:'grid',gridTemplateColumns:'1fr 100px',gap:'8px'}}>
-                            <div>
-                                <input type="number" min="0.01" step="0.01" className={'form-control form-control-sm' + (formErrors.amount ? ' is-invalid' : '')}
-                                    placeholder="Amount" value={form.amount}
-                                    onChange={e => setForm(f => ({...f, amount: e.target.value}))} />
-                                {formErrors.amount && <div className="invalid-feedback">{formErrors.amount}</div>}
-                            </div>
-                            <select className="form-select form-select-sm" value={form.currency} onChange={e => setForm(f => ({...f, currency: e.target.value}))}>
-                                {currencies.map(c => <option key={c} value={c}>{c}</option>)}
-                            </select>
-                        </div>
-                        <div className="mb-2">
-                            <input type="date" className="form-control form-control-sm" value={form.dueDate}
-                                onChange={e => setForm(f => ({...f, dueDate: e.target.value}))} />
-                            <div style={{fontSize:'0.72rem',color:'#6c757d',marginTop:'2px'}}>Due date (optional)</div>
-                        </div>
-                        {activeView.length > 1 && (
-                            <div className="mb-2">
-                                <label style={{fontSize:'0.75rem',fontWeight:600,marginBottom:'3px',display:'block'}}>Linked to</label>
-                                <PersonSelect value={form.person} onChange={v => setForm(f => ({...f, person: v}))} activeView={activeView} className="form-select form-select-sm" ownLabel="Own (Me)" />
-                            </div>
-                        )}
-                        <div className="mb-3">
-                            <input className="form-control form-control-sm" placeholder="Notes (optional)" value={form.notes}
-                                onChange={e => setForm(f => ({...f, notes: e.target.value}))} />
-                        </div>
-                        <div style={{display:'flex',gap:'8px'}}>
-                            <button type="submit" className="btn btn-sm btn-primary">{editingDebt ? 'Save Changes' : 'Add Debt'}</button>
-                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setShowForm(false); setEditingDebt(null); setFormErrors({}); }}>Cancel</button>
-                        </div>
-                    </form>
-                </div>
-            )}
-
-            <div style={{padding:'0 1rem'}}>
-                {sortedActive.length === 0 ? (
-                    <div style={{textAlign:'center',padding:'2.5rem 0',color:'#6c757d'}}>
-                        <i className={'fas fa-' + (activeTab==='owe' ? 'hand-holding-usd' : 'money-bill-wave') + ' fa-2x mb-2 d-block'}></i>
-                        <p style={{fontSize:'0.85rem',margin:0}}>No active {activeTab==='owe' ? 'debts you owe' : 'debts owed to you'}</p>
-                    </div>
-                ) : sortedActive.map(debt => {
-                    const overdue = isOverdue(debt);
-                    return (
-                        <div key={debt.id} style={{marginBottom:'8px',borderRadius:'10px',border:'1px solid',borderColor:overdue?'#ffc107':'#dee2e6',background:overdue?'#fffdf0':'#fff',padding:'10px 12px'}}>
-                            <div style={{display:'flex',alignItems:'flex-start',gap:'8px'}}>
-                                <div style={{flex:1,minWidth:0}}>
-                                    <div style={{display:'flex',alignItems:'center',gap:'5px',flexWrap:'wrap',marginBottom:'3px'}}>
-                                        <span className={'badge ' + (debt.direction==='owe' ? 'bg-danger' : 'bg-success')} style={{fontSize:'0.58rem'}}>{debt.direction==='owe' ? 'I OWE' : 'OWED TO ME'}</span>
-                                        {overdue && <span className="badge bg-warning text-dark" style={{fontSize:'0.58rem'}}>OVERDUE</span>}
-                                        <span style={{fontWeight:600,fontSize:'0.88rem'}}>{debt.counterparty}</span>
-                                        <SyncConflictBadge conflict={syncConflicts[String(debt.id)]} onClick={() => setShowConflictDetail(debt.id)} />
-                                    </div>
-                                    <div style={{fontSize:'0.95rem',fontWeight:700,color:debt.direction==='owe'?'#dc3545':'#198754'}}>{fmtAmt(debt.amount, debt.currency)}</div>
-                                    {debt.dueDate && <div style={{fontSize:'0.75rem',color:overdue?'#e65100':'#6c757d',marginTop:'1px'}}>Due: {new Date(debt.dueDate+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
-                                    {debt.notes && <div style={{fontSize:'0.75rem',color:'#6c757d',marginTop:'2px'}}>{debt.notes}</div>}
-                                </div>
-                                <div style={{display:'flex',flexDirection:'column',gap:'4px',flexShrink:0}}>
-                                    <button type="button" className="btn btn-sm btn-outline-success" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => setShowSettleModal(debt)}>
-                                        <i className="fas fa-check me-1"></i>Settle
-                                    </button>
-                                    <button type="button" className="btn btn-sm btn-outline-secondary" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => openEditForm(debt)}>
-                                        <i className="fas fa-pencil-alt"></i>
-                                    </button>
-                                    <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.7rem',padding:'2px 8px'}} onClick={() => setShowDeleteModal(debt.id)}>
-                                        <i className="fas fa-trash"></i>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-
+            {sortedActive.length === 0
+                ? <div className="sp-empty"><i className={activeTab === 'owe' ? 'fas fa-hand-holding-dollar' : 'fas fa-money-bill-wave'}></i>{activeTab === 'owe' ? 'Nothing to pay.' : 'Nothing to collect.'}</div>
+                : sortedActive.map(d => renderRow(d, false))}
             {settledDebts.length > 0 && (
-                <div style={{padding:'0.5rem 1rem 1rem'}}>
-                    <button type="button" className="btn btn-sm btn-outline-secondary w-100" onClick={() => setShowSettled(v => !v)}>
-                        <i className={'fas fa-' + (showSettled ? 'chevron-up' : 'chevron-down') + ' me-1'}></i>
-                        {showSettled ? 'Hide' : 'Show'} settled debts ({settledDebts.length})
+                <React.Fragment>
+                    <button type="button" className="sp-showsettled" onClick={() => setShowSettled(v => !v)}>
+                        {showSettled ? 'Hide' : 'Show'} settled ({settledDebts.length})<i className={'fas fa-chevron-' + (showSettled ? 'up' : 'down')}></i>
                     </button>
-                    {showSettled && (
-                        <div style={{marginTop:'8px'}}>
-                            {settledDebts.map(debt => (
-                                <div key={debt.id} style={{marginBottom:'6px',borderRadius:'8px',border:'1px solid #e9ecef',background:'#f8f9fa',padding:'8px 12px'}}>
-                                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
-                                        <div style={{flex:1,minWidth:0}}>
-                                            <div style={{fontWeight:500,fontSize:'0.85rem',color:'#6c757d'}}>{debt.counterparty}<SyncConflictBadge conflict={syncConflicts[String(debt.id)]} onClick={() => setShowConflictDetail(debt.id)} /></div>
-                                            <div style={{fontSize:'0.85rem',color:'#adb5bd',textDecoration:'line-through'}}>{fmtAmt(debt.amount, debt.currency)}</div>
-                                            {debt.settledAt && <div style={{fontSize:'0.72rem',color:'#adb5bd'}}>Settled {new Date(debt.settledAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
-                                        </div>
-                                        <button type="button" className="btn btn-sm btn-outline-danger" style={{fontSize:'0.65rem',padding:'2px 7px'}} onClick={() => setShowDeleteModal(debt.id)}>
-                                            <i className="fas fa-trash"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                    {showSettled && settledDebts.map(d => renderRow(d, true))}
+                </React.Fragment>
             )}
-
-            {showSettleModal && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Mark as Settled?</h5></div>
-                            <div className="modal-body">
-                                <p>Mark <strong>{fmtAmt(showSettleModal.amount, showSettleModal.currency)}</strong> {showSettleModal.direction==='owe' ? 'owed to' : 'from'} <strong>{showSettleModal.counterparty}</strong> as settled?</p>
-                                <p className="text-muted small mb-0">This cannot be undone.</p>
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowSettleModal(null)}>Cancel</button>
-                                <button type="button" className="btn btn-success btn-sm" onClick={() => handleSettle(showSettleModal)}><i className="fas fa-check me-1"></i>Yes, Settle</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {showLinkedModal && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header">
-                                <h5 className="modal-title"><i className="fas fa-check-circle text-success me-2"></i>Debt Settled!</h5>
-                            </div>
-                            <div className="modal-body">
-                                {showLinkedModal.direction === 'owe' ? (
-                                    <>
-                                        <p>Would you like to add an <strong>expense record</strong> for <strong>{fmtAmt(showLinkedModal.amount, showLinkedModal.currency)}</strong>?</p>
-                                        <div className="mb-2">
-                                            <label className="form-label" style={{fontSize:'0.82rem',fontWeight:600}}>Category</label>
-                                            <select className="form-select form-select-sm" value={linkedCatId}
-                                                onChange={e => { setLinkedCatId(e.target.value); setLinkedSubcat(''); }}>
-                                                <option value="">— Select category (optional) —</option>
-                                                {(categories || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                            </select>
-                                        </div>
-                                        {linkedCatId && (() => {
-                                            const cat = (categories || []).find(c => String(c.id) === String(linkedCatId));
-                                            const subcats = cat && cat.subcategories && cat.subcategories.length > 0 ? cat.subcategories : [];
-                                            return subcats.length > 0 ? (
-                                                <div className="mb-2">
-                                                    <label className="form-label" style={{fontSize:'0.82rem',fontWeight:600}}>Sub Category</label>
-                                                    <select className="form-select form-select-sm" value={linkedSubcat}
-                                                        onChange={e => setLinkedSubcat(e.target.value)}>
-                                                        <option value="">— Select sub category (optional) —</option>
-                                                        {subcats.map(s => <option key={s} value={s}>{s}</option>)}
-                                                    </select>
-                                                </div>
-                                            ) : null;
-                                        })()}
-                                        <p className="text-muted small mb-0">Added with today's date. Won't affect debt totals.</p>
-                                    </>
-                                ) : (
-                                    <>
-                                        <p>Would you like to add an <strong>income record</strong> for <strong>{fmtAmt(showLinkedModal.amount, showLinkedModal.currency)}</strong>?</p>
-                                        <p className="text-muted small mb-0">Added with today's date. Won't affect debt totals.</p>
-                                    </>
-                                )}
-                            </div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowLinkedModal(null)}>No thanks</button>
-                                <button type="button" className={'btn btn-sm ' + (showLinkedModal.direction==='owe' ? 'btn-danger' : 'btn-success')} onClick={() => handleLinkedRecord(showLinkedModal)}>
-                                    <i className={'fas fa-' + (showLinkedModal.direction==='owe' ? 'receipt' : 'wallet') + ' me-1'}></i>
-                                    Add {showLinkedModal.direction==='owe' ? 'Expense' : 'Income'} Record
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {showDeleteModal && (
-                <div className="modal show d-block" style={{background:'rgba(0,0,0,0.5)'}}>
-                    <div className="modal-dialog modal-dialog-centered">
-                        <div className="modal-content">
-                            <div className="modal-header"><h5 className="modal-title">Delete Debt?</h5></div>
-                            <div className="modal-body"><p className="mb-0">Are you sure you want to delete this debt record? This cannot be undone.</p></div>
-                            <div className="modal-footer">
-                                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setShowDeleteModal(null)}>Cancel</button>
-                                <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(showDeleteModal)}><i className="fas fa-trash me-1"></i>Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {showConflictDetail && conflictDebt && conflictSnapshot && (
-                <SyncConflictModal
-                    localRecord={conflictDebt}
-                    cloudSnapshot={conflictSnapshot.cloudSnapshot}
-                    fieldLabels={debtConflictFieldLabels}
-                    formatValue={formatDebtConflictValue}
-                    onClose={() => setShowConflictDetail(null)}
-                    onKeepLocal={() => handleResolveConflict(false)}
-                    onUseCloud={() => handleResolveConflict(true)}
-                />
-            )}
+            {!formDebt && !settleDebt && <PinnedCta label="Add Debt" icon="fas fa-plus" onClick={() => setFormDebt('new')} aboveDock />}
+            {formDebt && <DebtFormSheet debt={formDebt === 'new' ? null : formDebt} direction={activeTab} defaultCurrency={defaultCurrency} activeView={activeView} onClose={() => setFormDebt(null)} onSaved={(msg, dir) => { setFormDebt(null); setActiveTab(dir); afterChange(msg); }} />}
+            {settleDebt && <DebtSettleSheet debt={settleDebt} categories={categories} activeView={activeView} onClose={() => setSettleDebt(null)} onSettled={(msg) => { setSettleDebt(null); setOpenId(null); afterChange(msg); }} />}
         </div>
     );
 }
 
-function ManageScreen({ categories, defaultCurrency, onUpdate, activeView }) {
-    const [activeTab, setActiveTab] = useState('bills');
+function ManageScreen({ categories, defaultCurrency, onUpdate, activeView, initialTab }) {
+    const [activeTab, setActiveTab] = useState(() => ['bills', 'recurring', 'debts'].includes(initialTab) ? initialTab : (FilterMemory.load('scheduled').tab || 'bills'));
+    const [, setTick] = useState(0);
+    useEffect(() => { FilterMemory.save('scheduled', { tab: activeTab }); }, [activeTab]);
+    // Tabs report changes here too so the tiles above them refresh straight away.
+    const changed = () => { setTick(t => t + 1); if (onUpdate) onUpdate(); };
+
+    const cur = defaultCurrency || 'GBP';
+    const toDefault = (amount, currency) => (!currency || currency === cur) ? amount : CurrencyService.convertToDefaultSync(amount, currency, cur);
+    const today = DateUtils.today();
+    const activeBills = DataService.getBills().filter(b => b.isActive && spBillVisible(b, activeView));
+    const billsMonthly = activeBills.reduce((s, b) => s + toDefault(b.amount, b.currency) * (SP_BILL_FREQ_MONTHLY[b.frequency] || 1), 0);
+    const activeSchedules = DataService.getRecurring().filter(s => s.isActive && !spScheduleEnded(s, today) && spScheduleVisible(s, activeView));
+    const recurringMonthly = activeSchedules.reduce((s, r) => { const t = r.templateExpense || {}; return s + toDefault(t.amount || 0, t.currency) * (SP_SCHED_FREQ_MONTHLY[r.frequency] || 1); }, 0);
+    const fmt0 = (v) => ValidationUtils.getCurrencySymbol(cur) + Math.round(v).toLocaleString(cur === 'INR' ? 'en-IN' : 'en-GB');
 
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2><i className="fas fa-layer-group me-2"></i>Bills, Recurring & Debts</h2>
+        <div className="sp-page sp-sched">
+            <div className="sp-page-kicker">Repeating money events</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>Scheduled</h2>
+            <div className="sp-stattiles">
+                <div className="sp-stattile">
+                    <div className="sp-stattile-head"><span style={{background: '#fee2e2', color: '#e11d48'}}><i className="fas fa-file-invoice"></i></span>BILLS / MO</div>
+                    <div className="sp-stattile-value">{fmt0(billsMonthly)}</div>
+                    <div className="sp-stattile-sub">{activeBills.length} active bill{activeBills.length === 1 ? '' : 's'}</div>
+                </div>
+                <div className="sp-stattile">
+                    <div className="sp-stattile-head"><span style={{background: '#ede9fe', color: '#7c3aed'}}><i className="fas fa-rotate"></i></span>RECURRING / MO</div>
+                    <div className="sp-stattile-value">{fmt0(recurringMonthly)}</div>
+                    <div className="sp-stattile-sub">{activeSchedules.length} active</div>
+                </div>
             </div>
-            <ul className="nav nav-tabs" style={{marginBottom: '1rem'}}>
-                {/* No "nav-item" class here: the app defines a global .nav-item rule for the
-                    bottom navigation bar (flex-column, max-width 70px) that collides with and
-                    breaks Bootstrap's unrelated nav-tabs <li> when reusing the same class name. */}
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'bills' ? 'active' : '')} onClick={() => setActiveTab('bills')}>
-                        <i className="fas fa-file-invoice-dollar me-1"></i>Bills
-                    </button>
-                </li>
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'recurring' ? 'active' : '')} onClick={() => setActiveTab('recurring')}>
-                        <i className="fas fa-redo me-1"></i>Recurring
-                    </button>
-                </li>
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'debts' ? 'active' : '')} onClick={() => setActiveTab('debts')}>
-                        <i className="fas fa-handshake me-1"></i>Debts
-                    </button>
-                </li>
-            </ul>
-
-            {activeTab === 'bills' && <BillTracker categories={categories} onUpdate={onUpdate} activeView={activeView} embedded />}
-            {activeTab === 'recurring' && <RecurringList onUpdate={onUpdate} activeView={activeView} embedded />}
-            {activeTab === 'debts' && <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={onUpdate} activeView={activeView} embedded />}
+            <div className="sp-seg" style={{margin: '0 0 12px'}}>
+                {[['bills', 'Bills'], ['recurring', 'Recurring'], ['debts', 'Debts']].map(([k, l]) => (
+                    <button key={k} type="button" className={activeTab === k ? 'is-active' : ''} onClick={() => setActiveTab(k)}>{l}</button>
+                ))}
+            </div>
+            {activeTab === 'bills' && <BillTracker categories={categories} onUpdate={changed} activeView={activeView} embedded />}
+            {activeTab === 'recurring' && <RecurringList onUpdate={changed} activeView={activeView} embedded />}
+            {activeTab === 'debts' && <DebtTracker defaultCurrency={defaultCurrency} categories={categories} onUpdate={changed} activeView={activeView} embedded />}
         </div>
     );
 }
@@ -12676,7 +12513,8 @@ function App() {
             }));
         }
         const todayStr = DateUtils.today();
-        const dueSoon = DataService.getBills().filter(b => { if (!b.isActive) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
+        // A reminder of 0 days means Off: no reminder for that bill.
+        const dueSoon = DataService.getBills().filter(b => { if (!b.isActive || Number(b.reminderDaysBefore) === 0) return false; const diff = Math.ceil((new Date(b.nextDueDate) - new Date(todayStr)) / 86400000); return diff <= b.reminderDaysBefore; });
         const billActive = dueSoon.map(b => ({ key: 'bill:' + b.id, type: 'bill', title: `${b.name}: due soon`, message: 'Due ' + ValidationUtils.formatDate(b.nextDueDate), screen: 'manage' }));
         const activeAlerts = [...budgetActive, ...billActive];
         // Diff against the store BEFORE syncing so a native notification fires once per
@@ -13309,7 +13147,7 @@ function App() {
             case 'summary': return <Summary expenses={expenses} income={income} categories={categories} defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} currentUser={currentUser} notifications={notifications} onNavigate={navigate} />;
             case 'goals': return <SavingsGoals defaultCurrency={defaultCurrency} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'manage': case 'bills': case 'recurring': case 'debts':
-                return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} />;
+                return <ManageScreen categories={categories} defaultCurrency={defaultCurrency} onUpdate={handleDataUpdate} activeView={activeView} initialTab={currentScreen} />;
             case 'bulk-upload': return <BulkUpload categories={categories} assetCategories={assetCategories} liabilityCategories={liabilityCategories} activeView={activeView} onUpdate={handleDataUpdate} />;
             case 'networth': return <NetWorth defaultCurrency={defaultCurrency} activeView={activeView} assetCategories={assetCategories} liabilityCategories={liabilityCategories} onUpdate={handleDataUpdate} />;
             case 'settings': return <SettingsScreen currentCurrency={defaultCurrency} onCurrencyChange={handleCurrencyChange} currentUser={currentUser} onStoragePickerOpen={handleOpenStoragePicker} syncStatus={syncStatus} lastSyncTime={lastSyncTime} storagePreference={storagePreference} onSyncNow={handleSyncNow} onReconnect={handleReconnect} onViewHistory={() => setShowCloudHistory(true)} activeView={activeView} onActiveViewChange={handleActiveViewChange} scrollTarget={settingsScrollTarget} onScrollTargetHandled={() => setSettingsScrollTarget(null)} onDisplayNameChange={handleCurrentUserDisplayNameChange} categories={categories} onUpdate={handleDataUpdate} />;
