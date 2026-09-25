@@ -598,6 +598,20 @@ function CurrencySheet({ value, onPick, onClose }) {
     );
 }
 
+// Tags from a CSV cell, ';'-separated, with the same rules as the tag chips below: trimmed +
+// lowercased, duplicates dropped, at most 10 tags of up to 30 characters. -> { tags, error }.
+function parseTagList(cell, noun = 'expense') {
+    const tags = [];
+    for (const raw of String(cell || '').split(';')) {
+        const t = raw.trim().toLowerCase();
+        if (!t || tags.includes(t)) continue;
+        if (t.length > 30) return { tags: [], error: 'Tags must be 30 characters or fewer' };
+        tags.push(t);
+    }
+    if (tags.length > 10) return { tags: [], error: 'Maximum 10 tags allowed per ' + noun };
+    return { tags, error: null };
+}
+
 // Tag chips over the existing tag rules: trimmed + lowercased, no duplicates, at most 10
 // tags of up to 30 characters (same limits and messages as before; spaces are kept).
 function TagInput({ tags, onChange, allTags = [], onError, noun = 'expense' }) {
@@ -7577,7 +7591,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
 
             if (activeTab === 'expenses') {
                 const colMap = {};
-                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'payment method', 'bank'];
+                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'payment method', 'bank', 'tags'];
                 expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Category, Sub Category');
@@ -7615,6 +7629,9 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     }
 
                     const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '');
+                    // Optional Tags column (approved): ';'-separated, same rules as the tag chips.
+                    const tagParse = parseTagList(colMap['tags'] !== undefined ? vals[colMap['tags']] : '', 'expense');
+                    if (tagParse.error) errors.push(tagParse.error);
 
                     // Payment Method disambiguates "Cash" from "no bank specified" — without it,
                     // an imported expense could never be marked Paid by Cash at all (a blank
@@ -7646,6 +7663,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         isCashPayment: isCashPayment,
                         bank: bankVal,
                         accountId: accountId,
+                        tags: tagParse.tags,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -7653,7 +7671,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                 setParsedRows(rows);
             } else if (activeTab === 'income') {
                 const colMap = {};
-                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank'];
+                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank', 'tags'];
                 incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['source of income'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Source of Income');
@@ -7683,6 +7701,9 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     const currency = currencyVal || 'GBP';
                     if (currencyVal && !validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
 
+                    const tagParse = parseTagList(colMap['tags'] !== undefined ? vals[colMap['tags']] : '', 'income');
+                    if (tagParse.error) errors.push(tagParse.error);
+
                     const bankVal = colMap['bank'] !== undefined ? (vals[colMap['bank']] || '').trim() : '';
                     let accountId = '';
                     if (bankVal) {
@@ -7702,6 +7723,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         paidBy: whosVal,
                         bank: bankVal,
                         accountId: accountId,
+                        tags: tagParse.tags,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -7825,12 +7847,12 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
             const exampleCat = categories[0];
             const exampleSub = exampleCat && exampleCat.subcategories && exampleCat.subcategories[0];
             downloadCSV('financetracker-expenses-template.csv',
-                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Payment Method', 'Bank'],
-                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '', '']]);
+                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Payment Method', 'Bank', 'Tags'],
+                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '', '', 'weekly shop;family']]);
         } else if (activeTab === 'income') {
             downloadCSV('financetracker-income-template.csv',
-                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank'],
-                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '']]);
+                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank', 'Tags'],
+                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '', 'salary']]);
         } else if (activeTab === 'assets') {
             const exampleCat = assetCategories[0];
             downloadCSV('financetracker-assets-template.csv',
@@ -7868,7 +7890,8 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         subcategory: row.subcategory,
                         paidBy: row.paidBy,
                         isCashPayment: row.isCashPayment,
-                        accountId: row.accountId
+                        accountId: row.accountId,
+                        tags: row.tags || []
                     });
                 } else if (activeTab === 'income') {
                     await DataService.addIncome({
@@ -7878,7 +7901,8 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         source: row.source,
                         description: row.description,
                         paidBy: row.paidBy,
-                        accountId: row.accountId
+                        accountId: row.accountId,
+                        tags: row.tags || []
                     });
                 } else {
                     const newItem = DataService.addNetWorthItem({
@@ -7945,199 +7969,130 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
+    const tabNoun = { expenses: 'Expense', income: 'Income', assets: 'Asset', liabilities: 'Liability' }[activeTab];
+    // Row card text: what the row will become, plus the reason it can't be imported.
+    const rowLook = (row) => {
+        const isFlow = activeTab === 'expenses' || activeTab === 'income';
+        const amt = isFlow ? row.amount : row.value;
+        const money = isNaN(amt) || amt == null ? '' : spFmtMoney(amt, row.currency);
+        const title = activeTab === 'expenses' ? (row.description || row.categoryName || 'Row ' + row.rowNum)
+            : activeTab === 'income' ? (row.source || row.description || 'Row ' + row.rowNum)
+            : (row.name || 'Row ' + row.rowNum);
+        const meta = (activeTab === 'expenses' ? [row.subcategory || row.categoryName, money, row.date ? spShortDate(row.date) : '', row.isCashPayment ? 'Cash' : row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' ')]
+            : activeTab === 'income' ? [row.description && row.description !== title ? row.description : '', money, row.date ? spShortDate(row.date) : '', row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' ')]
+            : [row.subcategory || row.categoryName, money, row.person, row.country, row.bank, row.fundBank ? 'From ' + row.fundBank : '']).filter(Boolean).join(' · ');
+        const errs = row.error ? row.error.split('; ') : [];
+        const status = row.skip ? 'Tracked automatically' : errs.length === 0 ? 'Valid' : errs.length === 1 ? (errs[0].length <= 24 ? errs[0] : 'Error') : errs.length + ' errors';
+        return { title, meta, errs, status };
+    };
+
     return (
-        <div className="screen">
-            <div className="screen-header">
-                <h2>Bulk Upload</h2>
+        <div className="sp-page sp-uppage">
+            <div className="sp-page-kicker">Import from CSV</div>
+            <h2 className="sp-page-title" style={{marginBottom: '12px'}}>Bulk Upload</h2>
+            <div className="sp-seg" style={{margin: '0 0 12px'}}>
+                {[['expenses', 'Expense'], ['income', 'Income'], ['assets', 'Asset'], ['liabilities', 'Liability']].map(([k, l]) => (
+                    <button key={k} type="button" className={activeTab === k ? 'is-active' : ''} onClick={() => resetOnTabChange(k)} disabled={isImporting}>{l}</button>
+                ))}
             </div>
-            <ul className="nav nav-tabs" style={{marginBottom: '1rem'}}>
-                {/* No "nav-item" class here: the app defines a global .nav-item rule for the
-                    bottom navigation bar (flex-column, max-width 70px) that collides with and
-                    breaks Bootstrap's unrelated nav-tabs <li> when reusing the same class name. */}
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'expenses' ? 'active' : '')} onClick={() => resetOnTabChange('expenses')} disabled={isImporting}>Expenses</button>
-                </li>
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'income' ? 'active' : '')} onClick={() => resetOnTabChange('income')} disabled={isImporting}>Income</button>
-                </li>
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'assets' ? 'active' : '')} onClick={() => resetOnTabChange('assets')} disabled={isImporting}>Assets</button>
-                </li>
-                <li>
-                    <button className={'nav-link ' + (activeTab === 'liabilities' ? 'active' : '')} onClick={() => resetOnTabChange('liabilities')} disabled={isImporting}>Liabilities</button>
-                </li>
-            </ul>
 
             {importResult && (
-                <div className="alert alert-info">
-                    <i className="fas fa-check-circle me-2"></i>
-                    Imported {importResult.imported} row{importResult.imported !== 1 ? 's' : ''}{importResult.fileName ? <> from <strong>{importResult.fileName}</strong></> : ''}.
-                    {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were not imported.`}
-                    {importResult.skipped > 0 && ` ${importResult.skipped} rows are already tracked automatically and were not imported.`}
+                <div className="sp-alert sp-alert-ok">
+                    <i className="fas fa-circle-check"></i>
+                    <span>
+                        Imported {importResult.imported} row{importResult.imported !== 1 ? 's' : ''}{importResult.fileName ? <> from <b>{importResult.fileName}</b></> : ''}.
+                        {importResult.errors > 0 && ` ${importResult.errors} rows had errors and were not imported.`}
+                        {importResult.skipped > 0 && ` ${importResult.skipped} rows are already tracked automatically and were not imported.`}
+                    </span>
                 </div>
             )}
 
-            <div style={{marginBottom: '1rem'}}>
-                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem'}}>
-                    <label style={{fontWeight: '600', margin: 0}}>Select CSV File</label>
-                    <button type="button" className="btn btn-sm btn-outline-secondary" onClick={handleDownloadTemplate}>
-                        <i className="fas fa-download me-1"></i>Download Template
-                    </button>
-                </div>
-                <div
-                    onDragOver={e => { e.preventDefault(); if (!isImporting) setIsDragOver(true); }}
-                    onDragLeave={() => setIsDragOver(false)}
-                    onDrop={handleDrop}
-                    style={{
-                        border: '2px dashed ' + (isDragOver ? '#4a6cf7' : '#ced4da'),
-                        borderRadius: '8px',
-                        padding: '0.75rem',
-                        background: isDragOver ? '#eef2ff' : 'transparent',
-                        transition: 'all 0.15s',
-                        opacity: isImporting ? 0.6 : 1
-                    }}
-                >
-                    <input ref={fileInputRef} type="file" className="form-control" accept=".csv" onChange={handleFileSelect} disabled={isImporting} />
-                    <div className="form-text mb-0">Drag and drop a CSV file here, or use the picker above.</div>
-                </div>
-                <div className="form-text">
+            <div
+                className={'sp-drop' + (isDragOver ? ' is-over' : '') + (isImporting ? ' is-busy' : '')}
+                onDragOver={e => { e.preventDefault(); if (!isImporting) setIsDragOver(true); }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => { if (!isImporting && fileInputRef.current) fileInputRef.current.click(); }}
+                role="button" tabIndex={0}
+                onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !isImporting && fileInputRef.current) { e.preventDefault(); fileInputRef.current.click(); } }}
+            >
+                <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileSelect} disabled={isImporting} style={{display: 'none'}} />
+                <span className="sp-drop-tile"><i className="fas fa-file-csv"></i></span>
+                <div className="sp-drop-title">{selectedFileName || 'Drop your CSV here'}</div>
+                <div className="sp-drop-sub">{selectedFileName ? 'Tap to choose a different file' : 'or tap to browse'} · max {BULK_UPLOAD_MAX_ROWS} rows, 5 MB</div>
+                <button type="button" className="sp-drop-link" onClick={e => { e.stopPropagation(); handleDownloadTemplate(); }}>
+                    <i className="fas fa-download"></i>{tabNoun} template
+                </button>
+                <div className="sp-drop-cols">
                     {activeTab === 'expenses'
-                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Payment Method, Bank'
+                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Payment Method, Bank, Tags'
                         : activeTab === 'income'
-                        ? "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank"
+                        ? "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank, Tags"
                         : activeTab === 'assets'
                         ? 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes, Funded From Bank'
                         : 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes'}
-                    {' '}· Max {BULK_UPLOAD_MAX_ROWS} rows, 5MB.
+                    <br /><b className="sp-drop-req">Required: {activeTab === 'expenses' ? 'Date, Amount, Category, Sub Category' : activeTab === 'income' ? 'Date, Source of Income, Amount' : 'Name, Value, Category'}</b> · the rest are optional
+                    {(activeTab === 'expenses' || activeTab === 'income') && <><br />Tags are separated by ";" (up to 10, 30 characters each).</>}
                 </div>
             </div>
 
-            {fileError && <div className="alert alert-danger"><i className="fas fa-exclamation-circle me-2"></i>{fileError}</div>}
+            {fileError && <div className="sp-alert sp-alert-err" style={{marginTop: '12px'}}><i className="fas fa-circle-exclamation"></i><span>{fileError}</span></div>}
 
             {parsedRows.length > 0 && (
                 <div>
-                    <div style={{marginBottom: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center', justifyContent: 'space-between'}}>
-                        <div style={{display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap'}}>
-                            <span className="badge bg-success">{validCount} valid</span>
-                            {skippedCount > 0 && <span className="badge bg-secondary">{skippedCount} tracked automatically</span>}
-                            {errorCount > 0 && <span className="badge bg-danger">{errorCount} errors</span>}
-                            <div className="btn-group btn-group-sm" role="group">
-                                <button type="button" className={'btn ' + (!showOnlyErrors ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setShowOnlyErrors(false)}>All</button>
-                                <button type="button" className={'btn ' + (showOnlyErrors ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setShowOnlyErrors(true)} disabled={errorCount === 0}>Errors only</button>
-                            </div>
+                    <div className="sp-up-head">
+                        <div className="sp-section-label" style={{margin: 0}}>Preview · {validCount} of {parsedRows.length} valid{skippedCount > 0 ? ' · ' + skippedCount + ' tracked' : ''}</div>
+                        <div className="sp-up-pills">
+                            <button type="button" className={!showOnlyErrors ? 'is-on' : ''} onClick={() => setShowOnlyErrors(false)}>All · {parsedRows.length}</button>
+                            <button type="button" className={showOnlyErrors ? 'is-on' : ''} onClick={() => setShowOnlyErrors(true)} disabled={errorCount === 0}>Errors only · {errorCount}</button>
                         </div>
-                        {errorCount > 0 && (
-                            <button type="button" className="btn btn-sm btn-outline-danger" onClick={handleDownloadFailedRows}>
-                                <i className="fas fa-download me-1"></i>Download Failed Rows
-                            </button>
-                        )}
                     </div>
 
-                    <button className="btn btn-primary mb-3" onClick={handleImport} disabled={validCount === 0 || isImporting}>
-                        {isImporting
-                            ? <><span className="spinner-border spinner-border-sm me-2"></span>Importing...</>
-                            : <><i className="fas fa-file-import me-2"></i>Import {validCount} valid row{validCount !== 1 ? 's' : ''}</>
-                        }
-                    </button>
+                    {errorCount > 0 && (
+                        <button type="button" className="sp-up-errdl" onClick={handleDownloadFailedRows}>
+                            <span className="sp-tile" style={{background: 'var(--sp-rose-tint)', color: 'var(--sp-rose)'}}><i className="fas fa-file-arrow-down"></i></span>
+                            <span className="sp-row-main">
+                                <span className="sp-up-errdl-title">Download {errorCount} error row{errorCount !== 1 ? 's' : ''} (CSV)</span>
+                                <span className="sp-up-errdl-sub">Each row includes the reason it failed · fix and re-upload</span>
+                            </span>
+                            <i className="fas fa-download" style={{color: 'var(--sp-rose)'}}></i>
+                        </button>
+                    )}
 
-                    <div style={{overflowX: 'auto', marginBottom: '0.5rem'}}>
-                        <table className="table table-sm table-bordered" style={{fontSize: '0.85rem'}}>
-                            <thead className="table-light">
-                                <tr>
-                                    <th>#</th>
-                                    {activeTab === 'expenses' ? (
-                                        <>{['Date', 'Amount', 'Currency', 'Description', 'Category', 'Subcategory', 'Paid By', 'Payment Method', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
-                                    ) : activeTab === 'income' ? (
-                                        <>{['Date', 'Source', 'Amount', 'Currency', 'Description', "Who's Income", 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
-                                    ) : activeTab === 'assets' ? (
-                                        <>{['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Funded From Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
-                                    ) : (
-                                        <>{['Name', 'Value', 'Currency', 'Category', 'Sub Category', 'Original Amount', 'Person', 'Country', 'Bank', 'Status'].map(h => <th key={h}>{h}</th>)}</>
-                                    )}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {pageRows.map((row, idx) => (
-                                    <tr key={row.rowNum ?? idx} className={row.skip ? 'table-secondary' : row.error ? 'table-danger' : 'table-success'}>
-                                        <td>{row.rowNum}</td>
-                                        {activeTab === 'expenses' ? (
-                                            <>
-                                                <td>{row.date || '-'}</td>
-                                                <td>{isNaN(row.amount) ? '-' : row.amount}</td>
-                                                <td>{row.currency}</td>
-                                                <td>{row.description || '-'}</td>
-                                                <td>{row.categoryName || '-'}</td>
-                                                <td>{row.subcategory || '-'}</td>
-                                                <td>{row.paidBy || '-'}</td>
-                                                <td>{row.isCashPayment ? 'Cash' : row.accountId ? 'Bank' : '-'}</td>
-                                                <td>{row.bank || '-'}</td>
-                                            </>
-                                        ) : activeTab === 'income' ? (
-                                            <>
-                                                <td>{row.date || '-'}</td>
-                                                <td>{row.source || '-'}</td>
-                                                <td>{isNaN(row.amount) ? '-' : row.amount}</td>
-                                                <td>{row.currency}</td>
-                                                <td>{row.description || '-'}</td>
-                                                <td>{row.paidBy || '-'}</td>
-                                                <td>{row.bank || '-'}</td>
-                                            </>
-                                        ) : activeTab === 'assets' ? (
-                                            <>
-                                                <td>{row.name || '-'}</td>
-                                                <td>{isNaN(row.value) ? '-' : row.value}</td>
-                                                <td>{row.currency}</td>
-                                                <td>{row.categoryName || '-'}</td>
-                                                <td>{row.subcategory || '-'}</td>
-                                                <td>{row.originalAmount != null ? row.originalAmount : '-'}</td>
-                                                <td>{row.person || '-'}</td>
-                                                <td>{row.country || '-'}</td>
-                                                <td>{row.bank || '-'}</td>
-                                                <td>{row.fundBank || '-'}</td>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <td>{row.name || '-'}</td>
-                                                <td>{isNaN(row.value) ? '-' : row.value}</td>
-                                                <td>{row.currency}</td>
-                                                <td>{row.categoryName || '-'}</td>
-                                                <td>{row.subcategory || '-'}</td>
-                                                <td>{row.originalAmount != null ? row.originalAmount : '-'}</td>
-                                                <td>{row.person || '-'}</td>
-                                                <td>{row.country || '-'}</td>
-                                                <td>{row.bank || '-'}</td>
-                                            </>
-                                        )}
-                                        <td>{row.skip ? <span className="text-muted" style={{fontSize: '0.8rem'}}><i className="fas fa-info-circle me-1"></i>Tracked automatically</span> : row.error ? <span className="text-danger" style={{fontSize: '0.8rem'}}>{row.error}</span> : <i className="fas fa-check text-success"></i>}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                    {pageRows.map((row, idx) => {
+                        const look = rowLook(row);
+                        const kind = row.skip ? 'is-skip' : row.error ? 'is-bad' : 'is-ok';
+                        return (
+                            <div key={row.rowNum ?? idx} className={'sp-up-row ' + kind}>
+                                <i className={'sp-up-icon fas ' + (row.skip ? 'fa-circle-info' : row.error ? 'fa-circle-xmark' : 'fa-circle-check')}></i>
+                                <div className="sp-row-main">
+                                    <div className="sp-row-title" style={{overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{look.title}</div>
+                                    <div className="sp-row-sub">Row {row.rowNum}{look.meta ? ' · ' + look.meta : ''}</div>
+                                    {look.errs.length > 0 && look.status !== look.errs[0] && <div className="sp-up-errtext">{row.error}</div>}
+                                </div>
+                                <span className="sp-up-status">{look.status}</span>
+                            </div>
+                        );
+                    })}
+
                     {totalPages > 1 && (
-                        <div className="d-flex justify-content-between align-items-center mb-3" style={{fontSize: '0.85rem'}}>
-                            <button className="btn btn-sm btn-outline-secondary" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}>
-                                <i className="fas fa-chevron-left me-1"></i>Prev
-                            </button>
-                            <span className="text-muted">Page {currentPage} of {totalPages}</span>
-                            <button className="btn btn-sm btn-outline-secondary" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}>
-                                Next<i className="fas fa-chevron-right ms-1"></i>
-                            </button>
+                        <div className="sp-up-pager">
+                            <button type="button" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}><i className="fas fa-chevron-left"></i>Prev</button>
+                            <span>Page {currentPage} of {totalPages}</span>
+                            <button type="button" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}>Next<i className="fas fa-chevron-right"></i></button>
                         </div>
                     )}
-                </div>
-            )}
 
-            {parsedRows.length === 0 && !importResult && !fileError && (
-                <div className="text-muted text-center" style={{padding: '2rem', background: '#f8f9fa', borderRadius: '8px'}}>
-                    <i className="fas fa-file-csv fa-3x" style={{marginBottom: '0.75rem', display: 'block', opacity: 0.4}}></i>
-                    <p>Select a CSV file to preview and import {activeTab === 'expenses' ? 'expenses' : activeTab === 'income' ? 'income' : activeTab === 'assets' ? 'assets' : 'liabilities'}</p>
+                    <PinnedCta
+                        label={isImporting ? 'Importing…' : validCount > 0 ? 'Import valid rows (' + validCount + ')' : 'No valid rows to import'}
+                        icon={isImporting ? 'fas fa-spinner fa-spin' : 'fas fa-file-import'}
+                        onClick={handleImport}
+                        disabled={validCount === 0 || isImporting} />
                 </div>
             )}
         </div>
     );
 }
-
 // Goal card accents rotate emerald → indigo → amber (display only).
 const SP_GOAL_ACCENTS = [['#10b981', '#dcfce7', '#047857'], ['#6366f1', '#eef2ff', '#4f46e5'], ['#d97706', '#fef3c7', '#b45309']];
 
@@ -9791,7 +9746,8 @@ function DisplayNamePrompt({ onRegister }) {
 
 function ExportData({ expenses, income, categories, netWorthItems = [], assetCategories = [], liabilityCategories = [], defaultCurrency, activeView, onNavigate }) {
     const [format, setFormat] = useState('csv');
-    const [scope, setScope] = useState('all');
+    const [scope, setScope] = useState('all'); // all | expenses-only | income-only | assets-only | liabilities-only
+    const [range, setRange] = useState('all'); // all | month | custom
     const [fromDate, setFromDate] = useState('');
     const [toDate, setToDate] = useState('');
     const [toast, setToast] = useState('');
@@ -9802,8 +9758,8 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
     const todayStr = () => DateUtils.today();
 
     const getDateRange = () => {
-        if (fromDate || toDate) return { from: fromDate || null, to: toDate || null };
-        if (scope === 'current-month') {
+        if (range === 'custom') return { from: fromDate || null, to: toDate || null };
+        if (range === 'month') {
             const n = new Date(), y = n.getFullYear(), m = n.getMonth();
             return { from: DateUtils.toDateStr(new Date(y, m, 1)), to: DateUtils.toDateStr(new Date(y, m + 1, 0)) };
         }
@@ -9852,10 +9808,10 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
             return;
         }
         const { from, to } = getDateRange();
-        const doExp = scope === 'all' || scope === 'expenses-only' || scope === 'current-month';
-        const doInc = scope === 'all' || scope === 'income-only' || scope === 'current-month';
-        // Assets/Liabilities are current balances, not dated transactions — the date range
-        // (including the "Current Month" scope) never applies to them, only these two scopes do.
+        const doExp = scope === 'all' || scope === 'expenses-only';
+        const doInc = scope === 'all' || scope === 'income-only';
+        // Assets/Liabilities are current balances, not dated transactions — the range never
+        // applies to them.
         const doAssets = scope === 'all' || scope === 'assets-only';
         const doLiab = scope === 'all' || scope === 'liabilities-only';
         const filteredExp = doExp ? expenses.filter(e => inRange(e.date, from, to)) : [];
@@ -9873,9 +9829,9 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
             ...DataService.getBankLiabilityItems(activeView),
         ] : [];
         const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Payment Method','Bank','Tags','Notes'];
-        const incHeaders = ['Date','Source of Income','Currency','Amount',"Who's Income",'Bank'];
+        const incHeaders = ['Date','Source of Income','Currency','Amount','Description',"Who's Income",'Bank','Tags'];
         const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', e.isCashPayment ? 'Cash' : e.accountId ? 'Bank' : '', getBankName(e.accountId), (e.tags || []).join(';'), e.notes || '']);
-        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.paidBy || '', getBankName(i.accountId)]);
+        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.description || '', i.paidBy || '', getBankName(i.accountId), (i.tags || []).join(';')]);
         const assetRows = filteredAssets.map(nwRow);
         const liabRows = filteredLiab.map(nwRow);
         const exportJobs = [
@@ -9888,88 +9844,82 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
         exportJobs.forEach((job, idx) => setTimeout(() => exportToCSV(job.filename, job.headers, job.rows), idx * 200));
     };
 
+    const assetCount = netWorthItems.filter(i => i.type === 'asset').length + DataService.getBankAssetItems(activeView).length + DataService.getCashWithdrawItems(activeView).length;
+    const liabCount = netWorthItems.filter(i => i.type === 'liability').length + DataService.getBankLiabilityItems(activeView).length;
+    const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
     const scopeOptions = [
-        { value: 'all', label: 'All Data' },
-        { value: 'expenses-only', label: 'Expenses Only' },
-        { value: 'income-only', label: 'Income Only' },
-        { value: 'assets-only', label: 'Assets Only' },
-        { value: 'liabilities-only', label: 'Liabilities Only' },
-        { value: 'current-month', label: 'Current Month' }
+        { value: 'all', label: 'All data', sub: 'Everything below in one export', icon: 'fas fa-layer-group', bg: '#e2e8f0', fg: '#0f172a' },
+        { value: 'expenses-only', label: 'Expenses', sub: plural(expenses.length, 'entry', 'entries'), icon: 'fas fa-receipt', bg: 'var(--sp-rose-tint)', fg: 'var(--sp-rose)' },
+        { value: 'income-only', label: 'Income', sub: plural(income.length, 'entry', 'entries'), icon: 'fas fa-arrow-down', bg: 'var(--sp-green-tint)', fg: 'var(--sp-green-700)' },
+        { value: 'assets-only', label: 'Assets', sub: plural(assetCount, 'item', 'items') + ' · current values', icon: 'fas fa-chart-line', bg: '#dbeafe', fg: '#2563eb' },
+        { value: 'liabilities-only', label: 'Liabilities', sub: plural(liabCount, 'item', 'items') + ' · current balances', icon: 'fas fa-scale-balanced', bg: '#ffedd5', fg: '#ea580c' }
     ];
-    const gradientBtn = { background: 'linear-gradient(135deg,#4a6cf7,#6a3de8)', border: 'none' };
+    const rangeOptions = [['all', 'All time'], ['month', 'This month'], ['custom', 'Custom range']];
+    const rangeLabel = range === 'all' ? 'all time' : range === 'month' ? 'this month'
+        : (fromDate || toDate) ? (fromDate ? spShortDate(fromDate) : 'start') + ' – ' + (toDate ? spShortDate(toDate) : 'today') : 'custom range';
+    const scopeLabel = scopeOptions.find(o => o.value === scope).label;
+    const summaryText = format === 'pdf' ? 'Summary report · PDF' : scopeLabel + ' · ' + rangeLabel + ' · CSV';
 
     return (
-        <div className="p-3" style={{maxWidth: '480px', margin: '0 auto'}}>
-            <h5 className="fw-bold mb-3"><i className="fas fa-file-export me-2 text-primary"></i>Export Data</h5>
+        <div className="sp-page sp-expage">
+            <div className="sp-page-kicker">Your data, your file</div>
+            <h2 className="sp-page-title" style={{marginBottom: '4px'}}>Export</h2>
 
-            <div className="card shadow-sm mb-3">
-                <div className="card-body">
-                    <div className="mb-3">
-                        <label className="form-label fw-semibold">Format</label>
-                        <div className="d-flex gap-2">
-                            {[['csv','CSV'],['pdf','PDF (Summary)']].map(([v, l]) => (
-                                <button key={v} onClick={() => setFormat(v)} style={{flex: 1, borderRadius: '8px', fontWeight: '600', fontSize: '0.88rem', padding: '0.5rem', border: '2px solid ' + (format === v ? '#4a6cf7' : '#dee2e6'), background: format === v ? '#eef1ff' : '#fff', color: format === v ? '#4a6cf7' : '#555', cursor: 'pointer', transition: 'all 0.15s'}}>{l}</button>
-                            ))}
-                        </div>
-                    </div>
-
-                    {format === 'csv' && (
-                        <div className="mb-3">
-                            <label className="form-label fw-semibold">Scope</label>
-                            <div className="d-flex flex-wrap gap-2">
-                                {scopeOptions.map(o => (
-                                    <button key={o.value} onClick={() => setScope(o.value)} style={{borderRadius: '8px', fontWeight: '600', fontSize: '0.82rem', padding: '0.4rem 0.75rem', border: '2px solid ' + (scope === o.value ? '#4a6cf7' : '#dee2e6'), background: scope === o.value ? '#eef1ff' : '#fff', color: scope === o.value ? '#4a6cf7' : '#555', cursor: 'pointer', transition: 'all 0.15s'}}>{o.label}</button>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    {format === 'csv' && (
-                        <div className="mb-1">
-                            <label className="form-label fw-semibold">Date Range Override <span className="text-muted fw-normal small">(optional — overrides scope)</span></label>
-                            <div className="d-flex gap-2">
-                                <div className="flex-fill">
-                                    <label className="form-label small text-muted mb-1">From</label>
-                                    <input type="date" className="form-control form-control-sm" value={fromDate} onChange={e => setFromDate(e.target.value)} />
-                                </div>
-                                <div className="flex-fill">
-                                    <label className="form-label small text-muted mb-1">To</label>
-                                    <input type="date" className="form-control form-control-sm" value={toDate} onChange={e => setToDate(e.target.value)} />
-                                </div>
-                                {(fromDate || toDate) && <div className="d-flex align-items-end pb-1"><button className="btn btn-sm btn-outline-secondary" onClick={() => { setFromDate(''); setToDate(''); }} title="Clear dates">✕</button></div>}
-                            </div>
-                        </div>
-                    )}
-                </div>
+            <div className="sp-section-label">Format</div>
+            <div className="sp-ex-formats">
+                {[['csv', 'CSV', 'Spreadsheet', 'fas fa-file-csv', 'var(--sp-green-tint)', 'var(--sp-green-700)'], ['pdf', 'PDF', 'Summary report', 'fas fa-file-pdf', 'var(--sp-rose-tint)', 'var(--sp-rose)']].map(([v, l, sub, icon, bg, fg]) => (
+                    <button key={v} type="button" className={'sp-ex-format' + (format === v ? ' is-on' : '')} onClick={() => setFormat(v)}>
+                        <span className="sp-tile" style={{background: bg, color: fg, width: '44px', height: '44px', fontSize: '18px'}}><i className={icon}></i></span>
+                        <span className="sp-ex-format-title">{l}</span>
+                        <span className="sp-row-sub">{sub}</span>
+                    </button>
+                ))}
             </div>
 
-            {format === 'pdf' && (
-                <div className="alert alert-info small mb-3">
-                    <i className="fas fa-info-circle me-2"></i>This will navigate to the Financial Summary and open your browser's print/save-as-PDF dialog.
+            {format === 'pdf' ? (
+                <div className="sp-alert sp-alert-info" style={{marginTop: '12px'}}>
+                    <i className="fas fa-circle-info"></i><span>This opens the Summary screen and your browser's print / save-as-PDF dialog.</span>
                 </div>
+            ) : (
+                <>
+                    <div className="sp-section-label">What to export</div>
+                    <div className="sp-rowcard sp-ex-list">
+                        {scopeOptions.map(o => (
+                            <button key={o.value} type="button" className={'sp-ex-opt' + (scope === o.value ? ' is-on' : '')} onClick={() => setScope(o.value)}>
+                                <span className="sp-tile" style={{background: o.bg, color: o.fg}}><i className={o.icon}></i></span>
+                                <span className="sp-row-main"><span className="sp-row-title" style={{display: 'block'}}>{o.label}</span><span className="sp-row-sub">{o.sub}</span></span>
+                                <span className="sp-ex-check"><i className="fas fa-check"></i></span>
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="sp-section-label">Range</div>
+                    <div className="sp-rowcard sp-ex-list">
+                        {rangeOptions.map(([k, l]) => (
+                            <button key={k} type="button" className={'sp-ex-opt' + (range === k ? ' is-on' : '')} onClick={() => setRange(k)}>
+                                <span className="sp-row-main"><span className="sp-row-title">{l}</span></span>
+                                <span className="sp-ex-check"><i className="fas fa-check"></i></span>
+                            </button>
+                        ))}
+                        {range === 'custom' && (
+                            <div className="sp-ex-dates">
+                                <label><span>From</span><input type="date" value={fromDate} max={toDate || undefined} onChange={e => setFromDate(e.target.value)} /></label>
+                                <label><span>To</span><input type="date" value={toDate} min={fromDate || undefined} onChange={e => setToDate(e.target.value)} /></label>
+                            </div>
+                        )}
+                    </div>
+                    <div className="sp-ex-note">Amounts are exported in their original currency, with a Currency column in each file.{scope === 'all' && ' All data downloads up to four files: expenses, income, assets and liabilities.'} Assets and liabilities are current balances, so the range doesn't apply to them.</div>
+                </>
             )}
 
-            {format === 'csv' && (
-                <div className="alert alert-light small mb-3 text-muted border">
-                    <i className="fas fa-info-circle me-2"></i>Amounts are exported in their original stored currency. A Currency column is included in each file.
-                    {scope === 'all' && ' All Data exports up to four files: expenses, income, assets, and liabilities.'}
-                    {' '}Assets and Liabilities aren&rsquo;t affected by the date range — they&rsquo;re current balances, not dated transactions.
-                </div>
-            )}
+            <div className="sp-ex-summary"><i className={'fas ' + (format === 'pdf' ? 'fa-file-pdf' : 'fa-file-arrow-down')}></i>{summaryText}</div>
 
-            <button className="btn btn-primary w-100 fw-semibold py-2" onClick={handleExport} style={gradientBtn}>
-                <i className={'fas fa-' + (format === 'pdf' ? 'print' : 'download') + ' me-2'}></i>
-                {format === 'pdf' ? 'Print / Save as PDF' : 'Download CSV'}
-            </button>
+            {printing && <div className="sp-ex-note" style={{textAlign: 'center'}}><i className="fas fa-spinner fa-spin"></i> Opening print dialog…</div>}
 
-            {printing && (
-                <div className="text-center text-muted mt-3 small"><span className="spinner-border spinner-border-sm me-2"></span>Opening print dialog…</div>
-            )}
+            <PinnedCta label={format === 'pdf' ? 'Print / Save as PDF' : 'Export'} icon={format === 'pdf' ? 'fas fa-print' : 'fas fa-download'} onClick={handleExport} />
 
             {toast && (
-                <div style={{position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)', background: '#333', color: '#fff', padding: '0.65rem 1.25rem', borderRadius: '8px', zIndex: 9999, fontSize: '0.88rem', whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(0,0,0,0.3)'}}>
-                    <i className="fas fa-exclamation-circle me-2"></i>{toast}
-                </div>
+                <div className="sp-ex-toast"><div className="sp-toast sp-toast-warn"><span className="sp-toast-tile"><i className="fas fa-circle-exclamation"></i></span><div className="sp-toast-body"><div className="sp-toast-title">{toast}</div></div></div></div>
             )}
         </div>
     );
