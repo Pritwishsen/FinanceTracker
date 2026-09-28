@@ -2993,9 +2993,59 @@ function computeNextDue(fromDate, frequency) {
     return DateUtils.addToDateStr(fromStr, delta);
 }
 
-function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null, activeView }) {
+// Loads a category-split group (records sharing catGroup) back into ExpenseForm: one row per
+// category (a person-split row's shares are summed back up), the shared fields from the
+// payer's record, and the person split from the first split row's proportions.
+function spCatGroupForEdit(group, people) {
+    const buckets = [];
+    group.forEach(r => {
+        const k = r.splitGroupId || ('id:' + r.id);
+        let b = buckets.find(x => x.k === k);
+        if (!b) { b = { k, recs: [] }; buckets.push(b); }
+        b.recs.push(r);
+    });
+    const isOwn = (r) => !(r.paidBy || '').trim() || r.paidBy === 'own';
+    const payer = group.find(r => !r.isSplitRecord) || group.find(isOwn) || group[0];
+    const descs = [...new Set(group.map(r => r.description || ''))];
+    const rows = buckets.map((b, i) => {
+        const first = b.recs.find(r => r.id === payer.id) || b.recs[0];
+        return { key: 'r' + i + '_' + b.k, categoryId: String(first.categoryId), subcategory: first.subcategory || '', amount: String(Math.round(b.recs.reduce((t, r) => t + (Number(r.amount) || 0), 0) * 100) / 100) };
+    });
+    const total = Number(payer.catGroupTotal) || rows.reduce((t, r) => t + Number(r.amount), 0);
+    const form = {
+        amount: total, date: payer.date, categoryId: rows[0].categoryId, subcategory: rows[0].subcategory,
+        // A per-row fallback description ("Category · Subcategory") differs between rows; a real note doesn't.
+        description: buckets.length > 1 && descs.length === 1 ? descs[0] : '',
+        paidBy: isOwn(payer) ? '' : payer.paidBy, currency: payer.currency || 'GBP', tags: payer.tags || [],
+        accountId: payer.accountId || '', isCashPayment: !!payer.isCashPayment
+    };
+    let participants = null, splitMethod = 'equal', customAmounts = {};
+    const sb = buckets.find(b => b.recs.some(r => r.isSplitRecord) && b.recs.length > 1);
+    if (sb) {
+        const sum = sb.recs.reduce((t, r) => t + (Number(r.amount) || 0), 0) || 1;
+        participants = sb.recs.map(r => r.id === payer.id || (!sb.recs.some(x => x.id === payer.id) && isOwn(r))
+            ? { id: 'me', name: r.paidBy || 'Me' }
+            : { id: (people.find(p => p.name === r.paidBy) || {}).id || 'x_' + r.id, name: r.paidBy });
+        const shares = sb.recs.map(r => Number(r.amount) || 0);
+        if (shares.every(v => Math.abs(v - shares[0]) <= 0.011)) splitMethod = 'equal';
+        else {
+            splitMethod = 'custom';
+            let given = 0;
+            participants.forEach((p, i) => {
+                const v = i === participants.length - 1 ? Math.round((total - given) * 100) / 100 : Math.round(total * shares[i] / sum * 100) / 100;
+                given += v; customAmounts[p.id] = String(v);
+            });
+        }
+    }
+    return { form, rows, participants, splitMethod, customAmounts };
+}
+
+function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSplitGroup = null, editCatGroup = null, activeView }) {
     const [people, setPeople] = useState([]);
+    // Editing a category split (Handoff v3): every record of the group, one row per category.
+    const catEdit = useMemo(() => (editCatGroup && editCatGroup.length ? spCatGroupForEdit(editCatGroup, DataService.getPeople()) : null), []);
     const [formData, setFormData] = useState(() => {
+        if (catEdit) return catEdit.form;
         if (editSplitGroup && editSplitGroup.length > 0) {
             const first = editSplitGroup[0];
             const total = editSplitGroup.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
@@ -3020,6 +3070,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         };
     });
     const [tagInputRaw, setTagInputRaw] = useState(() => {
+        if (catEdit) return (catEdit.form.tags || []).join(', ');
         if (editSplitGroup && editSplitGroup.length > 0) return (editSplitGroup[0].tags || []).join(', ');
         return editExpense ? (editExpense.tags || []).join(', ') : '';
     });
@@ -3030,10 +3081,14 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     const [isRecurring, setIsRecurring] = useState(false);
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
-    const [isSplit, setIsSplit] = useState(!!(editSplitGroup && editSplitGroup.length > 0));
-    const [splitParticipants, setSplitParticipants] = useState(() => (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: r.paidBy || 'Me' })) : []));
-    const [splitMethod, setSplitMethod] = useState(() => (editSplitGroup && editSplitGroup.length > 0 ? 'custom' : 'equal'));
+    const [isSplit, setIsSplit] = useState(!!(editSplitGroup && editSplitGroup.length > 0) || !!(catEdit && catEdit.participants));
+    const [splitParticipants, setSplitParticipants] = useState(() => (catEdit && catEdit.participants) || (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: r.paidBy || 'Me' })) : []));
+    const [splitMethod, setSplitMethod] = useState(() => (catEdit && catEdit.participants ? catEdit.splitMethod : editSplitGroup && editSplitGroup.length > 0 ? 'custom' : 'equal'));
+    // Split across categories: one expense per row, sharing date/note/payment (Handoff v3).
+    const [catSplitOn, setCatSplitOn] = useState(!!catEdit);
+    const [catRows, setCatRows] = useState(() => (catEdit ? catEdit.rows : []));
     const [customAmounts, setCustomAmounts] = useState(() => {
+        if (catEdit && catEdit.participants) return catEdit.customAmounts;
         if (!editSplitGroup) return {};
         const obj = {};
         editSplitGroup.forEach(r => { obj[r.id] = r.amount; });
@@ -3041,8 +3096,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     });
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
-    useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
-    useEffect(() => { if (!editExpense && !editSplitGroup) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
+    useEffect(() => { if (!editExpense && !editSplitGroup && !catEdit) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
+    useEffect(() => { if (!editExpense && !editSplitGroup && !catEdit) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
     // Re-defaults the Account field to the newly-selected person's primary account (only when
     // its currency matches formData.currency) whenever "Who's Expense" or the currency changes.
     // Skipped entirely when editing an existing record so it never clobbers editExpense's/
@@ -3052,7 +3107,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     // mount, which previously could leave a stale, currency-mismatched account selected.
     // The user can still override the auto-filled account via the Account dropdown afterward.
     useEffect(() => {
-        if (editExpense || editSplitGroup) return;
+        if (editExpense || editSplitGroup || catEdit) return;
         const nextId = resolveDefaultAccountId(formData.paidBy, formData.currency);
         setFormData(prev => (prev.accountId === nextId ? prev : { ...prev, accountId: nextId }));
     }, [formData.paidBy, formData.currency]);
@@ -3128,9 +3183,85 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         setSplitParticipants([]);
         setSplitMethod('equal');
         setCustomAmounts({});
+        setCatSplitOn(false);
+        setCatRows([]);
         setIsRecurring(false);
         setRecurringFreq('monthly');
         setRecurringEndDate('');
+    };
+
+    const catTotal = parseFloat(formData.amount) || 0;
+    const catSum = catRows.reduce((t, r) => t + (parseFloat(r.amount) || 0), 0);
+    const catDiff = Math.round((catTotal - catSum) * 100) / 100; // > 0: left to allocate, < 0: over
+    const catBalanced = catTotal > 0 && Math.abs(catDiff) < 0.005;
+    const catRowsError = () => {
+        if (catRows.some(r => !r.categoryId)) return 'Pick a category on every row';
+        if (catRows.some(r => { const c = categories.find(x => x.id === parseInt(r.categoryId)); return c && c.subcategories.length > 0 && !r.subcategory; })) return 'Pick a subcategory on every row';
+        if (catRows.some(r => !(parseFloat(r.amount) > 0))) return 'Enter an amount on every row';
+        if (!catBalanced) return 'Category amounts must add up to the total';
+        return '';
+    };
+    const newCatRow = (p = {}) => ({ key: 'r' + Date.now() + Math.random().toString(36).slice(2, 6), categoryId: '', subcategory: '', amount: '', ...p });
+    const updCatRow = (key, patch) => setCatRows(rows => rows.map(r => r.key === key ? { ...r, ...patch } : r));
+    // On: row 1 takes the current category, subcategory and full amount; row 2 starts empty.
+    // Off: the form keeps row 1's category and subcategory.
+    const toggleCatSplit = () => {
+        if (!catSplitOn) {
+            setCatRows([newCatRow({ categoryId: formData.categoryId ? String(formData.categoryId) : '', subcategory: formData.subcategory || '', amount: formData.amount ? String(formData.amount) : '' }), newCatRow()]);
+            setCatSplitOn(true);
+        } else {
+            const r0 = catRows[0];
+            if (r0) setFormData(prev => ({ ...prev, categoryId: r0.categoryId, subcategory: r0.subcategory }));
+            setCatSplitOn(false);
+        }
+        if (errors.general || errors.categoryId || errors.subcategory) setErrors({});
+    };
+    // Fill: the remaining amount goes into the first empty row, or onto the last row.
+    const fillCatRow = () => {
+        if (!(catDiff > 0)) return;
+        setCatRows(rows => {
+            const i = rows.findIndex(r => !(parseFloat(r.amount) > 0));
+            const at = i >= 0 ? i : rows.length - 1;
+            return rows.map((r, j) => j === at ? { ...r, amount: String(Math.round(((parseFloat(r.amount) || 0) + catDiff) * 100) / 100) } : r);
+        });
+    };
+
+    // Saves one expense per category row. Every record shares date, note, tags, payment,
+    // owner and repeat settings, plus catGroup / catGroupTotal / catGroupCount. With a person
+    // split on, each row is split in the same proportions as the overall split and gets its
+    // own splitGroupId. Editing (a group, or a single expense being split) replaces the old
+    // records. Cash needs nothing extra: the Cash balance is computed from cash expenses, so
+    // the rows take catGroupTotal off it once in total.
+    const saveCatGroup = async () => {
+        const total = Math.round(parseFloat(formData.amount) * 100) / 100;
+        const old = editCatGroup || (editExpense ? [editExpense] : []);
+        const catGroup = (editCatGroup && editCatGroup[0].catGroup) || 'cat_' + Date.now();
+        const note = formData.description.trim();
+        const payAccountId = formData.isCashPayment ? '' : formData.accountId;
+        const sharers = isSplit && splitParticipants.length >= 2 ? splitParticipants : null;
+        const frac = (p) => splitMethod === 'equal' ? 1 / sharers.length : (parseFloat(customAmounts[p.id]) || 0) / total;
+        // A row keeps the schedule link of the old row with the same category, unless Repeat is on.
+        const oldRecurring = (cid, sub) => { const o = old.find(r => r.recurringId && r.categoryId === cid && (r.subcategory || '') === (sub || '')); return o ? o.recurringId : undefined; };
+        for (const r of old) await DataService.deleteExpense(r.id);
+        for (let ri = 0; ri < catRows.length; ri++) {
+            const row = catRows[ri];
+            const cid = parseInt(row.categoryId);
+            const cat = categories.find(c => c.id === cid);
+            const amt = Math.round(parseFloat(row.amount) * 100) / 100;
+            const template = { ...formData, description: note || [cat ? cat.name : '', row.subcategory].filter(Boolean).join(' · '), amount: amt, categoryId: cid, subcategory: row.subcategory, accountId: payAccountId };
+            delete template.catGroup; delete template.catGroupTotal; delete template.catGroupCount; delete template.recurringId;
+            const recurringId = isRecurring ? DataService.addRecurring({ templateExpense: template, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }).id : oldRecurring(cid, row.subcategory);
+            const rec = { ...template, catGroup, catGroupTotal: total, catGroupCount: catRows.length, ...(recurringId ? { recurringId } : {}) };
+            if (!sharers) { await DataService.addExpenseWithConversion(rec); continue; }
+            const splitGroupId = 'split_' + Date.now() + '_' + ri;
+            let given = 0;
+            for (let i = 0; i < sharers.length; i++) {
+                const p = sharers[i];
+                const share = i === sharers.length - 1 ? Math.round((amt - given) * 100) / 100 : Math.round(amt * frac(p) * 100) / 100;
+                given += share;
+                await DataService.addExpenseWithConversion({ ...rec, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), isCashPayment: resolveSplitParticipantIsCash(p), splitGroupId, isSplitRecord: true });
+            }
+        }
     };
 
     const handleSubmit = (e) => {
@@ -3140,6 +3271,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         if (tags.length > 10) { setErrors({ tags: 'Maximum 10 tags allowed per expense' }); setIsSubmitting(false); return; }
         if (tags.some(t => t.length > 30)) { setErrors({ tags: 'Tags must be 30 characters or fewer' }); setIsSubmitting(false); return; }
         const validation = ValidationUtils.validateExpense({ ...formData, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId) });
+        // With the category split on, category and subcategory are checked per row instead.
+        if (catSplitOn) { delete validation.errors.categoryId; delete validation.errors.subcategory; validation.isValid = Object.keys(validation.errors).length === 0; }
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
         if (isSplit || editSplitGroup) {
             if (splitParticipants.length < 2) { setErrors({ general: 'A split needs at least 2 participants.' }); setIsSubmitting(false); return; }
@@ -3149,6 +3282,17 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 if (Math.abs(total - target) > 0.01) { setErrors({ general: `Custom amounts must sum to ${ValidationUtils.formatCurrency(target, formData.currency)}. Current total: ${ValidationUtils.formatCurrency(total, formData.currency)}.` }); setIsSubmitting(false); return; }
                 if (splitParticipants.some(p => !(parseFloat(customAmounts[p.id]) > 0))) { setErrors({ general: 'Each participant must have an amount greater than 0.' }); setIsSubmitting(false); return; }
             }
+        }
+        if (catSplitOn) {
+            const rowErr = catRowsError();
+            if (rowErr) { setErrors({ general: rowErr }); setIsSubmitting(false); return; }
+            saveCatGroup().then(() => {
+                setShowSuccess(true);
+                setIsSubmitting(false);
+                if (editExpense || editCatGroup) setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
+                else setTimeout(() => { onSave(); setShowSuccess(false); resetFormForNewEntry(); }, 1000);
+            }).catch(() => { setErrors({ general: 'Failed to save expense. Please try again.' }); setIsSubmitting(false); });
+            return;
         }
         try {
             let description = formData.description.trim();
@@ -3242,7 +3386,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     if (showSuccess) {
         return (
             <div className="sp-page">
-                <div className="sp-saved"><i className="fas fa-circle-check"></i><div className="sp-sheet-title">{editSplitGroup ? 'Split updated' : editExpense ? 'Expense updated' : 'Expense added'}</div></div>
+                <div className="sp-saved"><i className="fas fa-circle-check"></i><div className="sp-sheet-title">{editSplitGroup ? 'Split updated' : editExpense || editCatGroup ? 'Expense updated' : catSplitOn ? 'Expenses added' : 'Expense added'}</div></div>
             </div>
         );
     }
@@ -3265,15 +3409,17 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     const upcoming = [1, 2, 3].reduce((acc) => { acc.push(computeNextDue(acc[acc.length - 1], recurringFreq)); return acc; }, [firstRepeat]).slice(1);
     const firstError = errors.general || errors.amount || errors.date || errors.categoryId || errors.subcategory || errors.paidBy || errors.tags || tagError;
     const sortedCategories = [...categories].sort((a, b) => a.name.localeCompare(b.name));
-    const ctaLabel = isSubmitting ? (editExpense || editSplitGroup ? 'Updating…' : 'Saving…')
+    const catUnbalanced = catSplitOn && catTotal > 0 && !catBalanced;
+    const ctaLabel = isSubmitting ? (editExpense || editSplitGroup || editCatGroup ? 'Updating…' : 'Saving…')
+        : catUnbalanced ? (catDiff > 0 ? 'Allocate ' + fmtAmt(catDiff) + ' more' : 'Over by ' + fmtAmt(-catDiff))
         : splitUnbalanced ? 'Balance the split to save'
-        : editSplitGroup ? 'Update all split records' : editExpense ? 'Save changes' : 'Save expense';
+        : editSplitGroup ? 'Update all split records' : editExpense || editCatGroup ? 'Save changes' : 'Save expense';
 
     return (
         <form onSubmit={handleSubmit} className="sp-page" noValidate>
             <div className="sp-formhead">
                 <button type="button" className="sp-backbtn" onClick={onCancel} title="Back"><i className="fas fa-arrow-left"></i></button>
-                <h2>{editSplitGroup ? 'Edit split expense' : editExpense ? 'Edit expense' : 'Add expense'}</h2>
+                <h2>{editSplitGroup ? 'Edit split expense' : editExpense || editCatGroup ? 'Edit expense' : 'Add expense'}</h2>
                 <div style={{width: '36px'}}></div>
             </div>
             {firstError && <div className="sp-alert sp-alert-err"><i className="fas fa-triangle-exclamation"></i><span>{firstError}</span></div>}
@@ -3287,7 +3433,54 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 <SpCurrencyChips value={formData.currency} onChange={code => handleInputChange('currency', code)} recent={recentCurrencies} light={false} />
             </div>
 
-            <div className="sp-formlabel">Category</div>
+            <div className="sp-catsplit-head">
+                <span className="sp-formlabel" style={{margin: 0}}>{catSplitOn ? 'Categories · ' + catRows.length : 'Category'}</span>
+                {!editSplitGroup && (
+                    <button type="button" className="sp-catsplit-toggle" onClick={toggleCatSplit} aria-pressed={catSplitOn}>
+                        Split across categories<span className={'sp-miniswitch' + (catSplitOn ? ' is-on' : '')}><span></span></span>
+                    </button>
+                )}
+            </div>
+            {catSplitOn ? (
+                <div className="sp-catsplit">
+                    {catRows.map(r => {
+                        const c = categories.find(x => x.id === parseInt(r.categoryId));
+                        const look = c ? spCategoryLook(c, categories.indexOf(c)) : { icon: 'fas fa-tag', tint: '#f1f5f9', ink: '#94a3b8' };
+                        return (
+                            <div key={r.key} className="sp-catsplit-row">
+                                <span className="sp-tile" style={{width: '34px', height: '34px', borderRadius: '10px', background: look.tint, color: look.ink}}><i className={look.icon}></i></span>
+                                <div className="sp-catsplit-sel">
+                                    <select value={r.categoryId} aria-label="Category" onChange={e => { const nc = categories.find(x => x.id === parseInt(e.target.value)); updCatRow(r.key, { categoryId: e.target.value, subcategory: nc && nc.subcategories.length ? [...nc.subcategories].sort((a, b) => a.localeCompare(b))[0] : '' }); }}>
+                                        <option value="">Category</option>
+                                        {sortedCategories.map(o => <option key={o.id} value={String(o.id)}>{o.name}</option>)}
+                                    </select>
+                                    {c && c.subcategories.length > 0 && (
+                                        <select className="is-sub" value={r.subcategory} aria-label="Subcategory" onChange={e => updCatRow(r.key, { subcategory: e.target.value })}>
+                                            <option value="">Subcategory</option>
+                                            {[...c.subcategories].sort((a, b) => a.localeCompare(b)).map(sub => <option key={sub} value={sub}>{sub}</option>)}
+                                        </select>
+                                    )}
+                                </div>
+                                <div className="sp-catsplit-amt">
+                                    <span>{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
+                                    <input type="number" step="0.01" min="0" inputMode="decimal" placeholder="0.00" aria-label="Amount" value={r.amount} onChange={e => updCatRow(r.key, { amount: e.target.value })} />
+                                </div>
+                                {catRows.length > 2 && <button type="button" className="sp-catsplit-x" title="Remove" onClick={() => setCatRows(rows => rows.filter(x => x.key !== r.key))}><i className="fas fa-xmark"></i></button>}
+                            </div>
+                        );
+                    })}
+                    <div className="sp-catsplit-foot">
+                        <button type="button" className="sp-catsplit-add" onClick={() => setCatRows(rows => [...rows, newCatRow()])}><i className="fas fa-plus" style={{fontSize: '11px'}}></i>Add category</button>
+                        <span style={{display: 'inline-flex', alignItems: 'center', gap: '8px'}}>
+                            <span className={'sp-catsplit-rem' + (!(catTotal > 0) ? '' : catBalanced ? ' is-ok' : catDiff < 0 ? ' is-over' : '')}>
+                                {!(catTotal > 0) ? 'Enter total first' : catBalanced ? 'All allocated' : catDiff > 0 ? fmtAmt(catDiff) + ' left' : fmtAmt(-catDiff) + ' over'}
+                            </span>
+                            {catTotal > 0 && catDiff > 0 && !catBalanced && <button type="button" className="sp-catsplit-fill" onClick={fillCatRow}>Fill</button>}
+                        </span>
+                    </div>
+                    <div className="sp-catsplit-hint">Saves one expense per category with the same date, note and payment.</div>
+                </div>
+            ) : (
             <div className="sp-catchips">
                 {sortedCategories.map(c => {
                     const look = spCategoryLook(c, categories.indexOf(c));
@@ -3299,13 +3492,14 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     );
                 })}
             </div>
+            )}
 
             <div className="sp-formcard">
                 <div className={'sp-formrow' + (errors.date ? ' is-bad' : '')}>
                     <span>Date{formData.date !== DateUtils.today() && <button type="button" className="sp-link" style={{marginLeft: '8px', fontSize: '11px'}} onClick={() => handleInputChange('date', DateUtils.today())}>Today</button>}</span>
                     <input type="date" value={formData.date} max={DateUtils.today()} onChange={(e) => handleInputChange('date', e.target.value)} />
                 </div>
-                {selectedCategory && selectedCategory.subcategories.length > 0 && (
+                {!catSplitOn && selectedCategory && selectedCategory.subcategories.length > 0 && (
                     <div className={'sp-formrow' + (errors.subcategory ? ' is-bad' : '')}>
                         <span>Subcategory</span>
                         <select value={formData.subcategory} onChange={(e) => handleInputChange('subcategory', e.target.value)}>
@@ -3503,11 +3697,14 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             )}
 
             <div style={{height: '84px'}}></div>
-            <PinnedCta type="submit" label={ctaLabel} icon={isSubmitting ? 'fas fa-spinner fa-spin' : 'fas fa-check'} disabled={isSubmitting || splitUnbalanced} />
+            <PinnedCta type="submit" label={ctaLabel} icon={isSubmitting ? 'fas fa-spinner fa-spin' : 'fas fa-check'} disabled={isSubmitting || splitUnbalanced || catUnbalanced} />
 
         </form>
     );
 }
+
+// How an expense was paid, for the Expenses payment filter and row tag.
+function spPayKind(e) { return e.isCashPayment ? 'cash' : e.accountId ? 'card' : 'unlinked'; }
 
 function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', initialDateTo = '', initialPaidBy = '', activeView, defaultCurrency }) {
     // Restore last session's filters (see FilterMemory). A date range or person
@@ -3525,6 +3722,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [stopRepeat, setStopRepeat] = useState(false);
     const [editingExpense, setEditingExpense] = useState(null);
     const [editingSplitGroupId, setEditingSplitGroupId] = useState(null);
+    const [editingCatGroup, setEditingCatGroup] = useState(null);
     const [showEditConfirm, setShowEditConfirm] = useState(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
     const [searchTerm, setSearchTerm] = useState(_f0.search || '');
@@ -3534,6 +3732,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [duplicateDateError, setDuplicateDateError] = useState('');
     const [filterTags, setFilterTags] = useState(Array.isArray(_f0.tags) ? _f0.tags : []);
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    // Payment filter: '' | 'card' | 'cash' | 'unlinked' (unlinked = no bank and not cash).
+    const [fPay, setFPay] = useState(_f0.pay || '');
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
@@ -3544,8 +3744,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
 
     // Persist filters for the session so leaving and returning to this screen keeps them.
     useEffect(() => {
-        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, search: searchTerm, tags: filterTags, syncConflict: filterSyncConflict });
-    }, [filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, datePreset, searchTerm, filterTags, filterSyncConflict]);
+        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, search: searchTerm, tags: filterTags, syncConflict: filterSyncConflict, pay: fPay });
+    }, [filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, datePreset, searchTerm, filterTags, filterSyncConflict, fPay]);
 
     useEffect(() => {
         if (!openMenuId) return;
@@ -3579,8 +3779,9 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         if (filterSyncConflict) filtered = filtered.filter(expense => !!syncConflicts[String(expense.id)]);
         if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(e => (e.description || '').toLowerCase().includes(st) || (e.tags || []).some(tag => tag.includes(st))); }
         if (filterTags.length > 0) filtered = filtered.filter(e => filterTags.every(ft => (e.tags || []).includes(ft)));
+        if (fPay) filtered = filtered.filter(e => spPayKind(e) === fPay);
         return filtered;
-    }, [expenses, filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, filterTags]);
+    }, [expenses, filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, filterTags, fPay]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredExpenses]);
 
@@ -3645,6 +3846,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     if (editingExpense) {
         return (<ExpenseForm categories={categories} editExpense={editingExpense} onSave={() => { setEditingExpense(null); onUpdate(); }} onCancel={() => setEditingExpense(null)} activeView={activeView} />);
     }
+    if (editingCatGroup) {
+        // All of the group's records, including other people's split shares outside this view.
+        const groupRecords = (DataService.data.expenses || []).filter(e => e.catGroup === editingCatGroup);
+        return (<ExpenseForm categories={categories} editCatGroup={groupRecords} onSave={() => { setEditingCatGroup(null); onUpdate(); }} onCancel={() => setEditingCatGroup(null)} activeView={activeView} />);
+    }
     if (editingSplitGroupId) {
         const groupRecords = expenses.filter(e => e.splitGroupId === editingSplitGroupId);
         return (<ExpenseForm categories={categories} editSplitGroup={groupRecords} onSave={() => { setEditingSplitGroupId(null); onUpdate(); }} onCancel={() => setEditingSplitGroupId(null)} activeView={activeView} />);
@@ -3671,8 +3877,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     };
     const applyPreset = (key) => { const [f, t] = presetRange(key); setDatePreset(key); setFilterDateFrom(f); setFilterDateTo(t); };
     const PRESET_LABELS = { all: 'All time', month: 'This month', last: 'Last month', '30d': 'Last 30 days', custom: 'Custom' };
-    const clearAll = () => { setFilterCategory(''); setFilterSubcategory(''); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterTags([]); setFilterSyncConflict(false); };
+    const clearAll = () => { setFilterCategory(''); setFilterSubcategory(''); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterTags([]); setFilterSyncConflict(false); setFPay(''); };
+    const PAY_LABELS = { card: 'Card', cash: 'Cash', unlinked: 'Unlinked' };
+    const unlinkedCount = expenses.filter(e => spPayKind(e) === 'unlinked').length;
     const activeChips = [];
+    if (fPay) activeChips.push({ key: 'pay', label: PAY_LABELS[fPay], onRemove: () => setFPay('') });
     if (filterCategory && selectedCategory) activeChips.push({ key: 'cat', label: selectedCategory.name, onRemove: () => handleCategoryFilter('') });
     if (filterSubcategory) activeChips.push({ key: 'sub', label: filterSubcategory, onRemove: () => setFilterSubcategory('') });
     filterPersons.forEach(p => activeChips.push({ key: 'p:' + p, label: personName(p), onRemove: () => setFilterPersons(prev => prev.filter(x => x !== p)) }));
@@ -3760,7 +3969,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                             <div className="sp-item-meta">
                                                 {expense.isCashPayment
                                                     ? <span className="sp-paybadge is-cash"><i className="fas fa-money-bill-wave" style={{fontSize: '9px'}}></i>Cash</span>
-                                                    : bankName && <span className="sp-paybadge is-card"><i className="fas fa-credit-card" style={{fontSize: '9px'}}></i>{bankName}</span>}
+                                                    : bankName ? <span className="sp-paybadge is-card"><i className="fas fa-credit-card" style={{fontSize: '9px'}}></i>{bankName}</span>
+                                                    : <span className="sp-paybadge is-unlinked"><i className="fas fa-link-slash" style={{fontSize: '9px'}}></i>Unlinked</span>}
                                                 <span className="sp-item-sub">{[cat ? cat.name : 'Unknown Category', expense.subcategory].filter(Boolean).join(' · ')}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
                                             </div>
                                         </div>
@@ -3779,7 +3989,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                     )}
                                     {isOpen && (
                                         <div className="sp-rowactions">
-                                            <button type="button" className="sp-rowaction" onClick={() => { if (expense.isSplitRecord && expense.splitGroupId) setShowEditConfirm(expense.id); else setEditingExpense(expense); }}><i className="fas fa-pen" style={{fontSize: '10px'}}></i>Edit</button>
+                                            <button type="button" className="sp-rowaction" onClick={() => { if (expense.catGroup) setEditingCatGroup(expense.catGroup); else if (expense.isSplitRecord && expense.splitGroupId) setShowEditConfirm(expense.id); else setEditingExpense(expense); }}><i className="fas fa-pen" style={{fontSize: '10px'}}></i>Edit</button>
                                             <button type="button" className="sp-rowaction is-indigo" onClick={() => handleDuplicateExpense(expense)}><i className="fas fa-copy" style={{fontSize: '10px'}}></i>Duplicate</button>
                                             <button type="button" className="sp-rowaction is-danger" onClick={() => { setStopRepeat(false); setShowDeleteConfirm(expense.id); }}><i className="fas fa-trash" style={{fontSize: '10px'}}></i>Delete</button>
                                         </div>
@@ -3815,6 +4025,14 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             </div>
                         </React.Fragment>
                     )}
+                    <div className="sp-labelrow"><span>Payment</span><span>Unlinked = no bank or cash</span></div>
+                    <div className="sp-chipgrid">
+                        {[['', 'All'], ['card', 'Card'], ['cash', 'Cash'], ['unlinked', 'Unlinked']].map(([k, label]) => (
+                            <button key={k || 'all'} type="button" className={'sp-sheetchip' + (fPay === k ? ' is-active' : '')} onClick={() => setFPay(k)}>
+                                {label}{k === 'unlinked' && unlinkedCount > 0 && <span className="sp-sheetchip-count">{unlinkedCount}</span>}
+                            </button>
+                        ))}
+                    </div>
                     <div className="sp-labelrow"><span>Category</span></div>
                     <div className="sp-chipgrid">
                         <button type="button" className={'sp-sheetchip' + (!filterCategory ? ' is-active' : '')} onClick={() => handleCategoryFilter('')}>All</button>
@@ -4937,6 +5155,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     const [rangeTo, setRangeTo] = useState(_init.to);
     const [sumCats, setSumCats] = useState(() => Array.isArray(_f0.cats) ? _f0.cats : _f0.category ? [parseInt(_f0.category)] : []);
     const [chartSeriesFilter, setChartSeriesFilter] = useState(_f0.chartSeries || 'both'); // 'both' | 'income' | 'expense'
+    const [invOpen, setInvOpen] = useState(false);
     const [showRangeSheet, setShowRangeSheet] = useState(false);
     const [showCatSheet, setShowCatSheet] = useState(false);
     const [openBuckets, setOpenBuckets] = useState({});
@@ -5094,6 +5313,22 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     const totalExpenses = pExp.reduce((s, e) => s + e.amount, 0);
     const totalIncome = pInc.reduce((s, i) => s + i.amount, 0);
     const net = totalIncome - totalExpenses;
+    // Invested: new assets and top-ups in the period (not Bank & Savings or Cash). Scheduled
+    // contributions only count once they've been logged as top-ups.
+    const assetCats = DataService.getNetWorthCategories('asset');
+    const invested = spInvestedEntries(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, activeView) && spGrowthScope(i, assetCats)), inPeriod);
+    const investedTotal = invested.reduce((s, x) => s + CurrencyService.convertToDefaultSync(x.amount, x.currency, defaultCurrency), 0);
+    const investedForeign = invested.some(x => x.currency !== defaultCurrency);
+    // Expanded list: one line per asset category, largest first, in the main currency.
+    const investedByCat = Object.values(invested.reduce((acc, x) => {
+        const cat = assetCats.find(c => c.id === x.categoryId);
+        const k = cat ? String(cat.id) : 'other';
+        const g = acc[k] || (acc[k] = { key: k, name: cat ? cat.name : 'Other', count: 0, total: 0, foreign: false });
+        g.count += 1;
+        g.total += CurrencyService.convertToDefaultSync(x.amount, x.currency, defaultCurrency);
+        if (x.currency !== defaultCurrency) g.foreign = true;
+        return acc;
+    }, {})).sort((a, b) => b.total - a.total);
 
     // "vs" pill: This month → same days of last month; Last month → the month before;
     // Year → last year to the same date; Custom → the same number of months just before.
@@ -5269,6 +5504,23 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     <span className="sp-hero-pill">{fmt0(totalExpenses / periodDays)}/day avg</span>
                     <span className="sp-hero-pill">{periodBudget > 0 ? fmt0(totalExpenses) + ' of ' + fmt0(periodBudget) + ' budget' : 'No budget set'}</span>
                 </div>
+                {invested.length > 0 && (
+                    <div className="sp-suminv">
+                        <button type="button" className="sp-suminv-head" onClick={() => setInvOpen(o => !o)} aria-expanded={invOpen}>
+                            <span className="sp-suminv-icon"><i className="fas fa-seedling"></i></span>
+                            <span className="sp-suminv-line" style={{flex: 1}}><span className="sp-suminv-title">Invested</span><span className="sp-suminv-sub">{invested.length} entr{invested.length === 1 ? 'y' : 'ies'}</span></span>
+                            <span className="sp-suminv-total">{(investedForeign ? '≈ ' : '') + fmt0(investedTotal)}</span>
+                            <i className={'fas fa-chevron-' + (invOpen ? 'up' : 'down')} style={{color: 'var(--sp-slate-500)', fontSize: '10px'}}></i>
+                        </button>
+                        {invOpen && (
+                            <div className="sp-suminv-rows">
+                                {investedByCat.map(g => (
+                                    <div key={g.key}><span className="sp-suminv-line"><span className="sp-suminv-name">{g.name}</span><span className="sp-suminv-meta">{g.count} entr{g.count === 1 ? 'y' : 'ies'}</span></span><b>{(g.foreign ? '≈ ' : '') + fmt0(g.total)}</b></div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             {attentionItems.length > 0 && (
@@ -9614,6 +9866,178 @@ function NetWorthCashSheet({ mode, target, activeView, defaultCurrency, onClose,
     );
 }
 
+// ── Asset history (Handoff v3): Asset Growth, the value line and Summary's Invested row. ──
+// Bank & Savings and Cash are left out: their balances come from transactions, not valuations.
+function spGrowthScope(item, assetCategories) {
+    if (item.type !== 'asset') return false;
+    const cat = assetCategories.find(c => c.id === item.categoryId);
+    return !(cat && (cat.name === 'Bank & Savings' || cat.name === 'Cash'));
+}
+// Starts from the current value and undoes, newest first, every history entry whose date
+// passes `undo`: a valuation goes back to its `from`, a top-up is taken off.
+function spUndoHistory(item, undo) {
+    let v = Number(item.value) || 0;
+    (item.history || []).map((h, i) => ({ h, i }))
+        .sort((a, b) => a.h.date < b.h.date ? 1 : a.h.date > b.h.date ? -1 : b.i - a.i)
+        .forEach(({ h }) => {
+            if (!h.date || !undo(h.date)) return;
+            if (h.type === 'value' || h.type === 'balance') { if (h.from != null) v = Number(h.from) || 0; }
+            else if (h.type === 'topup') v -= Number(h.amount) || 0;
+        });
+    return v;
+}
+// Value at the end of `date`. 0 before the asset was opened; an asset with no openDate
+// (added before that field existed) counts as held throughout.
+function spAssetValueAt(item, date) {
+    if (item.openDate && item.openDate > date) return 0;
+    return spUndoHistory(item, d => d > date);
+}
+// Value when opened, before any top-up or valuation dated that day or later.
+function spAssetOpening(item) {
+    return item.openDate ? spUndoHistory(item, d => d >= item.openDate) : null;
+}
+// Last 6 quarters or last 5 calendar years; the current one runs to today.
+function spGrowthPeriods(mode, today) {
+    const y = +today.slice(0, 4), out = [];
+    if (mode === 'year') {
+        for (let k = 4; k >= 0; k--) { const yy = y - k; out.push({ key: 'y' + yy, label: String(yy), long: k === 0 ? yy + ' so far' : String(yy), from: yy + '-01-01', to: k === 0 ? today : yy + '-12-31' }); }
+        return out;
+    }
+    const q0 = Math.floor((+today.slice(5, 7) - 1) / 3);
+    for (let k = 5; k >= 0; k--) {
+        let q = q0 - k, yy = y; while (q < 0) { q += 4; yy--; }
+        const from = yy + '-' + String(q * 3 + 1).padStart(2, '0') + '-01';
+        const to = k === 0 ? today : DateUtils.addToDateStr(DateUtils.addToDateStr(from, { months: 3 }), { days: -1 });
+        out.push({ key: 'q' + yy + q, label: 'Q' + (q + 1), sub: "'" + String(yy).slice(2), long: 'Q' + (q + 1) + ' ' + yy + (k === 0 ? ' so far' : ''), from, to });
+    }
+    return out;
+}
+// change = end − start; added = opening value (if opened in the period) + top-ups in it;
+// growth = change − added. With no sell event yet, a sale shows up as a fall in value.
+function spGrowthCalc(items, p, toMain) {
+    const before = DateUtils.addToDateStr(p.from, { days: -1 });
+    let start = 0, end = 0, added = 0; const rows = [];
+    items.forEach(a => {
+        const s0 = toMain(spAssetValueAt(a, before), a.currency), e0 = toMain(spAssetValueAt(a, p.to), a.currency);
+        let ad = a.openDate && a.openDate >= p.from && a.openDate <= p.to ? (spAssetOpening(a) || 0) : 0;
+        (a.history || []).forEach(h => { if (h.type === 'topup' && h.date >= p.from && h.date <= p.to) ad += Number(h.amount) || 0; });
+        start += s0; end += e0; added += toMain(ad, a.currency);
+        if (Math.abs(e0 - s0) > 0.5) rows.push({ id: a.id, name: a.name, chg: e0 - s0 });
+    });
+    rows.sort((x, z) => Math.abs(z.chg) - Math.abs(x.chg));
+    return { start, end, chg: end - start, added, growth: end - start - added, rows };
+}
+// Money put into assets in a window: new assets at their opening value, plus top-ups.
+function spInvestedEntries(items, inRange) {
+    const out = [];
+    items.forEach(a => {
+        if (a.openDate && inRange(a.openDate)) out.push({ key: a.id + ':open', name: a.name, categoryId: a.categoryId, kind: 'New asset', date: a.openDate, amount: spAssetOpening(a) || 0, currency: a.currency });
+        (a.history || []).forEach((h, i) => { if (h.type === 'topup' && h.date && inRange(h.date)) out.push({ key: a.id + ':' + (h.id || i), name: a.name, categoryId: a.categoryId, kind: 'Top-up', date: h.date, amount: Number(h.amount) || 0, currency: a.currency }); });
+    });
+    return out.sort((x, z) => x.date < z.date ? 1 : x.date > z.date ? -1 : 0);
+}
+// Expanded asset row: 25 evenly spaced valueAt samples from the opening date to today.
+function NetWorthValueLine({ item }) {
+    const today = DateUtils.today();
+    if (!item.openDate || item.openDate >= today) return null;
+    const t0 = DateUtils.parseDateStr(item.openDate).getTime(), t1 = DateUtils.parseDateStr(today).getTime();
+    const vals = Array.from({ length: 25 }, (_, i) => i === 0 ? (spAssetOpening(item) || 0) : spAssetValueAt(item, i === 24 ? today : DateUtils.toDateStr(new Date(t0 + (t1 - t0) * i / 24))));
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const pts = vals.map((v, i) => (i * 100 / 24).toFixed(2) + ',' + (hi === lo ? 15 : 30 - (v - lo) / (hi - lo) * 30).toFixed(2)).join(' ');
+    const down = Number(item.value) < vals[0];
+    return (
+        <div className="sp-nwspark">
+            <svg viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"><polyline points={pts} fill="none" stroke={down ? '#e11d48' : '#10b981'} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" /></svg>
+            <div className="sp-nwspark-foot"><span>Opened {spLongDate(item.openDate)} · {spFmtMoney(vals[0], item.currency, 0)}</span><span style={{color: 'var(--sp-navy)'}}>Now {spFmtMoney(item.value, item.currency, 0)}</span></div>
+        </div>
+    );
+}
+// Asset Growth card (Net Worth, above the Assets list). `items` is already scoped to the
+// active view and to spGrowthScope. Everything is in the main currency at today's rates.
+function NetWorthGrowthCard({ items, assetCategories, defaultCurrency }) {
+    const [grMode, setGrMode] = useState('quarter'); // 'quarter' | 'year'
+    const [grFilter, setGrFilter] = useState('all'); // 'all' | 'inv' | 'pen' | 'oth'
+    const [grSel, setGrSel] = useState(null);        // selected period key
+    if (!items.length) return null;
+    const toMain = (v, c) => CurrencyService.convertToDefaultSync(v, c, defaultCurrency);
+    const catName = (i) => (assetCategories.find(c => c.id === i.categoryId) || {}).name;
+    const F = { all: ['All', () => true], inv: ['Investments', i => catName(i) === 'Investment'], pen: ['Pensions', i => catName(i) === 'Pension & Retirement'], oth: ['Property & other', i => !['Investment', 'Pension & Retirement'].includes(catName(i))] };
+    const shown = Object.keys(F).filter(k => k === 'all' || items.some(F[k][1]));
+    const fk = shown.includes(grFilter) ? grFilter : 'all';
+    const list = items.filter(F[fk][1]);
+    const calc = spGrowthPeriods(grMode, DateUtils.today()).map(p => ({ p, c: spGrowthCalc(list, p, toMain) }));
+    const mx = Math.max(1, ...calc.map(x => Math.abs(x.c.chg)));
+    const anyNeg = calc.some(x => x.c.chg < -0.5), anyPos = calc.some(x => x.c.chg > 0.5);
+    const upH = anyNeg ? (anyPos ? 62 : 0) : 100, downH = anyNeg ? (anyPos ? 38 : 100) : 0;
+    const fmt0 = (v) => spFmtMoney(v, defaultCurrency, 0);
+    const sg = (n) => (n < 0 ? '−' : '+') + fmt0(Math.abs(n));
+    const sym = CurrencyService.getCurrencySymbol(defaultCurrency);
+    const k = (n) => { const a = Math.abs(n); const t = a >= 1e6 ? (a / 1e6).toFixed(1) + 'm' : a >= 1000 ? (a / 1000).toFixed(a >= 10000 ? 0 : 1) + 'k' : Math.round(a); return (n < -0.5 ? '−' : n > 0.5 ? '+' : '') + sym + t; };
+    const first = calc[0].c.start, last = calc[calc.length - 1].c.end, tot = last - first, pct = first ? tot / first * 100 : 0;
+    const sel = calc.find(x => x.p.key === grSel);
+    return (
+        <div className="sp-growth">
+            <div className="sp-growth-head">
+                <div style={{minWidth: 0}}>
+                    <div className="sp-growth-kicker">ASSET GROWTH</div>
+                    <div className="sp-growth-total" style={{color: tot < 0 ? '#be123c' : '#047857'}}>{(tot < 0 ? '−' : '+') + '≈ ' + fmt0(Math.abs(tot))}</div>
+                    <div className="sp-growth-sub">{first ? (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% · ' : ''}{grMode === 'year' ? 'last 5 years' : 'last 6 quarters'}</div>
+                </div>
+                <div className="sp-miniseg">
+                    {[['quarter', 'Quarterly'], ['year', 'Yearly']].map(([m, l]) => <button key={m} type="button" className={grMode === m ? 'is-active' : ''} onClick={() => { setGrMode(m); setGrSel(null); }}>{l}</button>)}
+                </div>
+            </div>
+            <div className="sp-growth-chips">
+                {shown.map(x => <button key={x} type="button" className={'sp-growth-chip' + (fk === x ? ' is-active' : '')} onClick={() => setGrFilter(x)}>{F[x][0]}</button>)}
+            </div>
+            <div className="sp-growth-bars">
+                {calc.map(({ p, c }) => {
+                    const up = c.chg >= 0, h = Math.max(Math.abs(c.chg) / mx * 100, Math.abs(c.chg) > 0.5 ? 4 : 0) + '%';
+                    const bar = up ? '#10b981' : '#f43f5e', ink = up ? '#047857' : '#be123c';
+                    const amt = Math.abs(c.chg) > 0.5 ? k(c.chg) : '';
+                    return (
+                        <button key={p.key} type="button" className="sp-growth-col" onClick={() => setGrSel(p.key)}>
+                            {upH > 0 && <span className="sp-growth-up" style={{height: upH + 'px'}}>{up && <span className="sp-growth-amt" style={{color: ink}}>{amt}</span>}<span className="sp-growth-bar is-up" style={{height: up ? h : '0%', background: bar}}></span></span>}
+                            <span className="sp-growth-base"></span>
+                            {downH > 0 && <span className="sp-growth-down" style={{height: downH + 'px'}}><span className="sp-growth-bar is-down" style={{height: up ? '0%' : h, background: bar}}></span>{!up && <span className="sp-growth-amt" style={{color: ink}}>{amt}</span>}</span>}
+                            <span className="sp-growth-label" style={{color: grSel === p.key ? 'var(--sp-navy)' : undefined}}>{p.label}</span>
+                            {p.sub && <span className="sp-growth-plabel">{p.sub}</span>}
+                        </button>
+                    );
+                })}
+            </div>
+            <div className="sp-growth-foot"><span>Tap a bar for details · excludes bank &amp; cash</span><span style={{color: 'var(--sp-navy)', whiteSpace: 'nowrap'}}>Now ≈ {fmt0(last)}</span></div>
+            {sel && ReactDOM.createPortal(
+                <Sheet onClose={() => setGrSel(null)} title={sel.p.long} sub={F[fk][0] + ' · ' + fmt0(sel.c.start) + ' → ' + fmt0(sel.c.end)} showClose>
+                    <div className="sp-growth-sheetcard">
+                        {[
+                            { label: 'You added', hint: 'New assets & top-ups', v: sel.c.added, ink: 'var(--sp-navy)', icon: 'fas fa-circle-plus', tint: '#e0f2fe', iconInk: '#0284c7' },
+                            sel.c.growth < 0
+                                ? { label: 'Value fell', hint: 'From valuation updates', v: sel.c.growth, ink: '#be123c', icon: 'fas fa-arrow-trend-down', tint: '#ffe4e6', iconInk: '#e11d48' }
+                                : { label: 'Value grew', hint: 'From valuation updates', v: sel.c.growth, ink: '#047857', icon: 'fas fa-arrow-trend-up', tint: '#dcfce7', iconInk: '#16a34a' }
+                        ].map(l => (
+                            <div key={l.label} className="sp-growth-line">
+                                <span className="sp-tile" style={{background: l.tint, color: l.iconInk}}><i className={l.icon}></i></span>
+                                <div style={{flex: 1, minWidth: 0}}><div className="sp-row-title">{l.label}</div><div className="sp-row-sub">{l.hint}</div></div>
+                                <b style={{color: l.ink}}>{sg(l.v)}</b>
+                            </div>
+                        ))}
+                        <div className="sp-growth-net"><span>Net change</span><b style={{color: sel.c.chg < 0 ? '#be123c' : '#047857'}}>{sg(sel.c.chg)}</b></div>
+                    </div>
+                    {sel.c.rows.length > 0 && (
+                        <React.Fragment>
+                            <div className="sp-group-label" style={{margin: '16px 4px 8px'}}>By asset</div>
+                            <div className="sp-growth-sheetcard">
+                                {sel.c.rows.slice(0, 5).map(r => <div key={r.id} className="sp-growth-asset"><span>{r.name}</span><b style={{color: r.chg < 0 ? '#be123c' : '#047857'}}>{sg(r.chg)}</b></div>)}
+                            </div>
+                        </React.Fragment>
+                    )}
+                    <div className="sp-hint" style={{fontSize: '11px', margin: '12px 4px 0'}}>Converted to your main currency at today's rates.</div>
+                </Sheet>, document.body)}
+        </div>
+    );
+}
+
 function NetWorth({ defaultCurrency, activeView, assetCategories = [], liabilityCategories = [], onUpdate }) {
     const [items, setItems] = useState(() => DataService.getNetWorthItems());
     const [tick, setTick] = useState(0);
@@ -9622,6 +10046,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const [openItem, setOpenItem] = useState(null);
     const [pendingDelete, setPendingDelete] = useState(null);
     const [sheet, setSheet] = useState(null); // { kind: 'add'|'edit'|'topup'|'value'|'cash', ... }
+    const [walOpen, setWalOpen] = useState(false); // In wallet breakdown (not persisted)
     const [toast, setToast] = useState('');
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!FilterMemory.load('networth').syncConflict);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
@@ -9683,8 +10108,10 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
     const cashRows = (() => {
         const map = {};
         cashItems.forEach(c => { map[c.currency] = (map[c.currency] || 0) + c.value; });
-        return Object.entries(map).map(([currency, value]) => ({ currency, value })).sort((a, b) => convertToDefault(b.value, b.currency) - convertToDefault(a.value, a.currency));
+        // Overspent (negative) balances first, then largest first in the main currency.
+        return Object.entries(map).map(([currency, value]) => ({ currency, value })).sort((a, b) => ((a.value < 0) - (b.value < 0)) * -1 || convertToDefault(b.value, b.currency) - convertToDefault(a.value, a.currency));
     })();
+    const cashNeg = cashRows.filter(r => r.value < 0).length;
     const hasForeign = [...counted, ...primaryWalletItems].some(i => i.currency !== defaultCurrency);
 
     const conflictOnly = (list) => filterSyncConflict ? list.filter(i => !!syncConflicts[String(i.id)]) : list;
@@ -9779,6 +10206,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 {isOpen && (
                     <div className="sp-nwitem-open">
                         {item.notes && <div className="sp-nwnote">{item.notes}</div>}
+                        {kind === 'stored' && isAsset && spGrowthScope(item, assetCategories) && <NetWorthValueLine item={item} />}
                         {kind === 'stored' && isAsset && (
                             <div className="sp-nwdetail">
                                 Invested <b>{spFmtMoney(invested != null ? invested : item.value, item.currency)}</b>
@@ -9859,13 +10287,11 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 <div className="sp-nwhero-label">Net worth by country</div>
                 {countryRows.length === 0 && cashRows.length === 0 && <div className="sp-nwhero-empty">Add an asset or liability to see where you stand.</div>}
                 {countryRows.map(r => (
-                    <div key={r.country + r.currency} className="sp-nwhero-row">
+                    <div key={r.country + r.currency} className="sp-nwhero-crow">
                         <span className="sp-nwhero-cc">{spCountryCode(r.country)}</span>
-                        <div className="sp-nwhero-main">
-                            <div className="sp-nwhero-name">{r.country || 'No country set'}{r.country && COUNTRY_CURRENCY_MAP[r.country] === r.currency ? '' : ' · ' + r.currency}</div>
-                            <div className="sp-nwhero-sub"><span style={{color: '#34d399'}}>▲ {spFmtMoney(r.assets, r.currency)}</span>{r.owed > 0 && <span style={{color: '#fb7185'}}>▼ {spFmtMoney(r.owed, r.currency)}</span>}</div>
-                        </div>
+                        <div className="sp-nwhero-name">{r.country || 'No country set'}{r.country && COUNTRY_CURRENCY_MAP[r.country] === r.currency ? '' : ' · ' + r.currency}</div>
                         <div className="sp-nwhero-val" style={{color: r.net < 0 ? '#fb7185' : undefined}}>{spFmtMoney(r.net, r.currency)}</div>
+                        <div className="sp-nwhero-sub"><span style={{color: '#34d399'}}>▲ {spFmtMoney(r.assets, r.currency)}</span>{r.owed > 0 && <span style={{color: '#fb7185'}}>▼ {spFmtMoney(r.owed, r.currency)}</span>}</div>
                     </div>
                 ))}
                 {cashRows.length > 0 && (
@@ -9874,21 +10300,33 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                             <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-money-bill-wave"></i></span>
                             <div className="sp-nwhero-main">
                                 <div className="sp-nwhero-name">Cash in hand</div>
-                                <div className="sp-nwhero-sub" style={{color: 'var(--sp-slate-400)'}}>{cashRows.length === 1 ? '1 currency' : cashRows.length + ' currencies'}</div>
+                                <div className="sp-nwhero-sub" style={{color: 'var(--sp-slate-400)'}}>{cashRows.length === 1 ? '1 currency' : cashRows.length + ' currencies'}{cashNeg > 0 && ' · ' + cashNeg + ' overspent'}</div>
                             </div>
                         </div>
                         <div className="sp-nwhero-cashlist">
-                            {cashRows.map(r => <span key={r.currency} className="sp-nwhero-cashval" title={r.currency} style={{color: r.value < 0 ? '#fb7185' : undefined}}>{spFmtMoney(r.value, r.currency)}</span>)}
+                            {cashRows.map(r => (
+                                <span key={r.currency} className={'sp-nwhero-cashval' + (r.value < 0 ? ' is-neg' : '')}>
+                                    <span className="sp-nwhero-cashcode">{r.currency}{r.value < 0 && <i className="fas fa-triangle-exclamation"></i>}</span>
+                                    <span className="sp-nwhero-cashamt">{spFmtMoney(r.value, r.currency)}</span>
+                                </span>
+                            ))}
                         </div>
                     </div>
                 )}
-                <div className="sp-nwhero-row is-wallet">
-                    <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-wallet"></i></span>
-                    <div className="sp-nwhero-main">
-                        <div className="sp-nwhero-name" style={{color: 'var(--sp-slate-300)'}}>In wallet</div>
-                        <div className="sp-nwhero-sub" style={{color: 'var(--sp-slate-400)', display: 'block'}}>{fmt0(walletParts.primaryBalances)} primary · {walletParts.unlinkedIncome > 0 ? '+' : ''}{fmt0(walletParts.unlinkedIncome)} unlinked income · {walletParts.unlinkedExpenses > 0 ? '−' : ''}{fmt0(walletParts.unlinkedExpenses)} unlinked spend</div>
-                    </div>
-                    <div className="sp-nwhero-val">{spFmtMoney(wallet, defaultCurrency)}</div>
+                <div className="sp-nwhero-wallet">
+                    <button type="button" className="sp-nwhero-walhead" onClick={() => setWalOpen(o => !o)} aria-expanded={walOpen}>
+                        <span className="sp-nwhero-cc" style={{color: '#34d399'}}><i className="fas fa-wallet"></i></span>
+                        <span className="sp-nwhero-walname">In wallet</span>
+                        <span className="sp-nwhero-walval">≈ {spFmtMoney(wallet, defaultCurrency)}</span>
+                        <i className={'fas fa-chevron-' + (walOpen ? 'up' : 'down')} style={{color: 'var(--sp-slate-500)', fontSize: '10px'}}></i>
+                    </button>
+                    {walOpen && (
+                        <div className="sp-nwhero-walrows">
+                            <div><span>Primary account</span><b style={{color: '#fff'}}>{fmt0(walletParts.primaryBalances)}</b></div>
+                            <div><span>Income not linked to a bank</span><b style={{color: '#34d399'}}>+{fmt0(Math.abs(walletParts.unlinkedIncome))}</b></div>
+                            <div><span>Spend not linked to a bank</span><b style={{color: '#fb7185'}}>−{fmt0(Math.abs(walletParts.unlinkedExpenses))}</b></div>
+                        </div>
+                    )}
                 </div>
                 {hasForeign && <div className="sp-nwhero-note"><i className="fas fa-circle-info"></i>In wallet and ≈ amounts use approximate offline exchange rates.</div>}
             </div>
@@ -9897,6 +10335,8 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 <button type="button" className="sp-btn sp-btn-primary" style={{flex: 1, height: '50px', fontSize: '15px'}} onClick={() => setSheet({ kind: 'add', type: 'asset' })}><i className="fas fa-plus"></i>Add asset</button>
                 <button type="button" className="sp-btn sp-btn-white" style={{flex: 1, height: '50px', fontSize: '15px', color: '#e11d48'}} onClick={() => setSheet({ kind: 'add', type: 'liability' })}><i className="fas fa-plus"></i>Add liability</button>
             </div>
+
+            <NetWorthGrowthCard items={storedItems.filter(i => spGrowthScope(i, assetCategories))} assetCategories={assetCategories} defaultCurrency={defaultCurrency} />
 
             <div className="sp-group-head" style={{padding: '0 4px 8px'}}><span className="sp-group-label">Assets</span><span className="sp-group-total" style={{color: '#16a34a', fontWeight: 800}}>{fmt0(totalAssetsConv)}</span></div>
             {assetGroups.length === 0 ? <div className="sp-empty" style={{marginBottom: '14px'}}><i className="fas fa-arrow-trend-up"></i>No assets yet.</div> : assetGroups.map(g => renderGroup(g, 'asset'))}
