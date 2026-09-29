@@ -714,29 +714,31 @@ function resolveActiveViewValue(activeView) {
     const v = activeView[0];
     return v === 'own' ? '' : v;
 }
-// A person's primary account only counts as the default for a new expense/income record
-// when its currency matches the record's — otherwise the Account field is left unset so a
-// GBP primary account never gets silently attached to e.g. a USD transaction.
+// A person has at most one primary account per currency. It is the default for a new
+// expense/income record in that currency; with no primary in the record's currency the
+// Account field is left unset, so a GBP account never gets attached to e.g. a USD transaction.
 function resolveDefaultAccountId(person, currency) {
-    const primary = DataService.getPrimaryAccountForPerson(person || 'own');
-    return (primary && primary.currency === currency) ? primary.id : '';
+    const primary = DataService.getPrimaryAccountForPerson(person || 'own', currency);
+    return primary ? primary.id : '';
 }
 // Trim/lowercase before comparing — matches the normalization matchesActiveView already
 // uses elsewhere, since CSV-imported paidBy values aren't validated against the People
 // list and can carry stray whitespace/casing that would otherwise silently fail to match.
-// Returns one entry per person with a primary bank account (even if their unlinked count
-// is 0), so callers can distinguish "no primary account" from "primary but nothing to link".
+// Returns one entry per primary bank account (a person can have one per currency), even if
+// its unlinked count is 0, so callers can distinguish "no primary account" from "primary but
+// nothing to link".
 function computeLinkCandidates(bankAccounts, expenses, income) {
     const normalize = (v) => (v || 'own').trim().toLowerCase();
     const seen = new Set();
     const candidates = [];
     bankAccounts.filter(a => a.isPrimary).forEach(primary => {
-        if (seen.has(primary.person)) return;
-        seen.add(primary.person);
+        const key = primary.person + '|' + primary.currency;
+        if (seen.has(key)) return;
+        seen.add(key);
         const target = normalize(primary.person);
         const expenseCount = expenses.filter(e => normalize(e.paidBy) === target && !e.accountId && !e.isCashPayment && (e.currency || 'GBP') === primary.currency).length;
         const incomeCount = income.filter(i => normalize(i.paidBy) === target && !i.accountId && (i.currency || 'GBP') === primary.currency).length;
-        candidates.push({ person: primary.person, expenseCount, incomeCount });
+        candidates.push({ accountId: primary.id, person: primary.person, currency: primary.currency, expenseCount, incomeCount });
     });
     return candidates;
 }
@@ -1520,12 +1522,18 @@ class DataService {
     static getBankAccounts() { return JSON.parse(localStorage.getItem('financeApp_bankAccounts') || '[]'); }
     static saveBankAccounts(accounts) { localStorage.setItem('financeApp_bankAccounts', JSON.stringify(accounts)); }
     static getAccountsForPerson(person) { return this.getBankAccounts().filter(a => a.person === (person || 'own')); }
-    static getPrimaryAccountForPerson(person) { return this.getBankAccounts().find(a => a.isPrimary && a.person === (person || 'own')) || null; }
+    // Primary is one per person per currency (e.g. a GBP and an INR primary can coexist).
+    static getPrimaryAccountForPerson(person, currency) { return this.getBankAccounts().find(a => a.isPrimary && a.person === (person || 'own') && a.currency === currency) || null; }
+    // Clears the primary flag on every other account with the same owner and currency.
+    static _clearOtherPrimaries(accounts, account) {
+        const now = new Date().toISOString();
+        accounts.forEach(a => { if (a !== account && a.isPrimary && a.person === account.person && a.currency === account.currency) { a.isPrimary = false; a.updatedAt = now; } });
+    }
     static addBankAccount({ accountName, accountRef, accountType, country, currency, person, openingAmount, isPrimary }) {
         if (!accountName || accountName.trim().length < 2) throw new Error('Account name must be at least 2 characters');
         const accounts = this.getBankAccounts();
         const normalizedPerson = person || 'own';
-        if (isPrimary) accounts.forEach(a => { if (a.person === normalizedPerson) a.isPrimary = false; });
+        if (isPrimary) this._clearOtherPrimaries(accounts, { person: normalizedPerson, currency });
         const now = new Date().toISOString();
         const account = { id: DataService._uniqueId(), accountName: accountName.trim(), accountRef: (accountRef || '').trim(), accountType, country, currency, person: normalizedPerson, openingAmount: parseFloat(openingAmount) || 0, isPrimary: !!isPrimary, createdAt: now, updatedAt: now };
         accounts.push(account);
@@ -1546,12 +1554,11 @@ class DataService {
         if (updates.currency !== undefined) account.currency = updates.currency;
         if (updates.openingAmount !== undefined) account.openingAmount = parseFloat(updates.openingAmount) || 0;
         if (updates.person !== undefined) account.person = updates.person || 'own';
-        if (updates.isPrimary) {
-            accounts.forEach(a => { if (a.person === account.person) a.isPrimary = false; });
-            account.isPrimary = true;
-        } else if (updates.isPrimary === false) {
-            account.isPrimary = false;
-        }
+        if (updates.isPrimary) account.isPrimary = true;
+        else if (updates.isPrimary === false) account.isPrimary = false;
+        // Also runs when a primary account changes owner or currency, so a person never ends
+        // up with two primaries in the same currency.
+        if (account.isPrimary) this._clearOtherPrimaries(accounts, account);
         account.updatedAt = new Date().toISOString();
         this.saveBankAccounts(accounts);
         return account;
@@ -1634,7 +1641,8 @@ class DataService {
         }
         return true;
     }
-    static async bulkLinkAccounts(personNames) {
+    // Links the owner's unlinked records in each given primary account's currency to it.
+    static async bulkLinkAccounts(accountIds) {
         await this.initialize();
         const accounts = this.getBankAccounts();
         const expenses = this.data.expenses;
@@ -1642,9 +1650,10 @@ class DataService {
         let linkedCount = 0;
         const now = new Date().toISOString();
         const normalize = (v) => (v || 'own').trim().toLowerCase();
-        personNames.forEach(person => {
-            const primary = accounts.find(a => a.isPrimary && a.person === person);
+        accountIds.forEach(id => {
+            const primary = accounts.find(a => a.isPrimary && String(a.id) === String(id));
             if (!primary) return;
+            const person = primary.person;
             const target = normalize(person);
             [...expenses, ...income].forEach(record => {
                 if (normalize(record.paidBy) === target && !record.accountId && !record.isCashPayment && (record.currency || 'GBP') === primary.currency) {
@@ -5714,7 +5723,7 @@ function AccountFormCard({ account, bankAccounts, activeView, onCancel, onSaved 
     const [error, setError] = useState('');
     const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setError(''); };
     const setCurrency = (cur) => setF(p => { const m = COUNTRIES.filter(c => COUNTRY_CURRENCY_MAP[c] === cur); return { ...p, currency: cur, country: m.length === 1 ? m[0] : (COUNTRY_CURRENCY_MAP[p.country] === cur ? p.country : p.country) }; });
-    const existingPrimary = f.isPrimary ? bankAccounts.find(a => a.isPrimary && a.person === (f.person || 'own') && (!isEdit || a.id !== account.id)) : null;
+    const existingPrimary = f.isPrimary ? bankAccounts.find(a => a.isPrimary && a.person === (f.person || 'own') && a.currency === f.currency && (!isEdit || a.id !== account.id)) : null;
     const save = (e) => {
         if (e) e.preventDefault();
         try {
@@ -5749,9 +5758,9 @@ function AccountFormCard({ account, bankAccounts, activeView, onCancel, onSaved 
             <div className="sp-formrow"><span>Account ID<small className="sp-formrow-hint">Optional · last 4 or IBAN</small></span><input type="text" value={f.accountRef} placeholder="Optional" onChange={e => set('accountRef', e.target.value)} /></div>
             <button type="button" className="sp-checkrow" onClick={() => set('isPrimary', !f.isPrimary)}>
                 <span className={'sp-checkbox' + (f.isPrimary ? ' is-on' : '')}>{f.isPrimary && <i className="fas fa-check"></i>}</span>
-                <span><span className="sp-row-title">Set as primary account</span><span className="sp-row-sub" style={{display: 'block'}}>For {f.person === 'own' ? 'you' : f.person} · pre-selected when paying or receiving</span></span>
+                <span><span className="sp-row-title">Set as primary {f.currency} account</span><span className="sp-row-sub" style={{display: 'block'}}>For {f.person === 'own' ? 'you' : f.person} · pre-selected when paying or receiving in {f.currency}</span></span>
             </button>
-            {existingPrimary && <div className="sp-alert sp-alert-warn" style={{margin: '8px 0 0'}}><i className="fas fa-triangle-exclamation"></i><span>This will replace '{existingPrimary.accountName}' as {f.person === 'own' ? 'your' : f.person + "'s"} primary account.</span></div>}
+            {existingPrimary && <div className="sp-alert sp-alert-warn" style={{margin: '8px 0 0'}}><i className="fas fa-triangle-exclamation"></i><span>This will replace '{existingPrimary.accountName}' as {f.person === 'own' ? 'your' : f.person + "'s"} primary {f.currency} account.</span></div>}
             <button type="button" className="sp-btn sp-btn-soft" style={{width: '100%', marginTop: '10px'}} onClick={onCancel}>Cancel</button>
             <PinnedCta type="submit" label={isEdit ? 'Save changes' : 'Save account'} icon="fas fa-check" />
         </form>
@@ -5801,12 +5810,12 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
     // ---- Link (same scope as before: this person's unlinked expenses + income → their primary)
     const [linkSheet, setLinkSheet] = useState(null);
     const openLink = (account) => {
-        const c = linkCandidatesAll.find(x => x.person === account.person);
+        const c = linkCandidatesAll.find(x => x.accountId === account.id);
         setLinkSheet({ account, expenseCount: c ? c.expenseCount : 0, incomeCount: c ? c.incomeCount : 0 });
     };
     const confirmLink = async () => {
         const { account, expenseCount, incomeCount } = linkSheet;
-        await DataService.bulkLinkAccounts([account.person]);
+        await DataService.bulkLinkAccounts([account.id]);
         setLinkSheet(null);
         done('Linked ' + expenseCount + ' expense' + (expenseCount === 1 ? '' : 's') + ' and ' + incomeCount + ' income record' + (incomeCount === 1 ? '' : 's') + ' to ' + account.accountName);
     };
@@ -5939,7 +5948,7 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
         const out = [];
         if (exp || inc) out.push({ icon: 'fas fa-receipt', text: exp + ' expense' + (exp === 1 ? '' : 's') + ' and ' + inc + ' income record' + (inc === 1 ? '' : 's') + ' linked to it stay in your lists.' });
         if (tr) out.push({ icon: 'fas fa-right-left', text: tr + ' money movement' + (tr === 1 ? '' : 's') + ' mention it and stay in the log.' });
-        if (a.isPrimary) out.push({ icon: 'fas fa-star', text: 'It is ' + (a.person === 'own' ? 'your' : a.person + "'s") + ' primary account, so new entries won\'t have a default account until you pick another.' });
+        if (a.isPrimary) out.push({ icon: 'fas fa-star', text: 'It is ' + (a.person === 'own' ? 'your' : a.person + "'s") + ' primary ' + a.currency + ' account, so new ' + a.currency + ' entries won\'t have a default account until you pick another.' });
         if (!out.length) out.push({ icon: 'fas fa-circle-check', text: 'Nothing is linked to this account.' });
         return out;
     };
@@ -6096,9 +6105,9 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
                             const look = spAcctLook(a.accountType);
                             const isOpen = openId === a.id;
                             const b = bal(a);
-                            const candidate = a.isPrimary ? linkCandidatesAll.find(c => c.person === a.person) : null;
+                            const candidate = a.isPrimary ? linkCandidatesAll.find(c => c.accountId === a.id) : null;
                             const unlinked = candidate ? candidate.expenseCount + candidate.incomeCount : 0;
-                            const primaryNow = !a.isPrimary && bankAccounts.find(x => x.isPrimary && x.person === a.person);
+                            const primaryNow = !a.isPrimary && bankAccounts.find(x => x.isPrimary && x.person === a.person && x.currency === a.currency);
                             const last4 = a.accountRef ? ' ·· ' + String(a.accountRef).replace(/\s+/g, '').slice(-4) : '';
                             return (
                                 <div key={a.id} className="sp-acctitem">
@@ -6119,7 +6128,7 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
                                     {conflictPanel('bankAccounts', a)}
                                     {pendingPrimary === a.id && (
                                         <div style={{padding: '0 0 10px'}}>
-                                            <InlineConfirm text={primaryNow ? 'Make ' + a.accountName + ' the primary account? It replaces ' + primaryNow.accountName + '.' : 'Make ' + a.accountName + ' the primary account?'} keepLabel="Cancel" cta="Set primary" onKeep={() => setPendingPrimary(null)} onConfirm={() => { DataService.updateBankAccount(a.id, { isPrimary: true }); setPendingPrimary(null); done(a.accountName + ' is now primary'); }} />
+                                            <InlineConfirm text={primaryNow ? 'Make ' + a.accountName + ' the primary ' + a.currency + ' account? It replaces ' + primaryNow.accountName + '.' : 'Make ' + a.accountName + ' the primary ' + a.currency + ' account?'} keepLabel="Cancel" cta="Set primary" onKeep={() => setPendingPrimary(null)} onConfirm={() => { DataService.updateBankAccount(a.id, { isPrimary: true }); setPendingPrimary(null); done(a.accountName + ' is now primary'); }} />
                                         </div>
                                     )}
                                     {isOpen && (
@@ -6157,15 +6166,15 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
 
             {linkSheet && (
                 <Sheet onClose={() => setLinkSheet(null)}>
-                    <SpSheetHead icon="fas fa-link" tint="#dbeafe" ink="#2563eb" title="Link transactions" sub={linkSheet.account.accountName + ' · ' + (linkSheet.account.person === 'own' ? 'your' : linkSheet.account.person + "'s") + ' primary account'} />
+                    <SpSheetHead icon="fas fa-link" tint="#dbeafe" ink="#2563eb" title="Link transactions" sub={linkSheet.account.accountName + ' · ' + (linkSheet.account.person === 'own' ? 'your' : linkSheet.account.person + "'s") + ' primary ' + linkSheet.account.currency + ' account'} />
                     {linkSheet.expenseCount + linkSheet.incomeCount > 0 ? (
                         <React.Fragment>
-                            <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>{linkSheet.expenseCount} expense{linkSheet.expenseCount === 1 ? '' : 's'} and {linkSheet.incomeCount} income record{linkSheet.incomeCount === 1 ? '' : 's'} for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} have no account. Linking puts them on {linkSheet.account.accountName}, which changes its balance.</span></div>
+                            <div className="sp-alert sp-alert-warn"><i className="fas fa-triangle-exclamation"></i><span>{linkSheet.expenseCount} {linkSheet.account.currency} expense{linkSheet.expenseCount === 1 ? '' : 's'} and {linkSheet.incomeCount} income record{linkSheet.incomeCount === 1 ? '' : 's'} for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} have no account. Linking puts them on {linkSheet.account.accountName}, which changes its balance.</span></div>
                             <div className="sp-sheet-foot"><button type="button" className="sp-btn sp-btn-cancel" onClick={() => setLinkSheet(null)}>Cancel</button><button type="button" className="sp-btn sp-btn-primary sp-btn-grow" onClick={confirmLink}><i className="fas fa-link"></i>Link {linkSheet.expenseCount + linkSheet.incomeCount}</button></div>
                         </React.Fragment>
                     ) : (
                         <React.Fragment>
-                            <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>Nothing to link — every expense and income record for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} already has an account or is cash.</span></div>
+                            <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>Nothing to link — every {linkSheet.account.currency} expense and income record for {linkSheet.account.person === 'own' ? 'you' : linkSheet.account.person} already has an account or is cash.</span></div>
                             <button type="button" className="sp-btn sp-btn-primary" onClick={() => setLinkSheet(null)}>Done</button>
                         </React.Fragment>
                     )}
