@@ -227,6 +227,14 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // Clickable demo (the Spendly v3 mockup, mock data only). Redirect so its relative
+  // support.js/assets paths resolve under /demo/.
+  if (urlPath === '/demo' || urlPath === '/demo/') {
+    res.writeHead(302, { 'Location': '/demo/index.html' });
+    res.end();
+    return;
+  }
+
   if (urlPath === '/scripts/cloud-sync-test.html') {
     serveWithOauthConfig(path.join(ROOT, 'scripts', 'cloud-sync-test.html'), res);
     return;
