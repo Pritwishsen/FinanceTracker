@@ -5325,7 +5325,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     // Invested: new assets and top-ups in the period (not Bank & Savings or Cash). Scheduled
     // contributions only count once they've been logged as top-ups.
     const assetCats = DataService.getNetWorthCategories('asset');
-    const invested = spInvestedEntries(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, activeView) && spGrowthScope(i, assetCats)), inPeriod);
+    const invested = spInvestedEntries(spWithFundingTopups(DataService.getNetWorthItems().filter(i => matchesActiveView(i.person, activeView) && spGrowthScope(i, assetCats)), DataService.getTransfers()), inPeriod);
     const investedTotal = invested.reduce((s, x) => s + CurrencyService.convertToDefaultSync(x.amount, x.currency, defaultCurrency), 0);
     const investedForeign = invested.some(x => x.currency !== defaultCurrency);
     // Expanded list: one line per asset category, largest first, in the main currency.
@@ -9885,6 +9885,28 @@ function spGrowthScope(item, assetCategories) {
     const cat = assetCategories.find(c => c.id === item.categoryId);
     return !(cat && (cat.name === 'Bank & Savings' || cat.name === 'Cash'));
 }
+// Top-ups made before assets kept a history (phase 8) were only logged as Asset Funding
+// transfers. This adds those back as top-up entries for the growth maths (display only,
+// never saved). Skipped: transfers already matched by a history top-up (same date and
+// amount), and the asset's own opening funding — ids are timestamps, and that transfer is
+// written within a minute of the asset itself.
+function spWithFundingTopups(items, transfers) {
+    const byAsset = {};
+    (transfers || []).forEach(t => { if (t.toAssetId && !t.isCashWithdrawal) (byAsset[String(t.toAssetId)] = byAsset[String(t.toAssetId)] || []).push(t); });
+    return items.map(item => {
+        const fund = byAsset[String(item.id)];
+        if (!fund) return item;
+        const hist = item.history || [], used = new Set(), extra = [];
+        fund.forEach(t => {
+            const amt = Number(t.toAmount) || 0, gap = Number(t.id) - Number(item.id);
+            if (!t.date || !amt || (gap >= 0 && gap < 60000)) return;
+            const k = hist.findIndex((h, j) => !used.has(j) && h.type === 'topup' && h.date === t.date && Math.abs((Number(h.amount) || 0) - amt) < 0.005);
+            if (k !== -1) { used.add(k); return; }
+            extra.push({ id: 'tr' + t.id, type: 'topup', amount: amt, date: t.date });
+        });
+        return extra.length ? { ...item, history: [...hist, ...extra] } : item;
+    });
+}
 // Starts from the current value and undoes, newest first, every history entry whose date
 // passes `undo`: a valuation goes back to its `from`, a top-up is taken off.
 function spUndoHistory(item, undo) {
@@ -10218,7 +10240,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 {isOpen && (
                     <div className="sp-nwitem-open">
                         {item.notes && <div className="sp-nwnote">{item.notes}</div>}
-                        {kind === 'stored' && isAsset && spGrowthScope(item, assetCategories) && <NetWorthValueLine item={item} />}
+                        {kind === 'stored' && isAsset && spGrowthScope(item, assetCategories) && <NetWorthValueLine item={spWithFundingTopups([item], DataService.getTransfers())[0]} />}
                         {kind === 'stored' && isAsset && (
                             <div className="sp-nwdetail">
                                 Invested <b>{spFmtMoney(invested != null ? invested : item.value, item.currency)}</b>
@@ -10348,7 +10370,7 @@ function NetWorth({ defaultCurrency, activeView, assetCategories = [], liability
                 <button type="button" className="sp-btn sp-btn-white" style={{flex: 1, height: '50px', fontSize: '15px', color: '#e11d48'}} onClick={() => setSheet({ kind: 'add', type: 'liability' })}><i className="fas fa-plus"></i>Add liability</button>
             </div>
 
-            <NetWorthGrowthCard items={storedItems.filter(i => spGrowthScope(i, assetCategories))} assetCategories={assetCategories} defaultCurrency={defaultCurrency} />
+            <NetWorthGrowthCard items={spWithFundingTopups(storedItems.filter(i => spGrowthScope(i, assetCategories)), DataService.getTransfers())} assetCategories={assetCategories} defaultCurrency={defaultCurrency} />
 
             <div className="sp-group-head" style={{padding: '0 4px 8px'}}><span className="sp-group-label">Assets</span><span className="sp-group-total" style={{color: '#16a34a', fontWeight: 800}}>{fmt0(totalAssetsConv)}</span></div>
             {assetGroups.length === 0 ? <div className="sp-empty" style={{marginBottom: '14px'}}><i className="fas fa-arrow-trend-up"></i>No assets yet.</div> : assetGroups.map(g => renderGroup(g, 'asset'))}
