@@ -2,7 +2,7 @@ const { loadInlineClasses } = require('./helpers/loadInlineClasses');
 
 // Phase 8 approved changes: per-item history (top-ups, valuations, liability balances),
 // top-up date, openDate, and deleting an item also deleting its repeat schedule.
-const { DataService, DateUtils, __sandbox } = loadInlineClasses(['DateUtils', 'CurrencyService', 'DataService', 'matchesActiveView', 'computeNextDue']);
+const { DataService, DateUtils, __sandbox } = loadInlineClasses(['DateUtils', 'CurrencyService', 'DataService', 'matchesActiveView', 'computeNextDue', 'spWithFundingTopups', 'spAssetValueBefore']);
 const store = __sandbox.localStorage;
 
 beforeEach(() => {

@@ -1,7 +1,7 @@
 const { loadInlineClasses } = require('./helpers/loadInlineClasses');
 
 const { spWithFundingTopups, spAssetValueAt, spAssetOpening, spGrowthCalc, spInvestedEntries } =
-    loadInlineClasses(['DateUtils', 'spUndoHistory', 'spAssetValueAt', 'spAssetOpening', 'spGrowthCalc', 'spInvestedEntries', 'spWithFundingTopups']);
+    loadInlineClasses(['DateUtils', 'spAssetValueBefore', 'spAssetValueAt', 'spAssetOpening', 'spGrowthCalc', 'spInvestedEntries', 'spWithFundingTopups']);
 
 // Asset opened 2025-01-10 for 1000 (funded from a bank account), topped up 500 on
 // 2025-06-15 before assets kept a history (transfer only), topped up 200 on 2026-09-26
@@ -11,7 +11,7 @@ const item = {
     id: ITEM_ID, type: 'asset', name: 'Index Fund', currency: 'GBP', value: 1900, openDate: '2025-01-10',
     history: [
         { id: 1, type: 'topup', amount: 200, date: '2026-09-26' },
-        { id: 2, type: 'value', from: 1700, to: 1900, date: '2026-09-27' }
+        { id: 2, type: 'value', from: 1700, value: 1900, date: '2026-09-27' }
     ]
 };
 const transfers = [

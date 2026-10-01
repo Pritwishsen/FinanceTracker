@@ -2634,11 +2634,19 @@ class DataService {
     }
     // Update value (asset) / Update balance (liability): sets value, valuedOn and appends a
     // history entry (approved change). The first history entry locks opening balance/currency.
+    // Back-dated entries are slotted into the timeline: `from` is the value on that date, and the
+    // current value is recomputed from the history (so a newer valuation or later top-ups still
+    // count) rather than overwritten. Pre-history top-ups from Asset Funding are included.
     static recordNetWorthValuation(id, value, date, activeView) {
         const item = this.getNetWorthItems().find(x => x.id === id);
         if (!item) return;
-        const entry = { id: this._uniqueId(), type: item.type === 'liability' ? 'balance' : 'value', from: item.value, value: parseFloat(value), date: date || DateUtils.today() };
-        this.updateNetWorthItem(id, { value: parseFloat(value), valuedOn: entry.date, history: [...(item.history || []), entry] }, { activeView });
+        const day = date || DateUtils.today();
+        const tomorrow = DateUtils.addToDateStr(DateUtils.today(), { days: 1 });
+        const full = item.type === 'asset' ? spWithFundingTopups([item], this.getTransfers())[0] : item;
+        const entry = { id: this._uniqueId(), type: item.type === 'liability' ? 'balance' : 'value', from: Math.round(spAssetValueBefore(full, DateUtils.addToDateStr(day, { days: 1 })) * 100) / 100, value: parseFloat(value), date: day };
+        const now = Math.round(spAssetValueBefore({ ...full, history: [...(full.history || []), entry] }, tomorrow) * 100) / 100;
+        const valuedOn = item.valuedOn && item.valuedOn > day ? item.valuedOn : day;
+        this.updateNetWorthItem(id, { value: now, valuedOn, history: [...(item.history || []), entry] }, { activeView });
     }
     // activeView, when passed, scopes the total to items belonging to the currently selected
     // person(s) — matching what's actually shown on screen — instead of summing everyone combined.
@@ -9907,28 +9915,37 @@ function spWithFundingTopups(items, transfers) {
         return extra.length ? { ...item, history: [...hist, ...extra] } : item;
     });
 }
-// Starts from the current value and undoes, newest first, every history entry whose date
-// passes `undo`: a valuation goes back to its `from`, a top-up is taken off.
-function spUndoHistory(item, undo) {
-    let v = Number(item.value) || 0;
-    (item.history || []).map((h, i) => ({ h, i }))
-        .sort((a, b) => a.h.date < b.h.date ? 1 : a.h.date > b.h.date ? -1 : b.i - a.i)
-        .forEach(({ h }) => {
-            if (!h.date || !undo(h.date)) return;
-            if (h.type === 'value' || h.type === 'balance') { if (h.from != null) v = Number(h.from) || 0; }
-            else if (h.type === 'topup') v -= Number(h.amount) || 0;
-        });
-    return v;
+// Value at the start of `day` (before anything dated that day), ignoring openDate.
+// Anchors on the last valuation dated before `day` — its value plus top-ups recorded after
+// it — so a back-dated valuation can't skew later dates. With no valuation before `day`,
+// works back from the earliest valuation's `from` (or the current value if there are none),
+// taking off the top-ups in between. Same-day entries keep their recorded order.
+function spAssetValueBefore(item, day) {
+    const hist = (item.history || []).map((h, i) => ({ h, i })).filter(x => x.h.date);
+    const vals = hist.filter(x => x.h.type === 'value' || x.h.type === 'balance')
+        .sort((a, b) => a.h.date < b.h.date ? -1 : a.h.date > b.h.date ? 1 : a.i - b.i);
+    const tops = hist.filter(x => x.h.type === 'topup');
+    const amt = (x) => Number(x.h.amount) || 0;
+    const later = (x, a) => x.h.date > a.h.date || (x.h.date === a.h.date && x.i > a.i);
+    const prior = vals.filter(x => x.h.date < day);
+    if (prior.length) {
+        const a = prior[prior.length - 1];
+        const v0 = Number(a.h.value != null ? a.h.value : a.h.to) || 0;
+        return tops.filter(x => later(x, a) && x.h.date < day).reduce((s, x) => s + amt(x), v0);
+    }
+    const first = vals[0];
+    const v0 = first ? Number(first.h.from) || 0 : Number(item.value) || 0;
+    return tops.filter(x => x.h.date >= day && (!first || !later(x, first))).reduce((s, x) => s - amt(x), v0);
 }
 // Value at the end of `date`. 0 before the asset was opened; an asset with no openDate
 // (added before that field existed) counts as held throughout.
 function spAssetValueAt(item, date) {
     if (item.openDate && item.openDate > date) return 0;
-    return spUndoHistory(item, d => d > date);
+    return spAssetValueBefore(item, DateUtils.addToDateStr(date, { days: 1 }));
 }
 // Value when opened, before any top-up or valuation dated that day or later.
 function spAssetOpening(item) {
-    return item.openDate ? spUndoHistory(item, d => d >= item.openDate) : null;
+    return item.openDate ? spAssetValueBefore(item, item.openDate) : null;
 }
 // Last 6 quarters or last 5 calendar years; the current one runs to today.
 function spGrowthPeriods(mode, today) {
@@ -9955,8 +9972,9 @@ function spGrowthCalc(items, p, toMain) {
         const s0 = toMain(spAssetValueAt(a, before), a.currency), e0 = toMain(spAssetValueAt(a, p.to), a.currency);
         let ad = a.openDate && a.openDate >= p.from && a.openDate <= p.to ? (spAssetOpening(a) || 0) : 0;
         (a.history || []).forEach(h => { if (h.type === 'topup' && h.date >= p.from && h.date <= p.to) ad += Number(h.amount) || 0; });
-        start += s0; end += e0; added += toMain(ad, a.currency);
-        if (Math.abs(e0 - s0) > 0.5) rows.push({ id: a.id, name: a.name, chg: e0 - s0 });
+        const adM = toMain(ad, a.currency);
+        start += s0; end += e0; added += adM;
+        if (Math.abs(e0 - s0) > 0.5) rows.push({ id: a.id, name: a.name, chg: e0 - s0, growth: e0 - s0 - adM });
     });
     rows.sort((x, z) => Math.abs(z.chg) - Math.abs(x.chg));
     return { start, end, chg: end - start, added, growth: end - start - added, rows };
@@ -10000,22 +10018,25 @@ function NetWorthGrowthCard({ items, assetCategories, defaultCurrency }) {
     const fk = shown.includes(grFilter) ? grFilter : 'all';
     const list = items.filter(F[fk][1]);
     const calc = spGrowthPeriods(grMode, DateUtils.today()).map(p => ({ p, c: spGrowthCalc(list, p, toMain) }));
-    const mx = Math.max(1, ...calc.map(x => Math.abs(x.c.chg)));
-    const anyNeg = calc.some(x => x.c.chg < -0.5), anyPos = calc.some(x => x.c.chg > 0.5);
-    const upH = anyNeg ? (anyPos ? 62 : 0) : 100, downH = anyNeg ? (anyPos ? 38 : 100) : 0;
+    // Each bar is the total value at the end of the period; the label above it is the simple
+    // change from the period's start (money added included).
+    const mx = Math.max(1, ...calc.map(x => x.c.end));
     const fmt0 = (v) => spFmtMoney(v, defaultCurrency, 0);
     const sg = (n) => (n < 0 ? '−' : '+') + fmt0(Math.abs(n));
     const sym = CurrencyService.getCurrencySymbol(defaultCurrency);
     const k = (n) => { const a = Math.abs(n); const t = a >= 1e6 ? (a / 1e6).toFixed(1) + 'm' : a >= 1000 ? (a / 1000).toFixed(a >= 10000 ? 0 : 1) + 'k' : Math.round(a); return (n < -0.5 ? '−' : n > 0.5 ? '+' : '') + sym + t; };
-    const first = calc[0].c.start, last = calc[calc.length - 1].c.end, tot = last - first, pct = first ? tot / first * 100 : 0;
+    const pctOf = (g, base) => base > 0.5 ? (g >= 0 ? '+' : '−') + Math.abs(g / base * 100).toFixed(1) + '%' : '';
+    const first = calc[0].c.start, last = calc[calc.length - 1].c.end, tot = last - first, pct = pctOf(tot, first);
     const sel = calc.find(x => x.p.key === grSel);
+    const selPct = sel ? pctOf(sel.c.growth, sel.c.start + sel.c.added) : '';
+    const selChgPct = sel ? pctOf(sel.c.chg, sel.c.start) : '';
     return (
         <div className="sp-growth">
             <div className="sp-growth-head">
                 <div style={{minWidth: 0}}>
                     <div className="sp-growth-kicker">ASSET GROWTH</div>
-                    <div className="sp-growth-total" style={{color: tot < 0 ? '#be123c' : '#047857'}}>{(tot < 0 ? '−' : '+') + '≈ ' + fmt0(Math.abs(tot))}</div>
-                    <div className="sp-growth-sub">{first ? (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '% · ' : ''}{grMode === 'year' ? 'last 5 years' : 'last 6 quarters'}</div>
+                    <div className="sp-growth-total" style={{color: 'var(--sp-navy)'}}>≈ {fmt0(last)}</div>
+                    <div className="sp-growth-sub"><span style={{color: tot < -0.5 ? '#be123c' : tot > 0.5 ? '#047857' : undefined}}>{sg(tot)}{pct ? ' (' + pct + ')' : ''}</span> · {grMode === 'year' ? 'last 5 years' : 'last 6 quarters'}</div>
                 </div>
                 <div className="sp-miniseg">
                     {[['quarter', 'Quarterly'], ['year', 'Yearly']].map(([m, l]) => <button key={m} type="button" className={grMode === m ? 'is-active' : ''} onClick={() => { setGrMode(m); setGrSel(null); }}>{l}</button>)}
@@ -10026,41 +10047,45 @@ function NetWorthGrowthCard({ items, assetCategories, defaultCurrency }) {
             </div>
             <div className="sp-growth-bars">
                 {calc.map(({ p, c }) => {
-                    const up = c.chg >= 0, h = Math.max(Math.abs(c.chg) / mx * 100, Math.abs(c.chg) > 0.5 ? 4 : 0) + '%';
-                    const bar = up ? '#10b981' : '#f43f5e', ink = up ? '#047857' : '#be123c';
-                    const amt = Math.abs(c.chg) > 0.5 ? k(c.chg) : '';
+                    const g = c.chg, h = Math.max(c.end / mx * 90, c.end > 0.5 ? 4 : 0) + 'px'; // 90px tallest, under a 110px column with the label
+                    const ink = g > 0.5 ? '#047857' : g < -0.5 ? '#be123c' : 'var(--sp-slate-400)';
+                    const bar = g > 0.5 ? '#10b981' : g < -0.5 ? '#f43f5e' : 'var(--sp-slate-300)';
                     return (
                         <button key={p.key} type="button" className="sp-growth-col" onClick={() => setGrSel(p.key)}>
-                            {upH > 0 && <span className="sp-growth-up" style={{height: upH + 'px'}}>{up && <span className="sp-growth-amt" style={{color: ink}}>{amt}</span>}<span className="sp-growth-bar is-up" style={{height: up ? h : '0%', background: bar}}></span></span>}
+                            <span className="sp-growth-up" style={{height: '110px'}}>
+                                <span className="sp-growth-amt" style={{color: ink}}>{Math.abs(g) > 0.5 ? k(g) : sym + '0'}</span>
+                                <span className="sp-growth-bar is-up" style={{height: h, background: bar, opacity: grSel && grSel !== p.key ? 0.45 : 1}}></span>
+                            </span>
                             <span className="sp-growth-base"></span>
-                            {downH > 0 && <span className="sp-growth-down" style={{height: downH + 'px'}}><span className="sp-growth-bar is-down" style={{height: up ? '0%' : h, background: bar}}></span>{!up && <span className="sp-growth-amt" style={{color: ink}}>{amt}</span>}</span>}
-                            <span className="sp-growth-label" style={{color: grSel === p.key ? 'var(--sp-navy)' : undefined}}>{p.label}</span>
+                            <span className="sp-growth-amt" style={{color: 'var(--sp-navy)', margin: '5px 0 0'}}>{c.end > 0.5 ? k(c.end).replace('+', '') : '—'}</span>
+                            <span className="sp-growth-label" style={{color: grSel === p.key ? 'var(--sp-navy)' : undefined, marginTop: '2px'}}>{p.label}</span>
                             {p.sub && <span className="sp-growth-plabel">{p.sub}</span>}
                         </button>
                     );
                 })}
             </div>
-            <div className="sp-growth-foot"><span>Tap a bar for details · excludes bank &amp; cash</span><span style={{color: 'var(--sp-navy)', whiteSpace: 'nowrap'}}>Now ≈ {fmt0(last)}</span></div>
+            <div className="sp-growth-foot"><span>Total value · change vs period start · excludes bank &amp; cash</span><span style={{color: 'var(--sp-navy)', whiteSpace: 'nowrap'}}>Tap a bar</span></div>
             {sel && ReactDOM.createPortal(
-                <Sheet onClose={() => setGrSel(null)} title={sel.p.long} sub={F[fk][0] + ' · ' + fmt0(sel.c.start) + ' → ' + fmt0(sel.c.end)} showClose>
+                <Sheet onClose={() => setGrSel(null)} title={sel.p.long} sub={F[fk][0] + ' · ' + (sel.c.chg < 0 ? 'down ' : 'up ') + sg(sel.c.chg) + (selChgPct ? ' (' + selChgPct + ')' : '')} showClose>
                     <div className="sp-growth-sheetcard">
+                        <div className="sp-growth-net" style={{borderBottom: '1px solid var(--sp-slate-100)'}}><span>Value at start</span><b>{fmt0(sel.c.start)}</b></div>
                         {[
-                            { label: 'You added', hint: 'New assets & top-ups', v: sel.c.added, ink: 'var(--sp-navy)', icon: 'fas fa-circle-plus', tint: '#e0f2fe', iconInk: '#0284c7' },
+                            { label: 'You added', hint: 'New assets & top-ups', v: sg(sel.c.added), ink: 'var(--sp-navy)', icon: 'fas fa-circle-plus', tint: '#e0f2fe', iconInk: '#0284c7' },
                             sel.c.growth < 0
-                                ? { label: 'Value fell', hint: 'From valuation updates', v: sel.c.growth, ink: '#be123c', icon: 'fas fa-arrow-trend-down', tint: '#ffe4e6', iconInk: '#e11d48' }
-                                : { label: 'Value grew', hint: 'From valuation updates', v: sel.c.growth, ink: '#047857', icon: 'fas fa-arrow-trend-up', tint: '#dcfce7', iconInk: '#16a34a' }
+                                ? { label: 'Value fell', hint: 'From valuation updates', v: sg(sel.c.growth) + (selPct ? ' · ' + selPct : ''), ink: '#be123c', icon: 'fas fa-arrow-trend-down', tint: '#ffe4e6', iconInk: '#e11d48' }
+                                : { label: 'Value grew', hint: 'From valuation updates', v: sg(sel.c.growth) + (selPct ? ' · ' + selPct : ''), ink: '#047857', icon: 'fas fa-arrow-trend-up', tint: '#dcfce7', iconInk: '#16a34a' }
                         ].map(l => (
                             <div key={l.label} className="sp-growth-line">
                                 <span className="sp-tile" style={{background: l.tint, color: l.iconInk}}><i className={l.icon}></i></span>
                                 <div style={{flex: 1, minWidth: 0}}><div className="sp-row-title">{l.label}</div><div className="sp-row-sub">{l.hint}</div></div>
-                                <b style={{color: l.ink}}>{sg(l.v)}</b>
+                                <b style={{color: l.ink}}>{l.v}</b>
                             </div>
                         ))}
-                        <div className="sp-growth-net"><span>Net change</span><b style={{color: sel.c.chg < 0 ? '#be123c' : '#047857'}}>{sg(sel.c.chg)}</b></div>
+                        <div className="sp-growth-net"><span>Value at end</span><b>{fmt0(sel.c.end)}</b></div>
                     </div>
                     {sel.c.rows.length > 0 && (
                         <React.Fragment>
-                            <div className="sp-group-label" style={{margin: '16px 4px 8px'}}>By asset</div>
+                            <div className="sp-group-label" style={{margin: '16px 4px 8px'}}>Change by asset</div>
                             <div className="sp-growth-sheetcard">
                                 {sel.c.rows.slice(0, 5).map(r => <div key={r.id} className="sp-growth-asset"><span>{r.name}</span><b style={{color: r.chg < 0 ? '#be123c' : '#047857'}}>{sg(r.chg)}</b></div>)}
                             </div>
