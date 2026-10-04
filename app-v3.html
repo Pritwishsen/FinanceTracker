@@ -278,8 +278,10 @@ const ValidationUtils = {
         const errors = {};
         if (!expense.amount || expense.amount <= 0) errors.amount = 'Amount must be greater than 0';
         if (!expense.date) { errors.date = 'Date is required'; } else if (expense.date > DateUtils.today()) { errors.date = 'Date cannot be in the future'; }
-        if (!expense.categoryId) errors.categoryId = 'Category is required';
-        if (!expense.subcategory) errors.subcategory = 'Subcategory is required';
+        // Category is optional for an expense excluded from spend (it never counts toward a
+        // budget), but a picked category still needs its subcategory.
+        if (!expense.categoryId && !expense.excludeFromTotals) errors.categoryId = 'Category is required';
+        if (!expense.subcategory && (expense.categoryId || !expense.excludeFromTotals)) errors.subcategory = 'Subcategory is required';
         if (expense.paidBy && expense.paidBy.trim().length > 0 && expense.paidBy.trim().length < 2) errors.paidBy = 'Name must be at least 2 characters if provided';
         return { isValid: Object.keys(errors).length === 0, errors };
     },
@@ -364,6 +366,13 @@ function matchesActiveView(value, activeView) {
     const v = (value || '').trim().toLowerCase();
     if (!v || v === 'own') return activeView.includes('own');
     return activeView.some(sel => sel !== 'own' && sel.toLowerCase() === v);
+}
+// "Exclude from Spend" / "Exclude from Income": money that isn't really the user's own
+// spending or income (paid on someone's behalf, spent from a gift, a repayment received…).
+// Such records still move bank/cash balances like any other, but every spending or income
+// TOTAL (Summary, budgets, alerts, Goals, list hero cards) skips them via this check.
+function countsInTotals(record) {
+    return !(record && record.excludeFromTotals);
 }
 // First + last initial (or just the first letter for a single-word name), e.g.
 // "Alex Morgan" -> "AM", "John" -> "J". Keeps the header pill compact regardless
@@ -2158,7 +2167,7 @@ class DataService {
         const now = new Date();
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        const monthlyExpenses = this.data.expenses.filter(expense => { const expenseDate = DateUtils.parseDateStr(expense.date); return expenseDate >= startOfMonth && expenseDate <= endOfMonth && matchesActiveView(expense.paidBy, activeView); });
+        const monthlyExpenses = this.data.expenses.filter(expense => { const expenseDate = DateUtils.parseDateStr(expense.date); return countsInTotals(expense) && expenseDate >= startOfMonth && expenseDate <= endOfMonth && matchesActiveView(expense.paidBy, activeView); });
         const budgetSummary = [];
         this.data.categories.forEach(category => {
             const categoryExpenses = monthlyExpenses.filter(expense => expense.categoryId === category.id);
@@ -3084,7 +3093,9 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             currency: editExpense ? (editExpense.currency || 'GBP') : 'GBP',
             tags: editExpense ? (editExpense.tags || []) : [],
             accountId: editExpense ? (editExpense.accountId || '') : resolveDefaultAccountId(initialPaidBy, 'GBP'),
-            isCashPayment: editExpense ? !!editExpense.isCashPayment : false
+            isCashPayment: editExpense ? !!editExpense.isCashPayment : false,
+            excludeFromTotals: editExpense ? !!editExpense.excludeFromTotals : false,
+            excludeReason: editExpense ? (editExpense.excludeReason || '') : ''
         };
     });
     const [tagInputRaw, setTagInputRaw] = useState(() => {
@@ -3212,7 +3223,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             amount: '', date: prev.date, description: '',
             categoryId: '', subcategory: '', paidBy: newPaidBy,
             currency: prev.currency, tags: [], accountId: resolveDefaultAccountId(newPaidBy, prev.currency),
-            isCashPayment: false
+            isCashPayment: false, excludeFromTotals: false, excludeReason: ''
         }));
         setTagInputRaw('');
         setErrors({});
@@ -3334,6 +3345,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         try {
             let description = formData.description.trim();
             if (!description && selectedCategory) description = selectedCategory.name + ' - ' + formData.subcategory;
+            // Excluded expenses may have no category — fall back to the reason so the row has a title.
+            if (!description && formData.excludeFromTotals) description = (formData.excludeReason || '').trim() || 'Excluded from spend';
             if (editSplitGroup) {
                 // Batch-update every existing record in the split group instead of creating new
                 // ones — shared fields (date/category/currency/etc.) apply to all, and each
@@ -3353,7 +3366,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 setIsSubmitting(false);
                 return;
             }
-            const baseExpenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: parseInt(formData.categoryId), accountId: formData.isCashPayment ? '' : formData.accountId };
+            const baseExpenseData = { ...formData, description: description, amount: parseFloat(formData.amount), categoryId: formData.categoryId ? parseInt(formData.categoryId) : null, accountId: formData.isCashPayment ? '' : formData.accountId, excludeFromTotals: !!formData.excludeFromTotals, excludeReason: formData.excludeFromTotals ? (formData.excludeReason || '').trim() : '' };
             // Repeat: create the schedule first so the expense(s) saved below can record its id
             // (recurringId). The schedule's template is the same data as before.
             const schedule = isRecurring ? DataService.addRecurring({ templateExpense: baseExpenseData, frequency: recurringFreq, endDate: recurringEndDate, type: 'expense' }) : null;
@@ -3475,8 +3488,8 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             </div>
 
             <div className="sp-catsplit-head">
-                <span className="sp-formlabel" style={{margin: 0}}>{catSplitOn ? 'Categories · ' + catRows.length : 'Category'}</span>
-                {!editSplitGroup && (
+                <span className="sp-formlabel" style={{margin: 0}}>{catSplitOn ? 'Categories · ' + catRows.length : formData.excludeFromTotals ? 'Category · optional' : 'Category'}</span>
+                {!editSplitGroup && !formData.excludeFromTotals && (
                     <button type="button" className="sp-catsplit-toggle" onClick={toggleCatSplit} aria-pressed={catSplitOn}>
                         Split across categories<span className={'sp-miniswitch' + (catSplitOn ? ' is-on' : '')}><span></span></span>
                     </button>
@@ -3527,7 +3540,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     const look = spCategoryLook(c, categories.indexOf(c));
                     const on = String(formData.categoryId) === String(c.id);
                     return (
-                        <button key={c.id} type="button" className={'sp-catchip' + (on ? ' is-active' : '') + (errors.categoryId && !formData.categoryId ? ' is-bad' : '')} onClick={() => handleInputChange('categoryId', String(c.id))}>
+                        <button key={c.id} type="button" className={'sp-catchip' + (on ? ' is-active' : '') + (errors.categoryId && !formData.categoryId ? ' is-bad' : '')} onClick={() => handleInputChange('categoryId', on && formData.excludeFromTotals ? '' : String(c.id))}>
                             <i className={look.icon} style={{color: on ? '#34d399' : look.ink}}></i>{c.name}
                         </button>
                     );
@@ -3553,6 +3566,24 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     <span>Note</span>
                     <input type="text" value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Optional" style={{width: '60%'}} />
                 </div>
+                {/* Not offered alongside a split (people / categories) — a split is shared spending by definition. */}
+                {!splitOn && !catSplitOn && (
+                    <React.Fragment>
+                        <div className="sp-formrow">
+                            <span>Exclude from Spend</span>
+                            <SpSwitch on={formData.excludeFromTotals} onToggle={() => handleInputChange('excludeFromTotals', !formData.excludeFromTotals)} label="Exclude from Spend" />
+                        </div>
+                        {formData.excludeFromTotals && (
+                            <React.Fragment>
+                                <div className="sp-formrow">
+                                    <span>Reason</span>
+                                    <input type="text" value={formData.excludeReason} maxLength={80} onChange={(e) => handleInputChange('excludeReason', e.target.value)} placeholder="e.g. Paid for Madhu, birthday gift" style={{width: '60%'}} />
+                                </div>
+                                <div className="sp-hint" style={{padding: '0 0 10px'}}>Still taken from the account or cash below, but not counted in spending, budgets or trends.</div>
+                            </React.Fragment>
+                        )}
+                    </React.Fragment>
+                )}
                 <div className="sp-formblock">
                     <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
                         <span style={{fontSize: '14px', color: '#64748b', fontWeight: 600}}>Tags</span>
@@ -3609,7 +3640,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
             )}
 
             <div className="sp-tiles2">
-                {!editSplitGroup && (
+                {!editSplitGroup && !formData.excludeFromTotals && (
                     <button type="button" className={'sp-toggletile' + (isSplit ? ' is-on' : '')} onClick={() => {
                         const val = !isSplit;
                         setIsSplit(val);
@@ -3790,6 +3821,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
     // Payment filter: '' | 'card' | 'cash' | 'unlinked' (unlinked = no bank and not cash).
     const [fPay, setFPay] = useState(_f0.pay || '');
+    // Spend filter: '' | 'counted' | 'excluded' (Exclude from Spend).
+    const [fCount, setFCount] = useState(_f0.counted || '');
     const [visibleCount, setVisibleCount] = useState(50);
     const [openMenuId, setOpenMenuId] = useState(null);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
@@ -3800,8 +3833,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
 
     // Persist filters for the session so leaving and returning to this screen keeps them.
     useEffect(() => {
-        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, search: searchTerm, tags: filterTags, syncConflict: filterSyncConflict, pay: fPay });
-    }, [filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, datePreset, searchTerm, filterTags, filterSyncConflict, fPay]);
+        FilterMemory.save('expenses', { category: filterCategory, subcategory: filterSubcategory, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, search: searchTerm, tags: filterTags, syncConflict: filterSyncConflict, pay: fPay, counted: fCount });
+    }, [filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, datePreset, searchTerm, filterTags, filterSyncConflict, fPay, fCount]);
 
     useEffect(() => {
         if (!openMenuId) return;
@@ -3836,8 +3869,9 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
         if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(e => (e.description || '').toLowerCase().includes(st) || (e.tags || []).some(tag => tag.includes(st))); }
         if (filterTags.length > 0) filtered = filtered.filter(e => filterTags.every(ft => (e.tags || []).includes(ft)));
         if (fPay) filtered = filtered.filter(e => spPayKind(e) === fPay);
+        if (fCount) filtered = filtered.filter(e => countsInTotals(e) === (fCount === 'counted'));
         return filtered;
-    }, [expenses, filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, filterTags, fPay]);
+    }, [expenses, filterCategory, filterSubcategory, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, filterTags, fPay, fCount]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredExpenses]);
 
@@ -3919,7 +3953,8 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const monthKey = today.slice(0, 7);
     const scheduleIds = new Set(DataService.getRecurring().map(r => r.id));
     const allTagList = [...new Set(expenses.flatMap(e => e.tags || []))].sort();
-    const dayTotals = filteredExpenses.reduce((acc, e) => { const k = (e.date || '').substring(0, 10); acc[k] = (acc[k] || 0) + CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency); return acc; }, {});
+    // Day headers show that day's spend, so Exclude from Spend records add 0.
+    const dayTotals = filteredExpenses.reduce((acc, e) => { const k = (e.date || '').substring(0, 10); acc[k] = (acc[k] || 0) + (countsInTotals(e) ? CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency) : 0); return acc; }, {});
     const personName = (key) => key === '__mine__' ? 'You' : key;
     const presetRange = (key) => {
         if (key === 'month') return [monthKey + '-01', today];
@@ -3930,11 +3965,12 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     };
     const applyPreset = (key) => { const [f, t] = presetRange(key); setDatePreset(key); setFilterDateFrom(f); setFilterDateTo(t); };
     const PRESET_LABELS = { all: 'All time', month: 'This month', last: 'Last month', '30d': 'Last 30 days', custom: 'Custom' };
-    const clearAll = () => { setFilterCategory(''); setFilterSubcategory(''); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterTags([]); setFilterSyncConflict(false); setFPay(''); };
+    const clearAll = () => { setFilterCategory(''); setFilterSubcategory(''); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterTags([]); setFilterSyncConflict(false); setFPay(''); setFCount(''); };
     const PAY_LABELS = { card: 'Card', cash: 'Cash', unlinked: 'Unlinked' };
     const unlinkedCount = expenses.filter(e => spPayKind(e) === 'unlinked').length;
     const activeChips = [];
     if (fPay) activeChips.push({ key: 'pay', label: PAY_LABELS[fPay], onRemove: () => setFPay('') });
+    if (fCount) activeChips.push({ key: 'counted', label: fCount === 'counted' ? 'Counted in spend' : 'Excluded from spend', onRemove: () => setFCount('') });
     if (filterCategory && selectedCategory) activeChips.push({ key: 'cat', label: selectedCategory.name, onRemove: () => handleCategoryFilter('') });
     if (filterSubcategory) activeChips.push({ key: 'sub', label: filterSubcategory, onRemove: () => setFilterSubcategory('') });
     filterPersons.forEach(p => activeChips.push({ key: 'p:' + p, label: personName(p), onRemove: () => setFilterPersons(prev => prev.filter(x => x !== p)) }));
@@ -3946,8 +3982,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     // whatever the filters), labelled with the date range in effect. The list's default
     // date range is "All time", so that's also the card's default.
     const dateChip = activeChips.find(c => c.key === 'date');
+    // Listed but excluded records (Exclude from Spend) get their own pill instead of the total.
     const heroExpenses = filteredExpenses;
-    const heroSpent = heroExpenses.reduce((s, e) => s + CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
+    const toDefault = (e) => CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency);
+    const heroSpent = heroExpenses.filter(countsInTotals).reduce((s, e) => s + toDefault(e), 0);
+    const heroExcluded = heroExpenses.filter(e => !countsInTotals(e)).reduce((s, e) => s + toDefault(e), 0);
     const heroSplit = heroExpenses.filter(e => e.isSplitRecord).length;
     const heroOtherFilters = !!searchTerm || activeChips.some(c => c.key !== 'date');
     const heroLabel = 'Spent · ' + (dateChip ? dateChip.label : PRESET_LABELS.all) + (heroOtherFilters ? ' · filtered' : '');
@@ -3979,6 +4018,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 <div className="sp-hero-pills">
                     <span className="sp-hero-pill is-green">{heroExpenses.length} expense{heroExpenses.length === 1 ? '' : 's'}</span>
                     {heroSplit > 0 && <span className="sp-hero-pill">{heroSplit} split</span>}
+                    {heroExcluded > 0 && <span className="sp-hero-pill">{ValidationUtils.formatCurrency(heroExcluded, defaultCurrency)} excluded</span>}
                 </div>
             </div>
             <div className="sp-search">
@@ -4005,7 +4045,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 <div key={group.date} className="sp-group">
                     <div className="sp-group-head">
                         <span className="sp-group-label">{spDayLabel(group.date)}</span>
-                        <span className="sp-group-total">{ValidationUtils.formatCurrency(dayTotals[group.date] || group.total, defaultCurrency)}</span>
+                        <span className="sp-group-total">{ValidationUtils.formatCurrency(dayTotals[group.date] ?? group.total, defaultCurrency)}</span>
                     </div>
                     <div className="sp-listcard">
                         {group.items.map(expense => {
@@ -4033,7 +4073,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                                     ? <span className="sp-paybadge is-cash"><i className="fas fa-money-bill-wave" style={{fontSize: '9px'}}></i>Cash</span>
                                                     : bankName ? <span className="sp-paybadge is-card"><i className="fas fa-credit-card" style={{fontSize: '9px'}}></i>{bankName}</span>
                                                     : <span className="sp-paybadge is-unlinked"><i className="fas fa-link-slash" style={{fontSize: '9px'}}></i>Unlinked</span>}
-                                                <span className="sp-item-sub">{[cat ? cat.name : 'Unknown Category', expense.subcategory].filter(Boolean).join(' · ')}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
+                                                <span className="sp-item-sub">{(cat || !expense.excludeFromTotals ? [cat ? cat.name : 'Unknown Category', expense.subcategory] : ['No category']).filter(Boolean).join(' · ')}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
                                             </div>
                                         </div>
                                         <div className="sp-item-right">
@@ -4041,6 +4081,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                             <div className="sp-item-right-meta">
                                                 {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{spAvatarLetter(whoLabel(expense))}</span>{whoLabel(expense)}</span>}
                                                 {expense.isSplitRecord && <span className="sp-minibadge"><i className="fas fa-users" style={{fontSize: '9px'}}></i>Split</span>}
+                                                {!countsInTotals(expense) && <span className="sp-minibadge" title={expense.excludeReason ? 'Excluded from spend · ' + expense.excludeReason : 'Excluded from spend'}><i className="fas fa-eye-slash" style={{fontSize: '9px'}}></i>Excluded</span>}
                                             </div>
                                         </div>
                                     </div>
@@ -4093,6 +4134,12 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                             <button key={k || 'all'} type="button" className={'sp-sheetchip' + (fPay === k ? ' is-active' : '')} onClick={() => setFPay(k)}>
                                 {label}{k === 'unlinked' && unlinkedCount > 0 && <span className="sp-sheetchip-count">{unlinkedCount}</span>}
                             </button>
+                        ))}
+                    </div>
+                    <div className="sp-labelrow"><span>Spend</span><span>Excluded = Exclude from Spend</span></div>
+                    <div className="sp-chipgrid">
+                        {[['', 'All'], ['counted', 'Counted'], ['excluded', 'Excluded']].map(([k, label]) => (
+                            <button key={k || 'all'} type="button" className={'sp-sheetchip' + (fCount === k ? ' is-active' : '')} onClick={() => setFCount(k)}>{label}</button>
                         ))}
                     </div>
                     <div className="sp-labelrow"><span>Category</span></div>
@@ -4709,6 +4756,8 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
     const [filterDateTo, setFilterDateTo] = useState(_f0.dateTo || '');
     const [datePreset, setDatePreset] = useState(() => _f0.datePreset || ((_f0.dateFrom || _f0.dateTo) ? 'custom' : 'all'));
     const [filterSyncConflict, setFilterSyncConflict] = useState(!!_f0.syncConflict);
+    // Income filter: '' | 'counted' | 'excluded' (Exclude from Income).
+    const [fCount, setFCount] = useState(_f0.counted || '');
     const [visibleCount, setVisibleCount] = useState(50);
     const [showConflictDetail, setShowConflictDetail] = useState(null);
     // Redesign (Phase 3) — layout state only.
@@ -4737,8 +4786,8 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
 
     // Persist filters for the session (see FilterMemory) so navigating away keeps them.
     useEffect(() => {
-        FilterMemory.save('income', { search: searchTerm, sources: filterSources, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, syncConflict: filterSyncConflict });
-    }, [searchTerm, filterSources, filterPersons, filterDateFrom, filterDateTo, datePreset, filterSyncConflict]);
+        FilterMemory.save('income', { search: searchTerm, sources: filterSources, persons: filterPersons, dateFrom: filterDateFrom, dateTo: filterDateTo, datePreset, syncConflict: filterSyncConflict, counted: fCount });
+    }, [searchTerm, filterSources, filterPersons, filterDateFrom, filterDateTo, datePreset, filterSyncConflict, fCount]);
 
     // Re-defaults the Account field to the newly-selected person's primary account (only when
     // its currency matches formData.currency) whenever "Who's Income" or the currency changes —
@@ -4756,13 +4805,13 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
         setFormData(prev => ({ ...prev, [field]: normalized }));
         if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
     };
-    const blankForm = (paidBy) => ({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy, currency: 'GBP', accountId: resolveDefaultAccountId(paidBy || 'own', 'GBP'), tags: [] });
+    const blankForm = (paidBy) => ({ amount: '', date: DateUtils.today(), source: '', description: '', paidBy, currency: 'GBP', accountId: resolveDefaultAccountId(paidBy || 'own', 'GBP'), tags: [], excludeFromTotals: false, excludeReason: '' });
     const handleSubmit = (e) => {
         e.preventDefault(); setIsSubmitting(true);
         const validation = ValidationUtils.validateIncome({ ...formData, amount: parseFloat(formData.amount) });
         if (!validation.isValid) { setErrors(validation.errors); setIsSubmitting(false); return; }
         try {
-            const incomeData = { ...formData, amount: parseFloat(formData.amount) };
+            const incomeData = { ...formData, amount: parseFloat(formData.amount), excludeFromTotals: !!formData.excludeFromTotals, excludeReason: formData.excludeFromTotals ? (formData.excludeReason || '').trim() : '' };
             if (editingIncome) { DataService.updateIncome(editingIncome.id, incomeData); }
             else {
                 // Repeat: create the schedule first so the income saved here records its id.
@@ -4774,7 +4823,7 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
         } catch (error) { setErrors({ general: 'Failed to save income. Please try again.' }); }
         setIsSubmitting(false);
     };
-    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setShowForm(true); setErrors({}); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '', tags: incomeItem.tags || [] }); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+    const handleEdit = (incomeItem) => { setEditingIncome(incomeItem); setShowForm(true); setErrors({}); setFormData({ amount: incomeItem.amount.toString(), date: incomeItem.date, source: incomeItem.source, description: incomeItem.description || '', paidBy: incomeItem.paidBy || '', currency: incomeItem.currency || 'GBP', accountId: incomeItem.accountId || '', tags: incomeItem.tags || [], excludeFromTotals: !!incomeItem.excludeFromTotals, excludeReason: incomeItem.excludeReason || '' }); window.scrollTo({ top: 0, behavior: 'smooth' }); };
     const handleDelete = (incomeId) => { DataService.deleteIncome(incomeId); setShowDeleteConfirm(null); onUpdate(); };
     // A copy isn't generated by the original's repeat schedule, so it doesn't inherit the link.
     const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; delete duplicate.recurringId; DataService.addIncome(duplicate); onUpdate(); };
@@ -4790,8 +4839,9 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
         if (filterDateTo) filtered = filtered.filter(item => (item.date || '').substring(0, 10) <= filterDateTo);
         if (filterSyncConflict) filtered = filtered.filter(item => !!syncConflicts[String(item.id)]);
         if (searchTerm) { const st = searchTerm.toLowerCase(); filtered = filtered.filter(item => (item.description || '').toLowerCase().includes(st) || (item.source || '').toLowerCase().includes(st) || (item.tags || []).some(tag => tag.includes(st))); }
+        if (fCount) filtered = filtered.filter(item => countsInTotals(item) === (fCount === 'counted'));
         return filtered;
-    }, [income, filterSources, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm]);
+    }, [income, filterSources, filterPersons, filterDateFrom, filterDateTo, filterSyncConflict, syncConflicts, searchTerm, fCount]);
 
     useEffect(() => { setVisibleCount(50); }, [filteredIncome]);
 
@@ -4848,15 +4898,19 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
     const applyPreset = (key) => { const [f, t] = presetRange(key); setDatePreset(key); setFilterDateFrom(f); setFilterDateTo(t); };
     const PRESET_LABELS = { all: 'All time', month: 'This month', last: 'Last month', '30d': 'Last 30 days', custom: 'Custom' };
     const personName = (key) => key === '__mine__' ? 'You' : key;
-    const clearAll = () => { setFilterSources([]); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterSyncConflict(false); };
+    const clearAll = () => { setFilterSources([]); setFilterPersons([]); setFilterDateFrom(''); setFilterDateTo(''); setDatePreset('all'); setSearchTerm(''); setFilterSyncConflict(false); setFCount(''); };
     const activeChips = [];
     filterPersons.forEach(p => activeChips.push({ key: 'p:' + p, label: personName(p), onRemove: () => setFilterPersons(prev => prev.filter(x => x !== p)) }));
     filterSources.forEach(s => activeChips.push({ key: 's:' + s, label: s, onRemove: () => setFilterSources(prev => prev.filter(x => x !== s)) }));
     if (datePreset !== 'all' && (filterDateFrom || filterDateTo)) activeChips.push({ key: 'date', label: datePreset === 'custom' ? [filterDateFrom && ValidationUtils.formatDate(filterDateFrom), filterDateTo && ValidationUtils.formatDate(filterDateTo)].filter(Boolean).join(' – ') : PRESET_LABELS[datePreset], onRemove: () => applyPreset('all') });
     if (filterSyncConflict) activeChips.push({ key: 'cf', label: 'Sync conflicts', onRemove: () => setFilterSyncConflict(false) });
+    if (fCount) activeChips.push({ key: 'counted', label: fCount === 'counted' ? 'Counted as income' : 'Excluded from income', onRemove: () => setFCount('') });
     // Like the Expenses card: totals exactly what the list shows, labelled with the date
     // range in effect (it used to total all income regardless of filters).
-    const totalIncome = filteredIncome.reduce((sum, item) => sum + CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP'), 0);
+    // Exclude from Income records stay listed but get their own pill instead of the total.
+    const incToDefault = (item) => CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP');
+    const totalIncome = filteredIncome.filter(countsInTotals).reduce((sum, item) => sum + incToDefault(item), 0);
+    const excludedIncome = filteredIncome.filter(item => !countsInTotals(item)).reduce((sum, item) => sum + incToDefault(item), 0);
     const heroDateChip = activeChips.find(c => c.key === 'date');
     const heroOtherFilters = !!searchTerm || activeChips.some(c => c.key !== 'date');
     const heroLabel = 'Received · ' + (heroDateChip ? heroDateChip.label : PRESET_LABELS.all) + (heroOtherFilters ? ' · filtered' : '');
@@ -4878,7 +4932,7 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
             <div className="sp-hero" style={{borderRadius: '22px', padding: '18px'}}>
                 <div className="sp-hero-label">{heroLabel}</div>
                 <div className="sp-hero-value">{ValidationUtils.formatCurrency(totalIncome, defaultCurrency || 'GBP')}</div>
-                <div className="sp-hero-pills" style={{marginTop: '10px'}}><span className="sp-hero-pill is-green">{filteredIncome.length} entr{filteredIncome.length === 1 ? 'y' : 'ies'}</span></div>
+                <div className="sp-hero-pills" style={{marginTop: '10px'}}><span className="sp-hero-pill is-green">{filteredIncome.length} entr{filteredIncome.length === 1 ? 'y' : 'ies'}</span>{excludedIncome > 0 && <span className="sp-hero-pill">{ValidationUtils.formatCurrency(excludedIncome, defaultCurrency || 'GBP')} excluded</span>}</div>
             </div>
 
             {formOpen && (
@@ -4901,6 +4955,19 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                         <span>Note</span>
                         <input type="text" value={formData.description} onChange={(e) => handleInputChange('description', e.target.value)} placeholder="Optional" style={{width: '60%'}} />
                     </div>
+                    <div className="sp-formrow">
+                        <span>Exclude from Income</span>
+                        <SpSwitch on={!!formData.excludeFromTotals} onToggle={() => handleInputChange('excludeFromTotals', !formData.excludeFromTotals)} label="Exclude from Income" />
+                    </div>
+                    {formData.excludeFromTotals && (
+                        <React.Fragment>
+                            <div className="sp-formrow">
+                                <span>Reason</span>
+                                <input type="text" value={formData.excludeReason || ''} maxLength={80} onChange={(e) => handleInputChange('excludeReason', e.target.value)} placeholder="e.g. Repaid by Madhu, birthday gift" style={{width: '60%'}} />
+                            </div>
+                            <div className="sp-hint" style={{padding: '0 0 10px'}}>Still added to the account or cash below, but not counted as income.</div>
+                        </React.Fragment>
+                    )}
                     <div className="sp-formblock">
                         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
                             <span style={{fontSize: '14px', color: '#64748b', fontWeight: 600}}>Tags</span>
@@ -5030,7 +5097,8 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                                         ? <span className="sp-paybadge is-card"><i className="fas fa-building-columns" style={{fontSize: '9px'}}></i>{bankName}</span>
                                         : <span className="sp-paybadge is-cash"><i className="fas fa-money-bill-wave" style={{fontSize: '9px'}}></i>Cash</span>}
                                     {schedule && <span className="sp-paybadge" style={{background: '#ede9fe', color: '#6d28d9'}}><i className="fas fa-rotate" style={{fontSize: '9px'}}></i>{freqLabel(schedule.frequency)}</span>}
-                                    <span className="sp-item-sub">{ValidationUtils.formatDate(item.date)}{item.description ? ' · ' + item.description : ''}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
+                                    {!countsInTotals(item) && <span className="sp-paybadge" style={{background: '#f1f5f9', color: '#475569'}} title={item.excludeReason ? 'Excluded from income · ' + item.excludeReason : 'Excluded from income'}><i className="fas fa-eye-slash" style={{fontSize: '9px'}}></i>Excluded</span>}
+                                    <span className="sp-item-sub">{ValidationUtils.formatDate(item.date)}{item.description ? ' · ' + item.description : ''}{!countsInTotals(item) && item.excludeReason ? ' · ' + item.excludeReason : ''}{tags.length > 0 && <span className="sp-item-tags"> {tags.map(t => '#' + t).join(' ')}</span>}</span>
                                 </div>
                             </div>
                             <div style={{fontSize: '15px', fontWeight: 800, color: '#16a34a', whiteSpace: 'nowrap'}}>+{ValidationUtils.formatCurrency(item.amount, item.currency || 'GBP')}</div>
@@ -5087,6 +5155,12 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                             </div>
                         </React.Fragment>
                     )}
+                    <div className="sp-labelrow"><span>Income</span><span>Excluded = Exclude from Income</span></div>
+                    <div className="sp-chipgrid">
+                        {[['', 'All'], ['counted', 'Counted'], ['excluded', 'Excluded']].map(([k, label]) => (
+                            <button key={k || 'all'} type="button" className={'sp-sheetchip' + (fCount === k ? ' is-active' : '')} onClick={() => setFCount(k)}>{label}</button>
+                        ))}
+                    </div>
                     <div className="sp-labelrow"><span>Date</span></div>
                     <div className="sp-chipgrid" style={{marginBottom: '10px'}}>
                         {Object.keys(PRESET_LABELS).map(k => <button key={k} type="button" className={'sp-sheetchip' + (datePreset === k ? ' is-active' : '')} onClick={() => applyPreset(k)}>{PRESET_LABELS[k]}</button>)}
@@ -5248,7 +5322,9 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
     useEffect(() => {
         let cancelled = false;
         const convertAll = async () => {
-            const newExpenses = await Promise.all(expenses.map(async (exp) => {
+            // Everything Summary shows is a total (spent, income, surplus, chart, budgets,
+            // breakdowns), so records excluded from spend/income are dropped right here.
+            const newExpenses = await Promise.all(expenses.filter(countsInTotals).map(async (exp) => {
                 const expCurrency = exp.currency || 'GBP';
                 if (expCurrency === defaultCurrency) return exp;
                 try {
@@ -5258,7 +5334,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                     return { ...exp, amount: convertAmountSync(exp.amount, expCurrency, defaultCurrency), currency: defaultCurrency };
                 }
             }));
-            const newIncome = await Promise.all(income.map(async (inc) => {
+            const newIncome = await Promise.all(income.filter(countsInTotals).map(async (inc) => {
                 const incCurrency = inc.currency || 'GBP';
                 if (incCurrency === defaultCurrency) return inc;
                 try {
@@ -7561,8 +7637,8 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
             const now = new Date();
             const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
             const [expenses, income] = await Promise.all([DataService.getExpenses(), DataService.getIncome()]);
-            const monthExp = expenses.filter(e => DateUtils.parseDateStr(e.date) >= startOfMonth).reduce((s, e) => s + e.amount, 0);
-            const monthInc = income.filter(i => DateUtils.parseDateStr(i.date) >= startOfMonth).reduce((s, i) => s + i.amount, 0);
+            const monthExp = expenses.filter(e => countsInTotals(e) && DateUtils.parseDateStr(e.date) >= startOfMonth).reduce((s, e) => s + e.amount, 0);
+            const monthInc = income.filter(i => countsInTotals(i) && DateUtils.parseDateStr(i.date) >= startOfMonth).reduce((s, i) => s + i.amount, 0);
             setMonthlyNet(Math.max(0, monthInc - monthExp));
         };
         calcMonthlyNet();
@@ -9250,10 +9326,10 @@ function ExportData({ expenses, income, categories, netWorthItems = [], assetCat
             ...netWorthItems.filter(i => i.type === 'liability'),
             ...DataService.getBankLiabilityItems(activeView),
         ] : [];
-        const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Payment Method','Bank','Tags','Notes'];
-        const incHeaders = ['Date','Source of Income','Currency','Amount','Description',"Who's Income",'Bank','Tags'];
-        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', e.isCashPayment ? 'Cash' : e.accountId ? 'Bank' : '', getBankName(e.accountId), (e.tags || []).join(';'), e.notes || '']);
-        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.description || '', i.paidBy || '', getBankName(i.accountId), (i.tags || []).join(';')]);
+        const expHeaders = ['Date','Description','Amount','Currency','Category','Sub Category','Paid By','Payment Method','Bank','Tags','Notes','Excluded from Spend','Exclude Reason'];
+        const incHeaders = ['Date','Source of Income','Currency','Amount','Description',"Who's Income",'Bank','Tags','Excluded from Income','Exclude Reason'];
+        const expRows = filteredExp.map(e => [e.date, e.description || '', e.amount, e.currency || defaultCurrency, getCatName(e.categoryId), e.subcategory || '', e.paidBy || '', e.isCashPayment ? 'Cash' : e.accountId ? 'Bank' : '', getBankName(e.accountId), (e.tags || []).join(';'), e.notes || '', countsInTotals(e) ? '' : 'Yes', countsInTotals(e) ? '' : (e.excludeReason || '')]);
+        const incRows = filteredInc.map(i => [i.date, i.source || '', i.currency || defaultCurrency, i.amount, i.description || '', i.paidBy || '', getBankName(i.accountId), (i.tags || []).join(';'), countsInTotals(i) ? '' : 'Yes', countsInTotals(i) ? '' : (i.excludeReason || '')]);
         const assetRows = filteredAssets.map(nwRow);
         const liabRows = filteredLiab.map(nwRow);
         const exportJobs = [
