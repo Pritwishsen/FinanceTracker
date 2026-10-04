@@ -3042,6 +3042,7 @@ function spCatGroupForEdit(group, people) {
         const sum = sb.recs.reduce((t, r) => t + (Number(r.amount) || 0), 0) || 1;
         participants = sb.recs.map(r => r.id === payer.id || (!sb.recs.some(x => x.id === payer.id) && isOwn(r))
             ? { id: 'me', name: r.paidBy || 'Me' }
+            : isOwn(r) ? { id: 'own', name: '' }
             : { id: (people.find(p => p.name === r.paidBy) || {}).id || 'x_' + r.id, name: r.paidBy });
         const shares = sb.recs.map(r => Number(r.amount) || 0);
         if (shares.every(v => Math.abs(v - shares[0]) <= 0.011)) splitMethod = 'equal';
@@ -3113,6 +3114,16 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     });
 
     useEffect(() => { setPeople(DataService.getPeople()); }, []);
+    // The payer slot follows "Who's Expense", so if it changes to someone already ticked as
+    // a sharer, drop that sharer — otherwise the same person would get two shares.
+    useEffect(() => {
+        if (editSplitGroup) return;
+        const dup = s => s.id !== 'me' && (formData.paidBy ? s.id !== 'own' && s.name === formData.paidBy : s.id === 'own');
+        if (!splitParticipants.some(dup)) return;
+        const removed = splitParticipants.filter(dup).map(s => s.id);
+        setSplitParticipants(prev => prev.filter(s => !dup(s)));
+        setCustomAmounts(prev => { const n = { ...prev }; removed.forEach(id => delete n[id]); return n; });
+    }, [formData.paidBy]);
     useEffect(() => { if (!editExpense && !editSplitGroup && !catEdit) { DataService.getRecentlyUsedCategories(3).then(setRecentlyUsed); } }, []);
     useEffect(() => { if (!editExpense && !editSplitGroup && !catEdit) { DataService.getSettings().then(s => { if (s && s.currency) setFormData(prev => prev.currency === 'GBP' ? { ...prev, currency: s.currency } : prev); }); } }, []);
     // Re-defaults the Account field to the newly-selected person's primary account (only when
@@ -3163,8 +3174,17 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         return false;
     };
 
-    const resolveSplitParticipantPaidBy = (p) =>
-        isPayerParticipant(p) ? resolveActiveViewValue(activeView) : p.name;
+    // The payer's share belongs to whoever the expense is for ("Who's Expense"), which isn't
+    // necessarily the signed-in user or the first Active View entry — resolving it from the
+    // active view moved e.g. Madhu's share onto "own" when splitting Madhu's expense. An
+    // existing split group keeps each record's own paidBy (participants are fixed there).
+    const resolveSplitParticipantPaidBy = (p) => {
+        if (editSplitGroup) {
+            const original = editSplitGroup.find(r => r.id === p.id);
+            return original ? (original.paidBy || '') : p.name;
+        }
+        return p.id === 'me' ? (formData.paidBy || '') : p.name;
+    };
 
     // The payer keeps whatever account they explicitly chose in the form's own Account
     // field — recomputing it from their primary account here silently overrode a manual
@@ -3420,7 +3440,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     const splitDiff = Math.round((totalAmount - customTotal) * 100) / 100;
     const splitUnbalanced = splitOn && splitMethod === 'custom' && totalAmount > 0 && Math.abs(splitDiff) > 0.01;
     const fmtAmt = (v) => ValidationUtils.formatCurrency(v, formData.currency);
-    const participantLabel = (p) => (p.id === 'me' ? 'You' : p.name);
+    // 'me' is the payer slot (whoever the expense is for); 'own' is the signed-in user added
+    // as a sharer of someone else's expense. Both display from live data, not the stored name.
+    const payerLabel = formData.paidBy || 'You';
+    const participantLabel = (p) => (p.id === 'me' ? payerLabel : p.id === 'own' ? 'You' : p.name);
+    const participantColorKey = (p) => (p.id === 'me' ? (formData.paidBy || 'own') : p.id === 'own' ? 'own' : p.name);
     const accounts = DataService.getAccountsForPerson(formData.paidBy || 'own');
     const firstRepeat = computeNextDue(new Date(), recurringFreq);
     const upcoming = [1, 2, 3].reduce((acc) => { acc.push(computeNextDue(acc[acc.length - 1], recurringFreq)); return acc; }, [firstRepeat]).slice(1);
@@ -3649,9 +3673,24 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                             <span key={p.id} className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{spAvatarLetter(participantLabel(p))}</span>{participantLabel(p)}</span>
                         )) : (
                             <React.Fragment>
-                                <span className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{spAvatarLetter('You')}</span>You</span>
-                                {/* The signed-in user's own (systemManaged) person record is already the fixed "You" chip. */}
-                                {people.filter(person => !person.systemManaged && !splitParticipants.some(s => s.id === 'me' && s.name === person.name)).map(person => {
+                                {/* Fixed chip = whoever the expense is for. When that's someone else,
+                                    "You" becomes an optional sharer like any other person. */}
+                                <span className="sp-personchip is-on is-fixed"><span className="sp-personchip-av">{spAvatarLetter(payerLabel)}</span>{payerLabel}</span>
+                                {formData.paidBy && (() => {
+                                    const on = splitParticipants.some(s => s.id === 'own');
+                                    return (
+                                        <button type="button" className={'sp-personchip' + (on ? ' is-on' : '')} onClick={() => {
+                                            if (on) {
+                                                setSplitParticipants(prev => prev.filter(x => x.id !== 'own'));
+                                                setCustomAmounts(prev => { const n = { ...prev }; delete n.own; return n; });
+                                            } else setSplitParticipants(prev => [...prev, { id: 'own', name: '' }]);
+                                        }}>
+                                            <span className="sp-personchip-av">{spAvatarLetter('You')}</span>You{on && <i className="fas fa-check" style={{fontSize: '10px'}}></i>}
+                                        </button>
+                                    );
+                                })()}
+                                {/* The signed-in user's own (systemManaged) person record is the "You" chip. */}
+                                {people.filter(person => !person.systemManaged && person.name !== formData.paidBy).map(person => {
                                     const on = splitParticipants.some(s => s.id !== 'me' && s.name === person.name);
                                     return (
                                         <button key={person.id} type="button" className={'sp-personchip' + (on ? ' is-on' : '')} onClick={() => {
@@ -3675,7 +3714,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     </div>
                     <div style={{marginTop: '10px'}}>
                         {splitParticipants.map((p, i) => {
-                            const c = spPersonColor(p.id === 'me' ? 'own' : p.name, people);
+                            const c = spPersonColor(participantColorKey(p), people);
                             return (
                                 <div key={p.id} className="sp-splitrow">
                                     <span className="sp-tile" style={{width: '30px', height: '30px', borderRadius: '10px', background: c[0], color: c[1], fontWeight: 800, fontSize: '12px'}}>{spAvatarLetter(participantLabel(p))}</span>
@@ -3879,9 +3918,6 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     const today = DateUtils.today();
     const monthKey = today.slice(0, 7);
     const scheduleIds = new Set(DataService.getRecurring().map(r => r.id));
-    const monthExpenses = expenses.filter(e => (e.date || '').slice(0, 7) === monthKey);
-    const monthSpent = monthExpenses.reduce((s, e) => s + CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
-    const monthSplit = monthExpenses.filter(e => e.isSplitRecord).length;
     const allTagList = [...new Set(expenses.flatMap(e => e.tags || []))].sort();
     const dayTotals = filteredExpenses.reduce((acc, e) => { const k = (e.date || '').substring(0, 10); acc[k] = (acc[k] || 0) + CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency); return acc; }, {});
     const personName = (key) => key === '__mine__' ? 'You' : key;
@@ -3906,6 +3942,15 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
     if (datePreset !== 'all' && (filterDateFrom || filterDateTo)) activeChips.push({ key: 'date', label: datePreset === 'custom' ? [filterDateFrom && ValidationUtils.formatDate(filterDateFrom), filterDateTo && ValidationUtils.formatDate(filterDateTo)].filter(Boolean).join(' – ') : PRESET_LABELS[datePreset], onRemove: () => applyPreset('all') });
     if (filterSyncConflict) activeChips.push({ key: 'cf', label: 'Sync conflicts', onRemove: () => setFilterSyncConflict(false) });
     const filterCount = activeChips.length;
+    // The hero card totals exactly what the list shows (it used to always show this month,
+    // whatever the filters), labelled with the date range in effect. The list's default
+    // date range is "All time", so that's also the card's default.
+    const dateChip = activeChips.find(c => c.key === 'date');
+    const heroExpenses = filteredExpenses;
+    const heroSpent = heroExpenses.reduce((s, e) => s + CurrencyService.convertToDefaultSync(e.amount, e.currency || 'GBP', defaultCurrency), 0);
+    const heroSplit = heroExpenses.filter(e => e.isSplitRecord).length;
+    const heroOtherFilters = !!searchTerm || activeChips.some(c => c.key !== 'date');
+    const heroLabel = 'Spent · ' + (dateChip ? dateChip.label : PRESET_LABELS.all) + (heroOtherFilters ? ' · filtered' : '');
 
     const deleteSchedule = deletingExpense && deletingExpense.recurringId ? DataService.getRecurring().find(r => r.id === deletingExpense.recurringId) : null;
     const closeDelete = () => { setShowDeleteConfirm(null); setStopRepeat(false); };
@@ -3929,11 +3974,11 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                 </button>
             </div>
             <div className="sp-hero">
-                <div className="sp-hero-label">Spent this month</div>
-                <div className="sp-hero-value">{ValidationUtils.formatCurrency(monthSpent, defaultCurrency)}</div>
+                <div className="sp-hero-label">{heroLabel}</div>
+                <div className="sp-hero-value">{ValidationUtils.formatCurrency(heroSpent, defaultCurrency)}</div>
                 <div className="sp-hero-pills">
-                    <span className="sp-hero-pill is-green">{monthExpenses.length} expense{monthExpenses.length === 1 ? '' : 's'}</span>
-                    {monthSplit > 0 && <span className="sp-hero-pill">{monthSplit} split</span>}
+                    <span className="sp-hero-pill is-green">{heroExpenses.length} expense{heroExpenses.length === 1 ? '' : 's'}</span>
+                    {heroSplit > 0 && <span className="sp-hero-pill">{heroSplit} split</span>}
                 </div>
             </div>
             <div className="sp-search">
@@ -4734,8 +4779,6 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
     // A copy isn't generated by the original's repeat schedule, so it doesn't inherit the link.
     const handleDuplicateIncome = (incomeItem) => { const duplicate = { ...incomeItem, date: DateUtils.today() }; delete duplicate.id; delete duplicate.createdAt; delete duplicate.recurringId; DataService.addIncome(duplicate); onUpdate(); };
     const handleCancelEdit = () => { setEditingIncome(null); setShowForm(false); setFormData(blankForm('')); setErrors({}); setTagError(''); setIsRecurring(false); };
-    const totalIncome = income.reduce((sum, item) => sum + CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP'), 0);
-
     const filteredIncome = useMemo(() => {
         let filtered = income;
         if (filterSources.length) filtered = filtered.filter(item => filterSources.includes(item.source));
@@ -4811,6 +4854,12 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
     filterSources.forEach(s => activeChips.push({ key: 's:' + s, label: s, onRemove: () => setFilterSources(prev => prev.filter(x => x !== s)) }));
     if (datePreset !== 'all' && (filterDateFrom || filterDateTo)) activeChips.push({ key: 'date', label: datePreset === 'custom' ? [filterDateFrom && ValidationUtils.formatDate(filterDateFrom), filterDateTo && ValidationUtils.formatDate(filterDateTo)].filter(Boolean).join(' – ') : PRESET_LABELS[datePreset], onRemove: () => applyPreset('all') });
     if (filterSyncConflict) activeChips.push({ key: 'cf', label: 'Sync conflicts', onRemove: () => setFilterSyncConflict(false) });
+    // Like the Expenses card: totals exactly what the list shows, labelled with the date
+    // range in effect (it used to total all income regardless of filters).
+    const totalIncome = filteredIncome.reduce((sum, item) => sum + CurrencyService.convertToDefaultSync(item.amount, item.currency || 'GBP', defaultCurrency || 'GBP'), 0);
+    const heroDateChip = activeChips.find(c => c.key === 'date');
+    const heroOtherFilters = !!searchTerm || activeChips.some(c => c.key !== 'date');
+    const heroLabel = 'Received · ' + (heroDateChip ? heroDateChip.label : PRESET_LABELS.all) + (heroOtherFilters ? ' · filtered' : '');
     const deletingIncome = showDeleteConfirm ? income.find(i => i.id === showDeleteConfirm) : null;
     const deleteSchedule = deletingIncome && deletingIncome.recurringId ? scheduleById.get(deletingIncome.recurringId) : null;
     const closeDelete = () => { setShowDeleteConfirm(null); setStopRepeat(false); };
@@ -4827,9 +4876,9 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                 </button>
             </div>
             <div className="sp-hero" style={{borderRadius: '22px', padding: '18px'}}>
-                <div className="sp-hero-label">Total received</div>
+                <div className="sp-hero-label">{heroLabel}</div>
                 <div className="sp-hero-value">{ValidationUtils.formatCurrency(totalIncome, defaultCurrency || 'GBP')}</div>
-                <div className="sp-hero-pills" style={{marginTop: '10px'}}><span className="sp-hero-pill is-green">{income.length} entr{income.length === 1 ? 'y' : 'ies'}</span></div>
+                <div className="sp-hero-pills" style={{marginTop: '10px'}}><span className="sp-hero-pill is-green">{filteredIncome.length} entr{filteredIncome.length === 1 ? 'y' : 'ies'}</span></div>
             </div>
 
             {formOpen && (
@@ -10986,8 +11035,21 @@ function showDesktopNotifications(alerts) {
     });
 }
 
+// The signed-in Firebase user cached by the last onAuthStateChanged, if any — used to render
+// the app immediately on reload while Firebase restores and confirms its session.
+function getOptimisticFirebaseUser() {
+    try {
+        const stored = JSON.parse(localStorage.getItem('financeApp_currentUser') || 'null');
+        return stored && stored.authProvider === 'firebase' && stored.uid ? stored : null;
+    } catch (_) { return null; }
+}
+
 function App() {
-    const [currentScreen, setCurrentScreen] = useState('summary');
+    // Mobile browsers (notably Chrome on Android) discard backgrounded tabs and reload them
+    // from scratch when the user switches back. Persisting the screen + back history for the
+    // tab session (sessionStorage survives that reload) puts the user back where they were
+    // instead of on Summary, so the reload doesn't feel like a fresh login.
+    const [currentScreen, setCurrentScreen] = useState(() => { try { return sessionStorage.getItem('ftShell_screen') || 'summary'; } catch (_) { return 'summary'; } });
     const [activeView, setActiveViewState] = useState(() => getActiveView());
     const [settingsScrollTarget, setSettingsScrollTarget] = useState(null);
     const [expenses, setExpenses] = useState([]);
@@ -11001,12 +11063,24 @@ function App() {
     const [notifications, setNotifications] = useState(() => DataService.getNotifications());
     // Redesign shell (Phase 0): header sheets + back-navigation history. UI state only.
     const [shellSheet, setShellSheet] = useState(null); // null | 'view' | 'sync' | 'profile' | 'add'
-    const [screenHistory, setScreenHistory] = useState([]);
+    const [screenHistory, setScreenHistory] = useState(() => { try { return JSON.parse(sessionStorage.getItem('ftShell_history')) || []; } catch (_) { return []; } });
+    // Screens read DataService synchronously on mount (e.g. ExpenseForm's people list), so
+    // hold them back until the initial load has populated it. Before screen restore this
+    // never mattered, since a reload always opened on Summary.
+    const [coreDataReady, setCoreDataReady] = useState(false);
+    useEffect(() => {
+        try { sessionStorage.setItem('ftShell_screen', currentScreen); sessionStorage.setItem('ftShell_history', JSON.stringify(screenHistory)); } catch (_) {}
+    }, [currentScreen, screenHistory]);
     const [incomeAutoOpen, setIncomeAutoOpen] = useState(false); // + sheet → Income opens its form
     const [expensesInitDateFrom, setExpensesInitDateFrom] = useState('');
     const [expensesInitDateTo, setExpensesInitDateTo] = useState('');
     const [currentUser, setCurrentUser] = useState(() => {
-        if (window.__firebaseReady) return null;
+        // Firebase persists its session across reloads, and financeApp_currentUser is only
+        // present while signed in (logout wipes it). Render straight from it instead of
+        // blocking on the "Signing you in…" screen on every reload (e.g. a mobile tab
+        // discarded in the background) — onAuthStateChanged still confirms the session and
+        // drops back to the login screen if Firebase says it has ended.
+        if (window.__firebaseReady) return getOptimisticFirebaseUser();
         try {
             const expiry = parseInt(localStorage.getItem('financeApp_session_expiry') || '0');
             const sessionActive = sessionStorage.getItem('financeApp_session_active') === 'true';
@@ -11027,7 +11101,7 @@ function App() {
             return null;
         } catch (_) { return null; }
     });
-    const [authLoading, setAuthLoading] = useState(() => !!window.__firebaseReady);
+    const [authLoading, setAuthLoading] = useState(() => !!window.__firebaseReady && !getOptimisticFirebaseUser());
     const [storagePreference, setStoragePreference] = useState(() => localStorage.getItem('financeApp_storagePreference') || '');
     const [showStoragePicker, setShowStoragePicker] = useState(false);
     const [localDeviceBannerDismissed, setLocalDeviceBannerDismissed] = useState(
@@ -11041,6 +11115,15 @@ function App() {
     const cloudSyncDebounceRef = React.useRef(null);
     const cloudSyncInFlightRef = React.useRef(false);
     const [cloudSyncGate, setCloudSyncGate] = useState('idle'); // idle|checking|reconnect-prompt|restore-prompt
+    // Remember (per tab session) that the blocking cloud gate was resolved, so a reload of
+    // this tab can skip putting it back up — see gatePassedThisSession below.
+    const prevCloudSyncGate = React.useRef(cloudSyncGate);
+    useEffect(() => {
+        if (prevCloudSyncGate.current !== 'idle' && cloudSyncGate === 'idle' && currentUser && currentUser.uid) {
+            try { sessionStorage.setItem('ftCloudGatePassed', currentUser.uid); } catch (_) {}
+        }
+        prevCloudSyncGate.current = cloudSyncGate;
+    }, [cloudSyncGate]);
     const [cloudRestoreData, setCloudRestoreData] = useState(null);
     const [showCloudHistory, setShowCloudHistory] = useState(false);
     const [cloudGateConnecting, setCloudGateConnecting] = useState(false);
@@ -11105,6 +11188,12 @@ function App() {
                 console.log('[BackupPref] onAuthStateChanged fired', { fbUserUid: fbUser.uid, storedUid: stored && stored.uid, willWipe: !!(stored && stored.uid && stored.uid !== fbUser.uid) });
                 // If a different user's data is sitting in localStorage, wipe it before loading
                 if (stored && stored.uid && stored.uid !== fbUser.uid) {
+                    // Normally unreachable now that the app renders optimistically from the
+                    // stored user (logout wipes it), but if it happens, put the loading screen
+                    // back up so nothing keeps showing/using the previous account's data, and
+                    // so the authLoading-gated effects re-run against the wiped storage.
+                    setAuthLoading(true);
+                    setCurrentUser(null);
                     DataService.clearAllUserData();
                 }
                 const user = {
@@ -11201,7 +11290,12 @@ function App() {
                     try { await GDriveService.requestTokenSilent(); tokenReady = true; } catch (_) { tokenReady = false; }
                 }
                 if (tokenReady) {
-                    setCloudSyncGate('checking');
+                    // This tab already got past the cloud check earlier in this session, so
+                    // this is a reload (e.g. mobile tab discard) with local data already in
+                    // place — run the same check in the background rather than blocking the
+                    // whole app behind the "Checking cloud backup…" screen again.
+                    const gatePassedThisSession = (() => { try { return sessionStorage.getItem('ftCloudGatePassed') === currentUser.uid; } catch (_) { return false; } })();
+                    if (!gatePassedThisSession) setCloudSyncGate('checking');
                     SyncService.download().then(async cloudBackup => {
                         if (!cloudBackup) { setCloudSyncGate('idle'); return; }
                         // Fail-closed: reject backups that don't belong to the current user
@@ -11339,6 +11433,7 @@ function App() {
                 await reloadCoreData(activeView);
                 await refreshNotifications();
             } catch (error) { console.error('Error loading data:', error); }
+            setCoreDataReady(true);
         };
         loadData();
     }, []);
@@ -11500,6 +11595,7 @@ function App() {
         // Clear session integrity token from sessionStorage (localStorage token wiped by clearAllUserData)
         sessionStorage.removeItem('financeApp_session_uid');
         sessionStorage.removeItem('financeApp_session_active');
+        ['ftCloudGatePassed', 'ftShell_screen', 'ftShell_history'].forEach(k => sessionStorage.removeItem(k));
         // Wipe per-screen list filters so the next user on this device starts clean
         FilterMemory.clearAll();
         // Rotate the backup signing key so it stops being valid for this account on this
@@ -11516,7 +11612,7 @@ function App() {
         // login (in the same browser session, no full page reload) would land right back
         // on Profile instead of defaulting to Summary, since currentScreen otherwise
         // survives the logout/login cycle untouched.
-        setCurrentScreen('summary');
+        setCurrentScreen('summary'); setScreenHistory([]);
     };
     const handleStorageConfirm = async (pref, cloudBackup) => {
         // Provider migration: switching from one cloud provider to another
@@ -11842,7 +11938,7 @@ function App() {
                     <span className="sp-backbar-title">Back</span>
                 </div>
             )}
-            <div className="app-content">{renderScreen()}</div>
+            <div className="app-content">{coreDataReady && renderScreen()}</div>
             <Dock currentScreen={currentScreen} onTab={goToTab} onPlus={() => setShellSheet('add')} />
 
             {shellSheet === 'view' && (
