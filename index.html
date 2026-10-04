@@ -3112,6 +3112,14 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     const [recurringEndDate, setRecurringEndDate] = useState('');
     const [isSplit, setIsSplit] = useState(!!(editSplitGroup && editSplitGroup.length > 0) || !!(catEdit && catEdit.participants));
     const [splitParticipants, setSplitParticipants] = useState(() => (catEdit && catEdit.participants) || (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: r.paidBy || 'Me' })) : []));
+    // Per-share payment for split participants: { [participantId]: { cash, accountId } }.
+    // An existing split group starts from each record's own saved payment.
+    const [sharePay, setSharePay] = useState(() => {
+        if (!editSplitGroup) return {};
+        const obj = {};
+        editSplitGroup.forEach(r => { obj[r.id] = { cash: !!r.isCashPayment, accountId: r.isCashPayment ? '' : (r.accountId || '') }; });
+        return obj;
+    });
     const [splitMethod, setSplitMethod] = useState(() => (catEdit && catEdit.participants ? catEdit.splitMethod : editSplitGroup && editSplitGroup.length > 0 ? 'custom' : 'equal'));
     // Split across categories: one expense per row, sharing date/note/payment (Handoff v3).
     const [catSplitOn, setCatSplitOn] = useState(!!catEdit);
@@ -3170,21 +3178,6 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         setFormData(prev => ({ ...prev, tags }));
     };
 
-    // The "me" split participant's display name (seeded as 'Me' or an active-view label,
-    // never blank — see splitParticipants' initial state) is separate from what should be
-    // STORED as paidBy: it must resolve to the same ''/'own' convention every other "own"
-    // record uses, or it silently disappears from the active-view filter once the app
-    // isn't showing "All" anymore. `editSplitGroup` participants use real record ids, not
-    // 'me', so they're identified by their original record having had an empty paidBy.
-    const isPayerParticipant = (p) => {
-        if (p.id === 'me') return true;
-        if (editSplitGroup) {
-            const original = editSplitGroup.find(r => r.id === p.id);
-            if (original && !(original.paidBy || '').trim()) return true;
-        }
-        return false;
-    };
-
     // The payer's share belongs to whoever the expense is for ("Who's Expense"), which isn't
     // necessarily the signed-in user or the first Active View entry — resolving it from the
     // active view moved e.g. Madhu's share onto "own" when splitting Madhu's expense. An
@@ -3197,19 +3190,30 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         return p.id === 'me' ? (formData.paidBy || '') : p.name;
     };
 
-    // The payer keeps whatever account they explicitly chose in the form's own Account
-    // field — recomputing it from their primary account here silently overrode a manual
-    // non-primary selection the moment Split was checked. Every other participant's share
-    // is a person-to-person IOU, not a real transaction against their account, so it's left
-    // unlinked rather than auto-attached to their own primary account. Forced to '' when the
-    // payer is marked Paid by Cash — a cash expense has no bank account either.
-    const resolveSplitParticipantAccountId = (p) =>
-        isPayerParticipant(p) ? (formData.isCashPayment ? '' : formData.accountId) : '';
+    // How each share is paid. The payer of a new split uses the form's own Payment section
+    // (only their share is deducted from it). Every other participant picks Card/bank (one of
+    // their accounts) or Cash on their split row, and their share is deducted from that. When
+    // editing an existing split group every share has its own row choice, seeded from its record.
+    const sharePersonKey = (p) => {
+        if (editSplitGroup) { const r = editSplitGroup.find(x => x.id === p.id); return (r && (r.paidBy || '').trim()) || 'own'; }
+        if (p.id === 'me') return formData.paidBy || 'own';
+        return p.id === 'own' ? 'own' : p.name;
+    };
+    const usesMainPayment = (p) => !editSplitGroup && p.id === 'me';
+    const defaultSharePay = (p) => {
+        const acc = resolveDefaultAccountId(sharePersonKey(p), formData.currency);
+        return acc ? { cash: false, accountId: acc } : { cash: true, accountId: '' };
+    };
+    const getSharePay = (p) => sharePay[p.id] || defaultSharePay(p);
+    const setSharePayFor = (p, patch) => setSharePay(prev => ({ ...prev, [p.id]: { ...getSharePay(p), ...patch } }));
 
-    // Only the payer's share can be a cash payment — other participants' shares are unlinked
-    // IOUs, same reasoning as resolveSplitParticipantAccountId above.
+    const resolveSplitParticipantAccountId = (p) => {
+        if (usesMainPayment(p)) return formData.isCashPayment ? '' : formData.accountId;
+        const pay = getSharePay(p);
+        return pay.cash ? '' : pay.accountId;
+    };
     const resolveSplitParticipantIsCash = (p) =>
-        isPayerParticipant(p) ? formData.isCashPayment : false;
+        usesMainPayment(p) ? formData.isCashPayment : getSharePay(p).cash;
 
     // Used after adding (not editing) an expense so the user can log another one without
     // leaving the Add Expense screen — full reset back to the same blank state the form
@@ -3359,7 +3363,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     const share = splitMethod === 'equal'
                         ? (i === n - 1 ? Math.round((totalAmt - baseShare * (n - 1)) * 100) / 100 : baseShare)
                         : parseFloat(customAmounts[p.id] || 0);
-                    DataService.updateExpense(p.id, { ...sharedFields, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p) });
+                    DataService.updateExpense(p.id, { ...sharedFields, amount: share, paidBy: resolveSplitParticipantPaidBy(p), accountId: resolveSplitParticipantAccountId(p), isCashPayment: resolveSplitParticipantIsCash(p) });
                 });
                 setShowSuccess(true);
                 setTimeout(() => { onSave(); if (onCancel) onCancel(); }, 1000);
@@ -3746,8 +3750,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                     <div style={{marginTop: '10px'}}>
                         {splitParticipants.map((p, i) => {
                             const c = spPersonColor(participantColorKey(p), people);
+                            const pay = usesMainPayment(p) ? null : getSharePay(p);
+                            const shareAccounts = pay ? DataService.getAccountsForPerson(sharePersonKey(p)) : [];
                             return (
-                                <div key={p.id} className="sp-splitrow">
+                                <React.Fragment key={p.id}>
+                                <div className="sp-splitrow">
                                     <span className="sp-tile" style={{width: '30px', height: '30px', borderRadius: '10px', background: c[0], color: c[1], fontWeight: 800, fontSize: '12px'}}>{spAvatarLetter(participantLabel(p))}</span>
                                     <span className="sp-row-title" style={{flex: 1, fontSize: '13px'}}>{participantLabel(p)}</span>
                                     {splitMethod === 'equal' ? (
@@ -3759,6 +3766,26 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                                         </div>
                                     )}
                                 </div>
+                                {/* Where this person's share is paid from — deducted from that account / their cash. */}
+                                <div className="sp-sharepay">
+                                    {!pay ? (
+                                        <span className="sp-hint">Paid via the Payment option above</span>
+                                    ) : (
+                                        <React.Fragment>
+                                            <div className="sp-seg is-light sp-sharepay-seg">
+                                                <button type="button" className={!pay.cash ? 'is-active' : ''} onClick={() => setSharePayFor(p, { cash: false })}><i className="fas fa-credit-card"></i>Card / bank</button>
+                                                <button type="button" className={pay.cash ? 'is-active' : ''} onClick={() => setSharePayFor(p, { cash: true })}><i className="fas fa-money-bill-wave"></i>Cash</button>
+                                            </div>
+                                            {!pay.cash && (
+                                                <select className="sp-sharepay-acct" aria-label={'Account for ' + participantLabel(p)} value={pay.accountId ? String(pay.accountId) : ''} onChange={e => setSharePayFor(p, { accountId: e.target.value ? Number(e.target.value) : '' })}>
+                                                    {shareAccounts.map(a => <option key={a.id} value={String(a.id)}>{a.accountName}{a.currency !== formData.currency ? ' · ' + a.currency : ''}{a.isPrimary ? ' (Primary)' : ''}</option>)}
+                                                    <option value="">{shareAccounts.length ? 'Not linked to an account' : 'No accounts · not linked'}</option>
+                                                </select>
+                                            )}
+                                        </React.Fragment>
+                                    )}
+                                </div>
+                                </React.Fragment>
                             );
                         })}
                     </div>

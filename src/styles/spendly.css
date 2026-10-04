@@ -502,6 +502,13 @@ body:has(.sp-cta-wrap:not(.is-above-dock)) .sp-dock { display: none; }
 .sp-personchip.is-on .sp-personchip-av { background: var(--sp-green); color: var(--sp-green-ink); }
 .sp-splitrow { display: flex; align-items: center; gap: 10px; padding: 9px 0; }
 .sp-splitrow + .sp-splitrow { border-top: 1px solid var(--sp-slate-100); }
+/* Per-share payment (Card / bank + account, or Cash) under each split participant. */
+.sp-sharepay { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 0 10px 40px; border-bottom: 1px solid var(--sp-slate-100); }
+.sp-sharepay:last-child { border-bottom: none; }
+.sp-sharepay-seg { flex: 0 0 auto; min-width: 170px; }
+.sp-sharepay-seg > button { padding: 6px 8px; font-size: 11px; }
+.sp-sharepay-seg > button i { margin-right: 5px; font-size: 10px; }
+.sp-sharepay-acct { flex: 1 1 140px; min-width: 0; border: none; background: var(--sp-slate-50); border-radius: 10px; padding: 7px 9px; font-size: 12px; font-weight: 700; color: var(--sp-navy); font-family: inherit; color-scheme: light; }
 .sp-splitinput { display: flex; align-items: center; background: var(--sp-slate-50); border-radius: 10px; padding: 0 9px; }
 .sp-splitinput span { font-size: 12px; color: var(--sp-slate-400); font-weight: 700; }
 .sp-splitinput input { width: 70px; border: none; background: none; padding: 8px 2px; font-size: 13px; font-weight: 800; color: var(--sp-navy); outline: none; text-align: right; font-family: inherit; color-scheme: light; }
