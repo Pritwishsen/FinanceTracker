@@ -3111,7 +3111,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     const [recurringFreq, setRecurringFreq] = useState('monthly');
     const [recurringEndDate, setRecurringEndDate] = useState('');
     const [isSplit, setIsSplit] = useState(!!(editSplitGroup && editSplitGroup.length > 0) || !!(catEdit && catEdit.participants));
-    const [splitParticipants, setSplitParticipants] = useState(() => (catEdit && catEdit.participants) || (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: r.paidBy || 'Me' })) : []));
+    const [splitParticipants, setSplitParticipants] = useState(() => (catEdit && catEdit.participants) || (editSplitGroup ? editSplitGroup.map(r => ({ id: r.id, name: (r.paidBy || '').trim() })) : []));
     // Per-share payment for split participants: { [participantId]: { cash, accountId } }.
     // An existing split group starts from each record's own saved payment.
     const [sharePay, setSharePay] = useState(() => {
@@ -3460,8 +3460,10 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     // 'me' is the payer slot (whoever the expense is for); 'own' is the signed-in user added
     // as a sharer of someone else's expense. Both display from live data, not the stored name.
     const payerLabel = formData.paidBy || 'You';
-    const participantLabel = (p) => (p.id === 'me' ? payerLabel : p.id === 'own' ? 'You' : p.name);
-    const participantColorKey = (p) => (p.id === 'me' ? (formData.paidBy || 'own') : p.id === 'own' ? 'own' : p.name);
+    // Any other participant with no name is the signed-in user (the 'own' sharer, or an own
+    // record of an existing split group), shown as 'You' like everywhere else in the app.
+    const participantLabel = (p) => (p.id === 'me' ? payerLabel : p.name || 'You');
+    const participantColorKey = (p) => (p.id === 'me' ? (formData.paidBy || 'own') : p.name || 'own');
     const accounts = DataService.getAccountsForPerson(formData.paidBy || 'own');
     const firstRepeat = computeNextDue(new Date(), recurringFreq);
     const upcoming = [1, 2, 3].reduce((acc) => { acc.push(computeNextDue(acc[acc.length - 1], recurringFreq)); return acc; }, [firstRepeat]).slice(1);
@@ -7054,6 +7056,15 @@ function downloadCSV(filename, headers, rows) {
 const BULK_UPLOAD_MAX_ROWS = 1000;
 const BULK_UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
 
+// Bulk Upload's optional "Excluded from Spend" / "Excluded from Income" column (as written
+// by Export): Yes/True/Y/1 = excluded, blank/No/False/N/0 = counted, anything else an error.
+function parseExcludedCell(raw) {
+    const v = String(raw || '').trim().toLowerCase();
+    if (!v || v === 'no' || v === 'false' || v === 'n' || v === '0') return { value: false };
+    if (v === 'yes' || v === 'true' || v === 'y' || v === '1') return { value: true };
+    return { error: true };
+}
+
 function BulkUpload({ categories, assetCategories = [], liabilityCategories = [], activeView, onUpdate }) {
     const [activeTab, setActiveTab] = useState('expenses');
     const [parsedRows, setParsedRows] = useState([]);
@@ -7134,7 +7145,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
 
             if (activeTab === 'expenses') {
                 const colMap = {};
-                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'payment method', 'bank', 'tags'];
+                const expHeaders = ['date', 'amount', 'currency', 'description', 'category', 'sub category', 'paid by', 'payment method', 'bank', 'tags', 'excluded from spend', 'exclude reason'];
                 expHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['category'] === undefined || colMap['sub category'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Category, Sub Category');
@@ -7152,6 +7163,9 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     const catVal = vals[colMap['category']] || '';
                     const subVal = vals[colMap['sub category']] || '';
                     const paidByVal = colMap['paid by'] !== undefined ? (vals[colMap['paid by']] || '') : '';
+                    const excludedParse = parseExcludedCell(colMap['excluded from spend'] !== undefined ? vals[colMap['excluded from spend']] : '');
+                    const excludeFromTotals = !!excludedParse.value;
+                    const excludeReason = excludeFromTotals && colMap['exclude reason'] !== undefined ? (vals[colMap['exclude reason']] || '').trim() : '';
 
                     const parsedDate = parseDate(dateVal);
                     if (!parsedDate) errors.push('Invalid date');
@@ -7163,15 +7177,17 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     const currency = currencyVal || 'GBP';
                     if (!validCurrencies.includes(currency)) errors.push('Invalid currency: ' + currencyVal);
 
+                    if (excludedParse.error) errors.push('Excluded from Spend must be Yes or blank');
+                    // Category is optional for an excluded row (same rule as the Add Expense form).
                     const matchedCat = categories.find(c => c.name.toLowerCase() === catVal.toLowerCase());
-                    if (!matchedCat) errors.push('Category not found: ' + catVal);
+                    if (!matchedCat && (catVal.trim() || !excludeFromTotals)) errors.push('Category not found: ' + catVal);
                     let matchedSub = null;
                     if (matchedCat) {
                         matchedSub = matchedCat.subcategories.find(s => s.toLowerCase() === subVal.toLowerCase());
                         if (!matchedSub) errors.push('Subcategory not found: ' + subVal);
                     }
 
-                    const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '');
+                    const description = descVal || (matchedCat && matchedSub ? matchedCat.name + ' - ' + matchedSub : '') || (excludeFromTotals ? excludeReason || 'Excluded from spend' : '');
                     // Optional Tags column (approved): ';'-separated, same rules as the tag chips.
                     const tagParse = parseTagList(colMap['tags'] !== undefined ? vals[colMap['tags']] : '', 'expense');
                     if (tagParse.error) errors.push(tagParse.error);
@@ -7207,6 +7223,8 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         bank: bankVal,
                         accountId: accountId,
                         tags: tagParse.tags,
+                        excludeFromTotals,
+                        excludeReason,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -7214,7 +7232,7 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                 setParsedRows(rows);
             } else if (activeTab === 'income') {
                 const colMap = {};
-                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank', 'tags'];
+                const incHeaders = ['date', 'source of income', 'currency', 'amount', 'description', "who's income", 'bank', 'tags', 'excluded from income', 'exclude reason'];
                 incHeaders.forEach(eh => { const idx = headers.indexOf(eh); if (idx !== -1) colMap[eh] = idx; });
                 if (colMap['date'] === undefined || colMap['amount'] === undefined || colMap['source of income'] === undefined) {
                     setFileError('Missing required columns: Date, Amount, Source of Income');
@@ -7231,6 +7249,10 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                     const amountVal = vals[colMap['amount']] || '';
                     const descVal = colMap['description'] !== undefined ? (vals[colMap['description']] || '') : '';
                     const whosVal = colMap["who's income"] !== undefined ? (vals[colMap["who's income"]] || '') : '';
+                    const excludedParse = parseExcludedCell(colMap['excluded from income'] !== undefined ? vals[colMap['excluded from income']] : '');
+                    const excludeFromTotals = !!excludedParse.value;
+                    const excludeReason = excludeFromTotals && colMap['exclude reason'] !== undefined ? (vals[colMap['exclude reason']] || '').trim() : '';
+                    if (excludedParse.error) errors.push('Excluded from Income must be Yes or blank');
 
                     const parsedDate = parseDate(dateVal);
                     if (!parsedDate) errors.push('Invalid date');
@@ -7267,6 +7289,8 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         bank: bankVal,
                         accountId: accountId,
                         tags: tagParse.tags,
+                        excludeFromTotals,
+                        excludeReason,
                         error: errors.length > 0 ? errors.join('; ') : null,
                         raw: lines[i]
                     });
@@ -7390,12 +7414,12 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
             const exampleCat = categories[0];
             const exampleSub = exampleCat && exampleCat.subcategories && exampleCat.subcategories[0];
             downloadCSV('financetracker-expenses-template.csv',
-                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Payment Method', 'Bank', 'Tags'],
-                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '', '', 'weekly shop;family']]);
+                ['Date', 'Amount', 'Currency', 'Description', 'Category', 'Sub Category', 'Paid By', 'Payment Method', 'Bank', 'Tags', 'Excluded from Spend', 'Exclude Reason'],
+                [['2026-01-15', '25.00', 'GBP', 'Example expense', exampleCat ? exampleCat.name : 'Food & Dining', exampleSub || 'Groceries', '', '', '', 'weekly shop;family', '', '']]);
         } else if (activeTab === 'income') {
             downloadCSV('financetracker-income-template.csv',
-                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank', 'Tags'],
-                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '', 'salary']]);
+                ['Date', 'Source of Income', 'Currency', 'Amount', 'Description', "Who's Income", 'Bank', 'Tags', 'Excluded from Income', 'Exclude Reason'],
+                [['2026-01-15', 'Salary', 'GBP', '2000.00', 'Example income', '', '', 'salary', '', '']]);
         } else if (activeTab === 'assets') {
             const exampleCat = assetCategories[0];
             downloadCSV('financetracker-assets-template.csv',
@@ -7434,7 +7458,9 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         paidBy: row.paidBy,
                         isCashPayment: row.isCashPayment,
                         accountId: row.accountId,
-                        tags: row.tags || []
+                        tags: row.tags || [],
+                        excludeFromTotals: !!row.excludeFromTotals,
+                        excludeReason: row.excludeReason || ''
                     });
                 } else if (activeTab === 'income') {
                     await DataService.addIncome({
@@ -7445,7 +7471,9 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                         description: row.description,
                         paidBy: row.paidBy,
                         accountId: row.accountId,
-                        tags: row.tags || []
+                        tags: row.tags || [],
+                        excludeFromTotals: !!row.excludeFromTotals,
+                        excludeReason: row.excludeReason || ''
                     });
                 } else {
                     const newItem = DataService.addNetWorthItem({
@@ -7521,8 +7549,8 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
         const title = activeTab === 'expenses' ? (row.description || row.categoryName || 'Row ' + row.rowNum)
             : activeTab === 'income' ? (row.source || row.description || 'Row ' + row.rowNum)
             : (row.name || 'Row ' + row.rowNum);
-        const meta = (activeTab === 'expenses' ? [row.subcategory || row.categoryName, money, row.date ? spShortDate(row.date) : '', row.isCashPayment ? 'Cash' : row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' ')]
-            : activeTab === 'income' ? [row.description && row.description !== title ? row.description : '', money, row.date ? spShortDate(row.date) : '', row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' ')]
+        const meta = (activeTab === 'expenses' ? [row.subcategory || row.categoryName, money, row.date ? spShortDate(row.date) : '', row.isCashPayment ? 'Cash' : row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' '), row.excludeFromTotals ? 'Excluded from spend' : '']
+            : activeTab === 'income' ? [row.description && row.description !== title ? row.description : '', money, row.date ? spShortDate(row.date) : '', row.bank, row.paidBy, (row.tags || []).map(t => '#' + t).join(' '), row.excludeFromTotals ? 'Excluded from income' : '']
             : [row.subcategory || row.categoryName, money, row.person, row.country, row.bank, row.fundBank ? 'From ' + row.fundBank : '']).filter(Boolean).join(' · ');
         const errs = row.error ? row.error.split('; ') : [];
         const status = row.skip ? 'Tracked automatically' : errs.length === 0 ? 'Valid' : errs.length === 1 ? (errs[0].length <= 24 ? errs[0] : 'Error') : errs.length + ' errors';
@@ -7568,14 +7596,14 @@ function BulkUpload({ categories, assetCategories = [], liabilityCategories = []
                 </button>
                 <div className="sp-drop-cols">
                     {activeTab === 'expenses'
-                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Payment Method, Bank, Tags'
+                        ? 'Columns: Date, Amount, Currency, Description, Category, Sub Category, Paid By, Payment Method, Bank, Tags, Excluded from Spend, Exclude Reason'
                         : activeTab === 'income'
-                        ? "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank, Tags"
+                        ? "Columns: Date, Source of Income, Currency, Amount, Description, Who's Income, Bank, Tags, Excluded from Income, Exclude Reason"
                         : activeTab === 'assets'
                         ? 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes, Funded From Bank'
                         : 'Columns: Name, Value, Currency, Category, Sub Category, Original Amount, Person, Country, Bank, Notes'}
                     <br /><b className="sp-drop-req">Required: {activeTab === 'expenses' ? 'Date, Amount, Category, Sub Category' : activeTab === 'income' ? 'Date, Source of Income, Amount' : 'Name, Value, Category'}</b> · the rest are optional
-                    {(activeTab === 'expenses' || activeTab === 'income') && <><br />Tags are separated by ";" (up to 10, 30 characters each).</>}
+                    {(activeTab === 'expenses' || activeTab === 'income') && <><br />Tags are separated by ";" (up to 10, 30 characters each). Put Yes in {activeTab === 'expenses' ? 'Excluded from Spend' : 'Excluded from Income'} to leave a row out of totals{activeTab === 'expenses' ? ' (Category can then be blank)' : ''}.</>}
                 </div>
             </div>
 

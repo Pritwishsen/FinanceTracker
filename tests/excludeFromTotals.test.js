@@ -2,8 +2,8 @@ const { loadInlineClasses } = require('./helpers/loadInlineClasses');
 
 // "Exclude from Spend" / "Exclude from Income": the record still moves bank and cash
 // balances, but is left out of every spending/income total.
-const { countsInTotals, ValidationUtils, DataService } = loadInlineClasses([
-    'DateUtils', 'CurrencyService', 'DataService', 'ValidationUtils', 'matchesActiveView', 'countsInTotals',
+const { countsInTotals, ValidationUtils, DataService, parseExcludedCell } = loadInlineClasses([
+    'DateUtils', 'CurrencyService', 'DataService', 'ValidationUtils', 'matchesActiveView', 'countsInTotals', 'parseExcludedCell',
 ]);
 
 const account = { id: 1, accountName: 'Main', accountType: 'Savings', currency: 'GBP', openingAmount: 100, person: 'own', isPrimary: true };
@@ -66,5 +66,17 @@ describe('budgets ignore excluded spend', () => {
         const food = summary.find(c => c.categoryId === 7 || c.id === 7 || c.name === 'Food');
         expect(food).toBeDefined();
         expect(food.spent).toBe(40);
+    });
+});
+
+describe('Bulk Upload Excluded column', () => {
+    test.each(['Yes', 'yes', 'TRUE', 'y', '1'])('%s means excluded', v => {
+        expect(parseExcludedCell(v)).toEqual({ value: true });
+    });
+    test.each(['', '  ', 'No', 'false', 'n', '0', undefined])('%p means counted', v => {
+        expect(parseExcludedCell(v)).toEqual({ value: false });
+    });
+    test('anything else is an error', () => {
+        expect(parseExcludedCell('maybe')).toEqual({ error: true });
     });
 });
