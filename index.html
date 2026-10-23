@@ -57,8 +57,8 @@
 <body>
     <div id="root"></div>
     
-    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 
     <!-- Firebase SDK (compat v10) -->
@@ -632,7 +632,7 @@ function TagInput({ tags, onChange, allTags = [], onError, noun = 'expense' }) {
         <div>
             <div className="sp-tagbox">
                 {tags.map(t => (
-                    <span key={t} className="sp-tagchip">#{t}<button type="button" onClick={() => { onChange(tags.filter(x => x !== t)); onError(''); }} title={'Remove ' + t}><i className="fas fa-xmark"></i></button></span>
+                    <span key={t} className="sp-tagchip">#{t}<button type="button" onClick={() => { onChange(tags.filter(x => x !== t)); onError(''); }} title={'Remove ' + t} aria-label={'Remove ' + t}><i className="fas fa-xmark"></i></button></span>
                 ))}
                 <input type="text" value={input} onChange={e => handleChange(e.target.value)} onKeyDown={handleKey} placeholder={tags.length ? '' : 'Add a tag'} />
                 {input.trim() && <button type="button" className="sp-tagadd" onClick={() => { if (addMany([input])) setInput(''); }}>Add</button>}
@@ -1214,7 +1214,7 @@ function CloudHistoryModal({ onClose, onRestored, currentUser }) {
                         <h5 className="fw-bold mb-0"><i className="fas fa-history me-2 text-primary"></i>Version History</h5>
                         <div style={{fontSize:'0.78rem',color:'#6c757d'}}>Your cloud snapshots</div>
                     </div>
-                    <button className="btn btn-sm btn-outline-secondary" onClick={onClose}><i className="fas fa-times"></i></button>
+                    <button className="btn btn-sm btn-outline-secondary" onClick={onClose} title="Close" aria-label="Close"><i className="fas fa-times"></i></button>
                 </div>
 
                 {loading && <div className="text-center py-4"><span className="spinner-border spinner-border-sm me-2"></span>Loading snapshots…</div>}
@@ -2206,9 +2206,18 @@ class DataService {
     static async getRecentlyUsedCategories(limit = 5) {
         await this.initialize();
         const recentExpenses = (await this.getExpenses()).slice(0, 20);
-        const categoryCount = {};
-        recentExpenses.forEach(expense => { const key = expense.categoryId + '-' + expense.subcategory; categoryCount[key] = (categoryCount[key] || 0) + 1; });
-        return Object.entries(categoryCount).sort(([,a], [,b]) => b - a).slice(0, limit).map(([key]) => { const [categoryId, subcategory] = key.split('-'); const category = this.data.categories.find(cat => cat.id === parseInt(categoryId)); return { category, subcategory }; }).filter(item => item.category);
+        // Keyed by category, then sub-category, so a sub-category name containing '-' stays whole.
+        const counts = new Map();
+        recentExpenses.forEach(expense => {
+            const category = expense.categoryId && this.data.categories.find(cat => cat.id === parseInt(expense.categoryId));
+            if (!category) return;
+            // A sub-category that has since been removed from the category falls back to none.
+            const subcategory = expense.subcategory && (category.subcategories || []).includes(expense.subcategory) ? expense.subcategory : '';
+            const key = category.id + '|' + subcategory;
+            const hit = counts.get(key);
+            if (hit) hit.count++; else counts.set(key, { category, subcategory, count: 1 });
+        });
+        return [...counts.values()].sort((a, b) => b.count - a.count).slice(0, limit).map(({ category, subcategory }) => ({ category, subcategory }));
     }
     static getGoals() { return JSON.parse(localStorage.getItem('financeApp_goals') || '[]'); }
     static saveGoals(goals) { localStorage.setItem('financeApp_goals', JSON.stringify(goals)); }
@@ -3168,6 +3177,11 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
         if (errors[field]) setErrors(prev => ({ ...prev, [field]: '' }));
         if (field === 'categoryId') setFormData(prev => ({ ...prev, subcategory: '' }));
     };
+    // Quick Fill sets category and sub-category only; date, amount and everything else stay as entered.
+    const applyQuickFill = (item) => {
+        setFormData(prev => ({ ...prev, categoryId: String(item.category.id), subcategory: item.subcategory || '' }));
+        if (errors.categoryId || errors.subcategory) setErrors(prev => ({ ...prev, categoryId: '', subcategory: '' }));
+    };
 
     const handleTagInput = (raw) => {
         setTagInputRaw(raw);
@@ -3478,7 +3492,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
     return (
         <form onSubmit={handleSubmit} className="sp-page" noValidate>
             <div className="sp-formhead">
-                <button type="button" className="sp-backbtn" onClick={onCancel} title="Back"><i className="fas fa-arrow-left"></i></button>
+                <button type="button" className="sp-backbtn" onClick={onCancel} title="Back" aria-label="Back"><i className="fas fa-arrow-left"></i></button>
                 <h2>{editSplitGroup ? 'Edit split expense' : editExpense || editCatGroup ? 'Edit expense' : 'Add expense'}</h2>
                 <div style={{width: '36px'}}></div>
             </div>
@@ -3492,6 +3506,21 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                 </div>
                 <SpCurrencyChips value={formData.currency} onChange={code => handleInputChange('currency', code)} recent={recentCurrencies} light={false} />
             </div>
+
+            {!editExpense && !editSplitGroup && !catEdit && !catSplitOn && recentlyUsed.length > 0 && (
+                <div className="sp-quickfill">
+                    <span className="sp-quickfill-label">Recent</span>
+                    {recentlyUsed.map(item => {
+                        const look = spCategoryLook(item.category, categories.indexOf(item.category));
+                        const on = String(formData.categoryId) === String(item.category.id) && (formData.subcategory || '') === item.subcategory;
+                        return (
+                            <button key={item.category.id + '|' + item.subcategory} type="button" className={'sp-quickfill-chip' + (on ? ' is-active' : '')} onClick={() => applyQuickFill(item)}>
+                                <i className={look.icon} style={{color: look.ink}}></i>{item.category.name}{item.subcategory ? ' · ' + item.subcategory : ''}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
 
             <div className="sp-catsplit-head">
                 <span className="sp-formlabel" style={{margin: 0}}>{catSplitOn ? 'Categories · ' + catRows.length : formData.excludeFromTotals ? 'Category · optional' : 'Category'}</span>
@@ -3525,7 +3554,7 @@ function ExpenseForm({ categories, onSave, onCancel, editExpense = null, editSpl
                                     <span>{ValidationUtils.getCurrencySymbol(formData.currency)}</span>
                                     <input type="number" step="0.01" min="0" inputMode="decimal" placeholder="0.00" aria-label="Amount" value={r.amount} onChange={e => updCatRow(r.key, { amount: e.target.value })} />
                                 </div>
-                                {catRows.length > 2 && <button type="button" className="sp-catsplit-x" title="Remove" onClick={() => setCatRows(rows => rows.filter(x => x.key !== r.key))}><i className="fas fa-xmark"></i></button>}
+                                {catRows.length > 2 && <button type="button" className="sp-catsplit-x" title="Remove" aria-label="Remove" onClick={() => setCatRows(rows => rows.filter(x => x.key !== r.key))}><i className="fas fa-xmark"></i></button>}
                             </div>
                         );
                     })}
@@ -4094,7 +4123,7 @@ function ExpenseList({ expenses, categories, onUpdate, initialDateFrom = '', ini
                                         <div className="sp-item-main">
                                             <div className="sp-item-title">
                                                 <span>{expense.description}</span>
-                                                {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : expense.id); }}><i className="fas fa-code-compare"></i></button>}
+                                                {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" aria-label="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : expense.id); }}><i className="fas fa-code-compare"></i></button>}
                                                 {expense.recurringId && scheduleIds.has(expense.recurringId) && <i className="fas fa-rotate" title="Repeats" style={{color: '#16a34a', fontSize: '10px'}}></i>}
                                             </div>
                                             <div className="sp-item-meta">
@@ -4429,8 +4458,8 @@ function SpSubcategoryList({ category, ops, budgetInput, onChanged }) {
                             <div className="sp-subview">
                                 <div className="sp-subname"><div>{sub}</div>{uses && <span>{uses}</span>}</div>
                                 {budgetInput && budgetInput(sub)}
-                                <button type="button" className="sp-subbtn" onClick={() => { setEditing({ oldName: sub, value: sub }); setPendingDelete(null); setBlocked(null); }} title="Rename"><i className="fas fa-pen"></i></button>
-                                <button type="button" className="sp-subbtn is-danger" onClick={() => askDelete(sub)} title="Delete"><i className="fas fa-trash"></i></button>
+                                <button type="button" className="sp-subbtn" onClick={() => { setEditing({ oldName: sub, value: sub }); setPendingDelete(null); setBlocked(null); }} title="Rename" aria-label="Rename"><i className="fas fa-pen"></i></button>
+                                <button type="button" className="sp-subbtn is-danger" onClick={() => askDelete(sub)} title="Delete" aria-label="Delete"><i className="fas fa-trash"></i></button>
                             </div>
                         )}
                         {isEditing && renameConfirm && (
@@ -5118,7 +5147,7 @@ function IncomeForm({ income, onUpdate, activeView, defaultCurrency, autoOpenFor
                             <div className="sp-item-main">
                                 <div className="sp-item-title">
                                     <span style={{fontSize: '14px'}}>{item.source}</span>
-                                    {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></button>}
+                                    {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" aria-label="Sync conflict · tap to compare" onClick={(e) => { e.stopPropagation(); setShowConflictDetail(cfOpen ? null : item.id); }}><i className="fas fa-code-compare"></i></button>}
                                 </div>
                                 <div className="sp-item-meta">
                                     {activeView.length > 1 && <span className="sp-ownerchip" style={{background: oc[0], color: oc[1]}}><span className="sp-ownerchip-dot" style={{background: oc[1]}}>{spAvatarLetter(whoLabel(item))}</span>{whoLabel(item)}</span>}
@@ -6234,8 +6263,8 @@ function AccountsScreen({ categories, activeView, defaultCurrency, onUpdate }) {
                 <div className="sp-mvrow-line">
                     <div className="sp-mvrow-main"><div className="sp-schedtitle"><span style={{fontSize: '14px'}}>{title}</span>{cfButton(sec.key === 'recon' ? 'reconciliations' : 'transfers', t.id)}</div><div className="sp-mvrow-meta">{meta}</div></div>
                     <span className="sp-mvrow-amt" style={{color: ink}}>{amount}</span>
-                    {sec.key === 'cash' && <button type="button" className="sp-mvrow-btn" title="Edit" onClick={() => setEditWithdraw({ id: t.id, amount: String(t.toAmount), currency: t.cashWithdrawCurrency || currencyOf(t.fromAccountId), fee: String(t.fee || 0), feeCurrency: t.feeCurrency || currencyOf(t.fromAccountId), deductedAmount: String(t.fromAmount), date: t.date, accountCurrency: currencyOf(t.fromAccountId), accountName: shortName(t.fromAccountId) })}><i className="fas fa-pen"></i></button>}
-                    <button type="button" className="sp-mvrow-btn" title="Delete" onClick={() => setPendingDelete(pendingDelete === key ? null : key)}><i className="fas fa-trash"></i></button>
+                    {sec.key === 'cash' && <button type="button" className="sp-mvrow-btn" title="Edit" aria-label="Edit" onClick={() => setEditWithdraw({ id: t.id, amount: String(t.toAmount), currency: t.cashWithdrawCurrency || currencyOf(t.fromAccountId), fee: String(t.fee || 0), feeCurrency: t.feeCurrency || currencyOf(t.fromAccountId), deductedAmount: String(t.fromAmount), date: t.date, accountCurrency: currencyOf(t.fromAccountId), accountName: shortName(t.fromAccountId) })}><i className="fas fa-pen"></i></button>}
+                    <button type="button" className="sp-mvrow-btn" title="Delete" aria-label="Delete" onClick={() => setPendingDelete(pendingDelete === key ? null : key)}><i className="fas fa-trash"></i></button>
                 </div>
                 {conflictPanel(sec.key === 'recon' ? 'reconciliations' : 'transfers', t)}
                 {pendingDelete === key && <InlineConfirm text={confirmText} keepLabel="Cancel" cta="Delete" onKeep={() => setPendingDelete(null)} onConfirm={() => deleteMovement(sec, t)} />}
@@ -6780,8 +6809,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                 <div className="sp-row-title">{c.code} · {c.name}</div>
                                 <div className="sp-row-sub">{c.isLive ? 'Live rate' : 'Fixed rate · 1 ' + c.code + ' = ' + c.rate + ' ' + c.rateAgainst}</div>
                             </div>
-                            {!c.isLive && <button type="button" className="sp-mini-btn" onClick={() => openUpdateRate(c)} title="Edit rate"><i className="fas fa-pen"></i></button>}
-                            <button type="button" className="sp-mini-btn is-danger" onClick={() => openDeleteCurrency(c)} title="Delete"><i className="fas fa-trash"></i></button>
+                            {!c.isLive && <button type="button" className="sp-mini-btn" onClick={() => openUpdateRate(c)} title="Edit rate" aria-label="Edit rate"><i className="fas fa-pen"></i></button>}
+                            <button type="button" className="sp-mini-btn is-danger" onClick={() => openDeleteCurrency(c)} title="Delete" aria-label="Delete"><i className="fas fa-trash"></i></button>
                         </div>
                     ))}
                 </div>
@@ -6803,8 +6832,8 @@ function SettingsScreen({ onCurrencyChange, currentCurrency, currentUser, onStor
                                 <div className="sp-row-title">{p.name}{p.isDefault && <i className="fas fa-star" style={{color: '#f59e0b', fontSize: '11px', marginLeft: '6px'}} title="Default"></i>}</div>
                                 {p.relationship && <div className="sp-row-sub">{p.relationship}</div>}
                             </div>
-                            <button type="button" className="sp-mini-btn" onClick={() => openPersonSheet(p)} title={'Edit ' + p.name}><i className="fas fa-pen"></i></button>
-                            <button type="button" className="sp-mini-btn is-danger" onClick={() => setDeletePerson(p)} title={'Remove ' + p.name}><i className="fas fa-trash"></i></button>
+                            <button type="button" className="sp-mini-btn" onClick={() => openPersonSheet(p)} title={'Edit ' + p.name} aria-label={'Edit ' + p.name}><i className="fas fa-pen"></i></button>
+                            <button type="button" className="sp-mini-btn is-danger" onClick={() => setDeletePerson(p)} title={'Remove ' + p.name} aria-label={'Remove ' + p.name}><i className="fas fa-trash"></i></button>
                             <SpSwitch on={activeView.includes(p.name)} onToggle={() => handleToggleActiveViewPerson(p.name)} label={'Show ' + p.name} />
                         </div>
                     );
@@ -7852,7 +7881,7 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                             <div className="sp-goalmain">
                                 <div className="sp-schedtitle">
                                     <span style={{fontSize: '16px', fontWeight: 800}}>{goal.name}</span>
-                                    {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" onClick={() => setShowConflictDetail(cfOpen ? null : goal.id)}><i className="fas fa-code-compare"></i></button>}
+                                    {conflict && <button type="button" className={'sp-cfbtn' + (cfOpen ? ' is-open' : '')} title="Sync conflict · tap to compare" aria-label="Sync conflict · tap to compare" onClick={() => setShowConflictDetail(cfOpen ? null : goal.id)}><i className="fas fa-code-compare"></i></button>}
                                 </div>
                                 <div className="sp-goalamts">{fmt(goal.currentSaved, currency)} / {fmt(goal.targetAmount, currency)}</div>
                             </div>
@@ -7875,8 +7904,8 @@ function SavingsGoals({ defaultCurrency, activeView, onUpdate }) {
                             <input type="number" step="0.01" min="0.01" inputMode="decimal" placeholder={'Add funds (' + ValidationUtils.getCurrencySymbol(currency) + ')'}
                                 value={fundDrafts[goal.id] || ''} onChange={e => { const v = e.target.value; setFundDrafts(prev => ({ ...prev, [goal.id]: v })); if (fundError) setFundError(null); }} />
                             <button type="submit" className="sp-goaladd" style={{background: accent}}>Add</button>
-                            <button type="button" className="sp-subbtn" style={{width: '38px', height: '42px'}} onClick={() => handleEdit(goal)} title="Edit"><i className="fas fa-pen"></i></button>
-                            <button type="button" className="sp-subbtn" style={{width: '38px', height: '42px'}} onClick={() => setPendingDelete(pendingDelete === goal.id ? null : goal.id)} title="Delete"><i className="fas fa-trash"></i></button>
+                            <button type="button" className="sp-subbtn" style={{width: '38px', height: '42px'}} onClick={() => handleEdit(goal)} title="Edit" aria-label="Edit"><i className="fas fa-pen"></i></button>
+                            <button type="button" className="sp-subbtn" style={{width: '38px', height: '42px'}} onClick={() => setPendingDelete(pendingDelete === goal.id ? null : goal.id)} title="Delete" aria-label="Delete"><i className="fas fa-trash"></i></button>
                         </form>
                         {fundError && fundError.id === goal.id && <div className="sp-suberror">{fundError.msg}</div>}
                         {pendingDelete === goal.id && (
@@ -9033,7 +9062,7 @@ function RegistrationScreen({ onRegister, onLogin }) {
     const confirmTyped = formData.confirmPassword.length > 0;
     const confirmOk = confirmTyped && formData.password === formData.confirmPassword;
     const eyeBtn = (shown, toggle) => (
-        <button type="button" className="sp-field-eye" onClick={toggle} tabIndex={-1} title="Show or hide password"><i className={'fas fa-' + (shown ? 'eye-slash' : 'eye')}></i></button>
+        <button type="button" className="sp-field-eye" onClick={toggle} tabIndex={-1} title="Show or hide password" aria-label="Show or hide password"><i className={'fas fa-' + (shown ? 'eye-slash' : 'eye')}></i></button>
     );
     const socialButtons = (
         <div className="sp-social">
@@ -9588,7 +9617,7 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange, o
     const [loggingOut, setLoggingOut] = useState(false);
     useEffect(() => { if (pwSuccess) setPwOpen(false); }, [pwSuccess]);
     const eyeBtn = (shown, toggle) => (
-        <button type="button" className="sp-field-eye" onClick={toggle} tabIndex={-1} title="Show or hide password"><i className={'fas fa-' + (shown ? 'eye-slash' : 'eye')}></i></button>
+        <button type="button" className="sp-field-eye" onClick={toggle} tabIndex={-1} title="Show or hide password" aria-label="Show or hide password"><i className={'fas fa-' + (shown ? 'eye-slash' : 'eye')}></i></button>
     );
 
     // Rendered inside a bottom sheet opened from the header avatar (redesign Phase 0).
@@ -9597,7 +9626,7 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange, o
             <div className="sp-card-head">
                 <span className="sp-av" style={{width: '44px', height: '44px', fontSize: '17px', background: '#0f172a', color: '#fff', border: 'none'}}>{(user.displayName || '?').trim().charAt(0).toUpperCase()}</span>
                 <div className="sp-row-main"><div className="sp-sheet-title">{user.displayName}</div><div className="sp-row-sub">Signed in · primary user</div></div>
-                {onClose && <button type="button" className="sp-sheet-close" onClick={onClose} title="Close"><i className="fas fa-xmark"></i></button>}
+                {onClose && <button type="button" className="sp-sheet-close" onClick={onClose} title="Close" aria-label="Close"><i className="fas fa-xmark"></i></button>}
             </div>
             {nameSuccess && <div className="sp-alert sp-alert-ok"><i className="fas fa-circle-check"></i><span>{nameSuccess}</span></div>}
 
@@ -9618,7 +9647,7 @@ function ProfileScreen({ currentUser, onLogout, onUpdate, onDisplayNameChange, o
                 <div className="sp-rowcard">
                     <div className="sp-row">
                         <span className="sp-row-title">{user.displayName}</span>
-                        <button type="button" className="sp-row-btn" style={{marginLeft: 'auto'}} onClick={() => { setEditingName(true); setNewName(user.displayName || ''); }} title="Edit name"><i className="fas fa-pen"></i></button>
+                        <button type="button" className="sp-row-btn" style={{marginLeft: 'auto'}} onClick={() => { setEditingName(true); setNewName(user.displayName || ''); }} title="Edit name" aria-label="Edit name"><i className="fas fa-pen"></i></button>
                     </div>
                 </div>
             )}
@@ -9751,7 +9780,7 @@ function SpRepeatPanel({ repeat, setRepeat, currency, payOptions, tint = '#ede9f
                 <span>Ends (optional)</span>
                 <span style={{display: 'inline-flex', alignItems: 'center', gap: '6px'}}>
                     <input type="date" value={repeat.end} min={first} onChange={e => setRepeat(r => ({ ...r, end: e.target.value }))} />
-                    {repeat.end && <button type="button" className="sp-row-btn" onClick={() => setRepeat(r => ({ ...r, end: '' }))} title="Clear end date"><i className="fas fa-xmark"></i></button>}
+                    {repeat.end && <button type="button" className="sp-row-btn" onClick={() => setRepeat(r => ({ ...r, end: '' }))} title="Clear end date" aria-label="Clear end date"><i className="fas fa-xmark"></i></button>}
                 </span>
             </div>
             <div className="sp-infobox" style={{background: tint}}>
@@ -10954,7 +10983,7 @@ function Sheet({ onClose, title, sub, danger, showClose, children, footer }) {
                 {(title || showClose) && (
                     <div className="sp-sheet-head">
                         {title && <div className="sp-sheet-title">{title}</div>}
-                        {showClose && <button type="button" className="sp-sheet-close" onClick={onClose} title="Close"><i className="fas fa-xmark"></i></button>}
+                        {showClose && <button type="button" className="sp-sheet-close" onClick={onClose} title="Close" aria-label="Close"><i className="fas fa-xmark"></i></button>}
                     </div>
                 )}
                 {sub && <div className="sp-sheet-sub">{sub}</div>}
@@ -10990,7 +11019,7 @@ function SpToast({ tone = 'info', icon, title, text, action, onAction, onClose }
                 {text && <div className="sp-toast-text">{text}</div>}
             </div>
             {action && <button type="button" className="sp-toast-action" onClick={onAction}>{action}</button>}
-            {onClose && <button type="button" className="sp-toast-x" onClick={onClose} title="Dismiss"><i className="fas fa-xmark"></i></button>}
+            {onClose && <button type="button" className="sp-toast-x" onClick={onClose} title="Dismiss" aria-label="Dismiss"><i className="fas fa-xmark"></i></button>}
         </div>
     );
 }
@@ -11059,7 +11088,7 @@ function SyncSheet({ view, providerLabel, lastSyncTime, pendingSince, conflictGr
             <div className="sp-card-head">
                 <span className="sp-tile" style={{background: tint[0], color: tint[1]}}><i className={view.icon}></i></span>
                 <div className="sp-row-main"><div className="sp-card-head-title">{view.title}</div><div className="sp-card-head-sub">{providerLabel}</div></div>
-                <button type="button" className="sp-sheet-close" onClick={onClose} title="Close"><i className="fas fa-xmark"></i></button>
+                <button type="button" className="sp-sheet-close" onClick={onClose} title="Close" aria-label="Close"><i className="fas fa-xmark"></i></button>
             </div>
             <div className="sp-rowcard">
                 <div className="sp-row"><span className="sp-row-label">Last synced</span><span className="sp-row-value">{isCloud ? fmt(lastSyncTime) : 'Not synced'}</span></div>
@@ -12072,7 +12101,7 @@ function App() {
             </div>
             {!isPrimaryScreen && currentScreen !== 'add-expense' && (
                 <div className="sp-backbar">
-                    <button type="button" className="sp-backbtn" onClick={goBack} title="Back"><i className="fas fa-arrow-left"></i></button>
+                    <button type="button" className="sp-backbtn" onClick={goBack} title="Back" aria-label="Back"><i className="fas fa-arrow-left"></i></button>
                     <span className="sp-backbar-title">Back</span>
                 </div>
             )}

@@ -5,6 +5,9 @@ const nodemailer = require('nodemailer');
 
 const PORT = 5000;
 const ROOT = __dirname;
+const IS_DEPLOYMENT = !!process.env.REPLIT_DEPLOYMENT;
+// Internal tooling that must not be reachable in a deployment (lower-cased absolute paths).
+const DEV_ONLY_FILES = [path.join(ROOT, 'scripts', 'cloud-sync-test.html').toLowerCase()];
 
 const CONTACT_RATE_LIMIT_MAX = 5;
 const CONTACT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -235,7 +238,9 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  if (urlPath === '/scripts/cloud-sync-test.html') {
+  // OAuth diagnostic page is dev-only tooling. In a deployment it falls through to the
+  // static handler, which refuses it by resolved file path (see DEV_ONLY_FILES).
+  if (urlPath === '/scripts/cloud-sync-test.html' && !IS_DEPLOYMENT) {
     serveWithOauthConfig(path.join(ROOT, 'scripts', 'cloud-sync-test.html'), res);
     return;
   }
@@ -270,6 +275,14 @@ var server = http.createServer(function(req, res) {
   if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('Forbidden');
+    return;
+  }
+
+  // Checked on the resolved path so URL variants (//, ./, letter case on Windows) can't reach it.
+  // A leading '//' resolves as a UNC root on Windows and leaves a trailing separator, hence the strip.
+  if (IS_DEPLOYMENT && DEV_ONLY_FILES.indexOf(filePath.replace(/[\/\\]+$/, '').toLowerCase()) !== -1) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
     return;
   }
 
