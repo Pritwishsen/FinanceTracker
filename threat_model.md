@@ -18,14 +18,14 @@ Personal Finance App is a browser-first finance tracker served as a static HTML/
 - **Browser to third-party identity/storage providers** — Firebase Auth, Firestore, Google Drive, Microsoft Graph, and exchange-rate API calls cross external trust boundaries and rely on safe token handling.
 - **Browser to exported/imported files** — downloaded backups, uploaded backups, and CSV imports/exports cross from the app into external tools and back again.
 - **Static server to client** — `serve.js` injects runtime config into HTML and serves static assets. Since the live app is client-heavy, any compromise of shipped JS affects all secrets and user data handled in-browser.
-- **Production vs legacy/dev-only code** — `serve.js` does not expose the database CRUD classes under `server/`; treat `server/api.js`, `server/storage.js`, and `server/db.js` as out of production scope unless a live route or alternate runtime proves they are reachable.
+- **Production vs dev-only code** — the legacy `server/` Postgres backend and the old `src/` JS were removed in October 2026 (DEF-044). `scripts/cloud-sync-test.html` is dev-only; `serve.js` returns 404 for it when `REPLIT_DEPLOYMENT` is set.
 
 ## Scan Anchors
 
 - **Production entry points:** `serve.js`, `app-v3.html`, `index.html`, `start.sh`
 - **Highest-risk code areas:** auth and session logic in `app-v3.html` (`AuthUtils`, registration/login screens), cloud sync services (`GDriveService`, `OneDriveService`, `SyncService`), backup import/export helpers, and any browser-side file generation/parsing.
 - **Public vs authenticated surfaces:** static app shell is public; app data views are gated only by client-side auth state; cloud sync operations require OAuth tokens.
-- **Usually ignore unless reachability changes:** `server/api.js`, `server/storage.js`, `server/db.js`, `server/init-db.js`, `src/services/DataService.js` (older duplicate implementation), and workflow/test helpers.
+- **Usually ignore unless reachability changes:** workflow/test helpers.
 
 ## Threat Categories
 

@@ -1,6 +1,6 @@
 # FinanceTracker
 
-Real local repo path (this machine): `C:\Users\pritw\OneDrive\Documents\FinanceTracker\FinanceTracker`
+Real local repo path (this machine): `C:\Users\pritw\OneDrive\Projects\FinanceTracker\FinanceTracker`
 
 GitHub remote (source of truth): `https://github.com/Pritwishsen/FinanceTracker.git`, added as remote `github` — push with `git push github main`.
 

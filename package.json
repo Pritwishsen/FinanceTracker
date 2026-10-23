@@ -11,11 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@neondatabase/serverless": "^1.0.0",
-    "drizzle-kit": "^0.31.1",
-    "drizzle-orm": "^0.44.0",
     "nodemailer": "^6.10.1",
-    "pg": "^8.16.0",
     "serve": "^14.2.5"
   },
   "devDependencies": {
