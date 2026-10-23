@@ -11,8 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "nodemailer": "^6.10.1",
-    "serve": "^14.2.5"
+    "nodemailer": "^6.10.1"
   },
   "devDependencies": {
     "jest": "^30.0.0"

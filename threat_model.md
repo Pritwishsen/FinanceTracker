@@ -22,7 +22,7 @@ Personal Finance App is a browser-first finance tracker served as a static HTML/
 
 ## Scan Anchors
 
-- **Production entry points:** `serve.js`, `app-v3.html`, `index.html`, `start.sh`
+- **Production entry points:** `serve.js`, `app-v3.html`, `index.html`
 - **Highest-risk code areas:** auth and session logic in `app-v3.html` (`AuthUtils`, registration/login screens), cloud sync services (`GDriveService`, `OneDriveService`, `SyncService`), backup import/export helpers, and any browser-side file generation/parsing.
 - **Public vs authenticated surfaces:** static app shell is public; app data views are gated only by client-side auth state; cloud sync operations require OAuth tokens.
 - **Usually ignore unless reachability changes:** workflow/test helpers.
