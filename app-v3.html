@@ -5657,11 +5657,11 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
             <div className="sp-hero sp-sumhero">
                 <div className="sp-sumhero-top">
                     <div>
-                        <div className="sp-hero-label">{net >= 0 ? 'Net surplus' : 'Net deficit'}</div>
-                        <div className="sp-hero-value">{(net >= 0 ? '+' : '−') + fmt0(Math.abs(net))}</div>
+                        <div className="sp-hero-label">{catLocked ? 'Net saving' : net >= 0 ? 'Net surplus' : 'Net deficit'}</div>
+                        <div className="sp-hero-value">{catLocked ? 'N/A' : (net >= 0 ? '+' : '−') + fmt0(Math.abs(net))}</div>
                     </div>
                     <div className="sp-sumhero-io">
-                        <div style={{color: '#34d399'}}>▲ {fmt0(totalIncome)} in</div>
+                        <div style={{color: '#34d399'}}>▲ {catLocked ? 'N/A' : fmt0(totalIncome)} in</div>
                         <div style={{color: '#fb7185'}}>▼ {fmt0(totalExpenses)} out</div>
                     </div>
                 </div>
@@ -5671,7 +5671,7 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                             {(vsPct > 0 ? '▲ ' : vsPct < 0 ? '▼ ' : '') + Math.abs(vsPct) + '% spend ' + vsWord}
                         </span>
                     )}
-                    {(() => { const r = spNetRate(net, totalIncome, totalExpenses); return <span className={'sp-hero-pill' + (r.deficit ? ' is-red' : ' is-green')}>{r.text}</span>; })()}
+                    {!catLocked && (() => { const r = spNetRate(net, totalIncome, totalExpenses); return <span className={'sp-hero-pill' + (r.deficit ? ' is-red' : ' is-green')}>{r.text}</span>; })()}
                     <span className="sp-hero-pill">{fmt0(totalExpenses / periodDays)}/day avg</span>
                     <span className="sp-hero-pill">{periodBudget > 0 ? fmt0(totalExpenses) + ' of ' + fmt0(periodBudget) + ' budget' : 'No budget set'}</span>
                 </div>
@@ -5774,13 +5774,20 @@ function Summary({ expenses, income, categories, defaultCurrency, activeView, on
                                         <i className={'fas fa-chevron-' + (p.isOpen ? 'up' : 'down')}></i>
                                     </div>
                                     <div className="sp-pcard-grid">
-                                        <div><div className="sp-pcard-k">IN</div><div className="sp-pcard-v">{fmt0(p.inc)}</div></div>
+                                        <div><div className="sp-pcard-k">IN</div><div className="sp-pcard-v" style={catLocked ? {color: 'var(--sp-slate-400)'} : undefined}>{catLocked ? 'N/A' : fmt0(p.inc)}</div></div>
                                         <div><div className="sp-pcard-k">OUT</div><div className="sp-pcard-v" style={{color: SP_PERF_INK[p.outColor] || 'var(--sp-slate-600)'}}>{fmt0(p.ex)}</div></div>
-                                        <div>
-                                            <div className="sp-pcard-k">NET SAVING</div>
-                                            <div className="sp-pcard-v" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{(p.bNet >= 0 ? '+' : '−') + fmt0(Math.abs(p.bNet))}</div>
-                                            {(p.inc > 0 || p.bNet < 0) && <div className="sp-pcard-rate" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{spNetRate(p.bNet, p.inc, p.ex).text}</div>}
-                                        </div>
+                                        {catLocked ? (
+                                            <div>
+                                                <div className="sp-pcard-k">NET SAVING</div>
+                                                <div className="sp-pcard-v" style={{color: 'var(--sp-slate-400)'}}>N/A</div>
+                                            </div>
+                                        ) : (
+                                            <div>
+                                                <div className="sp-pcard-k">NET SAVING</div>
+                                                <div className="sp-pcard-v" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{(p.bNet >= 0 ? '+' : '−') + fmt0(Math.abs(p.bNet))}</div>
+                                                {(p.inc > 0 || p.bNet < 0) && <div className="sp-pcard-rate" style={{color: p.bNet >= 0 ? '#047857' : '#be123c'}}>{spNetRate(p.bNet, p.inc, p.ex).text}</div>}
+                                            </div>
+                                        )}
                                     </div>
                                     <div className="sp-pcard-budget">
                                         <div className="sp-bar"><div style={{width: Math.min(p.pct, 100) + '%', background: p.outColor}}></div></div>
